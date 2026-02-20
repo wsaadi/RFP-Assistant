@@ -54,9 +54,18 @@ async def process_document_background(document_id: str, project_id: str):
                 images_data = DocumentProcessor.extract_images_from_pdf(file_content, document_id)
 
             elif document.file_type == FileType.DOCX:
-                text, sections = DocumentProcessor.extract_text_from_docx(file_content)
-                document.page_count = max(1, len(text.split()) // 300)
-                images_data = DocumentProcessor.extract_images_from_docx(file_content, document_id)
+                try:
+                    text, sections = DocumentProcessor.extract_text_from_docx(file_content)
+                    document.page_count = max(1, len(text.split()) // 300)
+                    images_data = DocumentProcessor.extract_images_from_docx(file_content, document_id)
+                except (ValueError, Exception) as docx_err:
+                    # Fallback: try PyMuPDF for old .doc or malformed .docx
+                    print(f"DOCX parsing failed, trying PyMuPDF fallback: {docx_err}")
+                    try:
+                        text, page_count, pages_data = DocumentProcessor.extract_text_from_pdf(file_content)
+                        document.page_count = page_count
+                    except Exception:
+                        text = ""
 
             elif document.file_type in (FileType.XLSX, FileType.XLS):
                 text = DocumentProcessor.extract_text_from_excel(file_content)
