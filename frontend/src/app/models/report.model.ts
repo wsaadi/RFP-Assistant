@@ -100,6 +100,14 @@ export interface DocumentInfo {
   created_at: string;
 }
 
+export interface DocumentProgress {
+  document_id: string;
+  filename: string;
+  step: string;
+  step_label: string;
+  progress: number;
+}
+
 export interface DocumentImage {
   id: string;
   document_id: string;

@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router, RouterLink } from '@angular/router';
@@ -15,8 +15,10 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatExpansionModule } from '@angular/material/expansion';
+import { Subscription, interval } from 'rxjs';
+import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
-import { RFPProject, Chapter, DocumentInfo, ProjectStatistics } from '../../models/report.model';
+import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics } from '../../models/report.model';
 
 @Component({
   selector: 'app-project-dashboard',
@@ -92,15 +94,34 @@ import { RFPProject, Chapter, DocumentInfo, ProjectStatistics } from '../../mode
             <div *ngFor="let cat of categories" class="doc-category">
               <h4>{{ cat.label }}</h4>
               <mat-list>
-                <mat-list-item *ngFor="let doc of getDocsByCategory(cat.value)">
-                  <mat-icon matListItemIcon>{{ fileIcon(doc.file_type) }}</mat-icon>
-                  <span matListItemTitle>{{ doc.original_filename }}</span>
-                  <span matListItemLine>
-                    {{ formatSize(doc.file_size) }} - {{ doc.page_count }} pages - {{ doc.chunk_count }} chunks
-                    <mat-chip [class]="'proc-' + doc.processing_status" size="small">{{ doc.processing_status }}</mat-chip>
-                  </span>
-                  <button mat-icon-button matListItemMeta (click)="deleteDoc(doc.id)"><mat-icon>delete</mat-icon></button>
-                </mat-list-item>
+                <div *ngFor="let doc of getDocsByCategory(cat.value)" class="doc-item-wrap">
+                  <mat-list-item>
+                    <mat-icon matListItemIcon>{{ fileIcon(doc.file_type) }}</mat-icon>
+                    <span matListItemTitle>{{ doc.original_filename }}</span>
+                    <span matListItemLine>
+                      {{ formatSize(doc.file_size) }}
+                      <ng-container *ngIf="doc.processing_status === 'completed'">
+                        - {{ doc.page_count }} pages - {{ doc.chunk_count }} chunks
+                      </ng-container>
+                      <mat-chip [class]="'proc-' + doc.processing_status" size="small">
+                        {{ statusLabel(doc.processing_status) }}
+                      </mat-chip>
+                    </span>
+                    <button mat-icon-button matListItemMeta (click)="deleteDoc(doc.id)"><mat-icon>delete</mat-icon></button>
+                  </mat-list-item>
+                  <div *ngIf="getProgress(doc.id) as prog" class="doc-progress">
+                    <div class="progress-info">
+                      <mat-spinner *ngIf="prog.progress > 0" diameter="16"></mat-spinner>
+                      <span class="progress-label">{{ prog.step_label }}</span>
+                      <span class="progress-pct" *ngIf="prog.progress > 0">{{ prog.progress }}%</span>
+                    </div>
+                    <mat-progress-bar
+                      [mode]="prog.progress > 0 ? 'determinate' : 'indeterminate'"
+                      [value]="prog.progress"
+                      [color]="prog.progress < 0 ? 'warn' : 'primary'">
+                    </mat-progress-bar>
+                  </div>
+                </div>
               </mat-list>
             </div>
           </div>
@@ -271,20 +292,27 @@ import { RFPProject, Chapter, DocumentInfo, ProjectStatistics } from '../../mode
     .full-width { width: 100%; }
     .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
+    .doc-item-wrap { border-bottom: 1px solid #eee; }
+    .doc-progress { padding: 0 16px 12px 56px; }
+    .progress-info { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
+    .progress-label { font-size: 12px; color: #555; }
+    .progress-pct { font-size: 12px; color: #888; margin-left: auto; }
   `],
 })
-export class ProjectDashboardComponent implements OnInit {
+export class ProjectDashboardComponent implements OnInit, OnDestroy {
   projectId = '';
   project: RFPProject | null = null;
   chapters: Chapter[] = [];
   documents: DocumentInfo[] = [];
   stats: ProjectStatistics | null = null;
+  progressMap: Record<string, DocumentProgress> = {};
   loading = true;
   generatingStructure = false;
   prefilling = false;
   showImprovementForm = false;
   improvementContent = '';
   improvementSource = '';
+  private pollSub: Subscription | null = null;
 
   categories = [
     { value: 'old_rfp', label: 'Ancien AO', desc: 'Documents de l\'ancien appel d\'offres', icon: 'history', color: '#1976d2' },
@@ -304,6 +332,10 @@ export class ProjectDashboardComponent implements OnInit {
     this.loadAll();
   }
 
+  ngOnDestroy(): void {
+    this.stopPolling();
+  }
+
   loadAll(): void {
     this.loading = true;
     this.api.getProject(this.projectId).subscribe({
@@ -313,11 +345,55 @@ export class ProjectDashboardComponent implements OnInit {
       next: (ch) => this.chapters = ch,
     });
     this.api.getDocuments(this.projectId).subscribe({
-      next: (d) => this.documents = d,
+      next: (d) => {
+        this.documents = d;
+        const hasProcessing = d.some(doc => doc.processing_status === 'pending' || doc.processing_status === 'processing');
+        if (hasProcessing) {
+          this.startPolling();
+        } else {
+          this.stopPolling();
+          this.progressMap = {};
+        }
+      },
     });
     this.api.getStatistics(this.projectId).subscribe({
       next: (s) => this.stats = s,
     });
+  }
+
+  private startPolling(): void {
+    if (this.pollSub) return;
+    this.pollSub = interval(2000).pipe(
+      switchMap(() => this.api.getProcessingProgress(this.projectId))
+    ).subscribe({
+      next: (res) => {
+        const map: Record<string, DocumentProgress> = {};
+        for (const p of res.progress) {
+          map[p.document_id] = p;
+        }
+        this.progressMap = map;
+        if (res.progress.length === 0 || res.progress.every(p => p.step === 'completed' || p.step === 'failed')) {
+          this.stopPolling();
+          this.loadAll();
+        }
+      },
+    });
+  }
+
+  private stopPolling(): void {
+    this.pollSub?.unsubscribe();
+    this.pollSub = null;
+  }
+
+  getProgress(docId: string): DocumentProgress | null {
+    return this.progressMap[docId] || null;
+  }
+
+  statusLabel(status: string): string {
+    const labels: Record<string, string> = {
+      pending: 'En attente', processing: 'Traitement...', completed: 'Traité', failed: 'Échec',
+    };
+    return labels[status] || status;
   }
 
   getDocsByCategory(category: string): DocumentInfo[] {
