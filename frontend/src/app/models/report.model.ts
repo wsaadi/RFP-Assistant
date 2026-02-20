@@ -171,14 +171,16 @@ export interface ProjectStatistics {
   documents_count: number;
   images_count: number;
   completion_percentage: number;
+  chapters_by_status: Record<string, number>;
 }
 
 // ── AI Config ──
 export interface AIConfig {
+  mistral_api_key?: string;
   model_name: string;
   temperature: number;
   max_tokens: number;
-  has_api_key: boolean;
+  has_api_key?: boolean;
 }
 
 export interface AIConfigUpdate {

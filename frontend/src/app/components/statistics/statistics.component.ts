@@ -49,7 +49,7 @@ import { ProjectStatistics, AnonymizationMapping } from '../../models/report.mod
         <mat-card class="stat-card">
           <mat-icon class="stat-icon blue">menu_book</mat-icon>
           <div class="stat-info">
-            <span class="stat-value">{{ stats.estimated_pages }}</span>
+            <span class="stat-value">{{ stats.total_pages }}</span>
             <span class="stat-label">Pages estimées</span>
           </div>
         </mat-card>
@@ -69,7 +69,7 @@ import { ProjectStatistics, AnonymizationMapping } from '../../models/report.mod
             [color]="stats.completion_percentage >= 80 ? 'primary' : stats.completion_percentage >= 50 ? 'accent' : 'warn'">
           </mat-progress-bar>
           <div class="completion-details">
-            <span>{{ stats.chapters_completed }} / {{ stats.total_chapters }} chapitres complétés</span>
+            <span>{{ stats.chapters_completed }} / {{ stats.chapters_total }} chapitres complétés</span>
           </div>
         </mat-card>
 
@@ -157,9 +157,9 @@ export class StatisticsComponent implements OnInit {
   loadStats(): void {
     this.loading = true;
     this.error = '';
-    this.api.getProjectStatistics(this.projectId).subscribe({
-      next: (res) => { this.stats = res; this.loading = false; },
-      error: (err) => { this.error = err.error?.detail || 'Erreur'; this.loading = false; },
+    this.api.getStatistics(this.projectId).subscribe({
+      next: (res: ProjectStatistics) => { this.stats = res; this.loading = false; },
+      error: (err: any) => { this.error = err.error?.detail || 'Erreur'; this.loading = false; },
     });
   }
 
@@ -170,8 +170,8 @@ export class StatisticsComponent implements OnInit {
   }
 
   statusPercent(status: string): number {
-    if (!this.stats || !this.stats.total_chapters) return 0;
+    if (!this.stats || !this.stats.chapters_total) return 0;
     const count = this.stats.chapters_by_status?.[status] || 0;
-    return (count / this.stats.total_chapters) * 100;
+    return (count / this.stats.chapters_total) * 100;
   }
 }
