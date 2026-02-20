@@ -3,7 +3,7 @@
   "version": 1,
   "newProjectRoot": "projects",
   "projects": {
-    "utc-report-assistant": {
+    "rfp-assistant": {
       "projectType": "application",
       "schematics": {
         "@schematics/angular:component": {
@@ -24,7 +24,7 @@
         "build": {
           "builder": "@angular-devkit/build-angular:application",
           "options": {
-            "outputPath": "dist/utc-report-assistant",
+            "outputPath": "dist/rfp-assistant",
             "index": "src/index.html",
             "browser": "src/main.ts",
             "polyfills": ["zone.js"],
@@ -65,10 +65,10 @@
           "builder": "@angular-devkit/build-angular:dev-server",
           "configurations": {
             "production": {
-              "buildTarget": "utc-report-assistant:build:production"
+              "buildTarget": "rfp-assistant:build:production"
             },
             "development": {
-              "buildTarget": "utc-report-assistant:build:development"
+              "buildTarget": "rfp-assistant:build:development"
             }
           },
           "defaultConfiguration": "development"

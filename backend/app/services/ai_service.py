@@ -1,732 +1,317 @@
-"""AI service for interacting with OpenAI and Mistral APIs."""
+"""AI service for Mistral API integration."""
+import asyncio
+import json
 import re
-from typing import List, Optional
-from openai import AsyncOpenAI
-from mistralai.client import MistralClient
-from mistralai.models.chat_completion import ChatMessage
-from ..models.report import AIProviderConfig, SectionStatus
-from .utc_guidelines import UTC_GUIDELINES
+from typing import List, Optional, Dict
+
+from mistralai import Mistral
+
+from ..models.project import AIConfig
 
 
-def clean_markdown_from_text(text: str) -> str:
-    """Remove markdown formatting from generated text."""
-    if not text:
-        return text
+class MistralAIService:
+    """Service for AI-powered operations using Mistral API."""
 
-    # Remove bold markers ** and __
-    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)
-    text = re.sub(r'__([^_]+)__', r'\1', text)
+    def __init__(self, api_key: str, model: str = "mistral-large-latest",
+                 temperature: float = 0.3, max_tokens: int = 4096):
+        self.client = Mistral(api_key=api_key)
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
 
-    # Remove italic markers * and _
-    text = re.sub(r'\*([^*]+)\*', r'\1', text)
-    text = re.sub(r'(?<!\w)_([^_]+)_(?!\w)', r'\1', text)
+    @classmethod
+    def from_config(cls, config: AIConfig, decrypted_key: str) -> "MistralAIService":
+        return cls(
+            api_key=decrypted_key,
+            model=config.model_name,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
+        )
 
-    # Remove code markers `
-    text = re.sub(r'`([^`]+)`', r'\1', text)
-
-    # Remove code blocks ```
-    text = re.sub(r'```[a-z]*\n?(.*?)```', r'\1', text, flags=re.DOTALL)
-
-    # Remove heading markers #
-    text = re.sub(r'^#{1,6}\s+', '', text, flags=re.MULTILINE)
-
-    # Remove link syntax [text](url)
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
-
-    # Remove image syntax ![alt](url)
-    text = re.sub(r'!\[([^\]]*)\]\([^)]+\)', r'\1', text)
-
-    # Clean orphaned markdown symbols
-    text = re.sub(r'^\s*\*\*\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*__\s*$', '', text, flags=re.MULTILINE)
-    text = re.sub(r'^\s*\*\s*$', '', text, flags=re.MULTILINE)
-
-    # Remove excessive whitespace but preserve paragraph breaks
-    text = re.sub(r'\n{3,}', '\n\n', text)
-
-    return text.strip()
-
-
-class AIService:
-    """Service for AI-powered text generation."""
-
-    def __init__(self, config: AIProviderConfig):
-        """Initialize the AI service with the given configuration."""
-        self.provider = config.provider
-        self.api_key = config.api_key
-
-        if self.provider == "openai":
-            self.openai_client = AsyncOpenAI(api_key=self.api_key)
-        elif self.provider == "mistral":
-            self.mistral_client = MistralClient(api_key=self.api_key)
-        else:
-            raise ValueError(f"Unknown AI provider: {self.provider}")
-
-    async def _generate_openai(
-        self, system_prompt: str, user_prompt: str, temperature: float = 0.7
+    async def generate(
+        self, system_prompt: str, user_prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
-        """Generate text using OpenAI API."""
-        response = await self.openai_client.chat.completions.create(
-            model="gpt-4o",
+        """Generate text using Mistral API."""
+        response = await asyncio.to_thread(
+            self.client.chat.complete,
+            model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
-            temperature=temperature,
-            max_tokens=4000,
+            temperature=temperature or self.temperature,
+            max_tokens=max_tokens or self.max_tokens,
         )
         return response.choices[0].message.content or ""
 
-    def _generate_mistral(
-        self, system_prompt: str, user_prompt: str, temperature: float = 0.7
-    ) -> str:
-        """Generate text using Mistral API."""
-        messages = [
-            ChatMessage(role="system", content=system_prompt),
-            ChatMessage(role="user", content=user_prompt),
-        ]
-        response = self.mistral_client.chat(
-            model="mistral-large-latest",
-            messages=messages,
-            temperature=temperature,
-            max_tokens=4000,
+    async def test_connection(self) -> str:
+        """Test the API connection."""
+        return await self.generate(
+            "Tu es un assistant utile.",
+            "Réponds simplement 'Connexion Mistral réussie'.",
+            temperature=0.1,
         )
-        return response.choices[0].message.content or ""
 
-    async def generate(
-        self, system_prompt: str, user_prompt: str, temperature: float = 0.7
-    ) -> str:
-        """Generate text using the configured AI provider."""
-        if self.provider == "openai":
-            return await self._generate_openai(system_prompt, user_prompt, temperature)
-        else:
-            return self._generate_mistral(system_prompt, user_prompt, temperature)
+    async def analyze_gap(
+        self, old_rfp_content: str, new_rfp_content: str
+    ) -> Dict:
+        """Analyze differences between old and new RFP."""
+        system_prompt = """Tu es un expert en analyse d'appels d'offres.
+Tu dois comparer un ancien appel d'offres avec un nouveau pour identifier les écarts.
 
-    async def generate_section_content(
-        self,
-        section_title: str,
-        section_description: str,
-        notes: str,
-        company_context: str,
-    ) -> str:
-        """Generate content for a report section based on notes."""
-        system_prompt = f"""Tu es un assistant spécialisé dans la rédaction de rapports de stage universitaires.
-Tu dois aider une étudiante de l'UTC (Université de Technologie de Compiègne) à rédiger son rapport de stage TN05.
+Analyse minutieusement les deux documents et identifie:
+1. Les exigences nouvelles dans le nouvel AO
+2. Les exigences supprimées de l'ancien AO
+3. Les exigences modifiées
+4. Les exigences inchangées
 
-{UTC_GUIDELINES}
+Réponds EXACTEMENT au format JSON suivant (sans markdown):
+{
+  "new_requirements": [{"title": "...", "description": "...", "priority": "high|medium|low"}],
+  "removed_requirements": [{"title": "...", "description": "..."}],
+  "modified_requirements": [{"title": "...", "old_description": "...", "new_description": "...", "impact": "..."}],
+  "unchanged_requirements": [{"title": "...", "description": "..."}],
+  "summary": "..."
+}"""
 
-Règles de rédaction :
-- Utilise un style professionnel et académique
-- Les phrases doivent être courtes, précises et riches en informations
-- L'orthographe et la grammaire doivent être irréprochables
-- Le niveau de langage doit être adapté à un rapport professionnel
-- Évite le langage familier
-- Mets en valeur les missions effectuées
-- Sois cohérent avec le niveau d'une étudiante universitaire
+        user_prompt = f"""ANCIEN APPEL D'OFFRES:
+{old_rfp_content[:15000]}
 
-IMPORTANT - Règles de formatage :
-- N'utilise JAMAIS de formatage Markdown (pas de **, *, #, -, ```, etc.)
-- Écris en texte brut uniquement
-- Pour structurer le texte, utilise des paragraphes séparés par des lignes vides
-- Pour les énumérations, écris simplement les éléments sur des lignes séparées sans puces ni tirets
-- Le texte sera formaté automatiquement dans le document Word final"""
+NOUVEL APPEL D'OFFRES:
+{new_rfp_content[:15000]}
 
-        user_prompt = f"""Génère le contenu pour la section suivante du rapport de stage :
+Analyse les écarts entre ces deux appels d'offres."""
 
-Section : {section_title}
-Description attendue : {section_description}
+        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000)
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+        return {"summary": response, "new_requirements": [], "removed_requirements": [],
+                "modified_requirements": [], "unchanged_requirements": []}
 
-Contexte de l'entreprise :
-{company_context}
+    async def generate_response_structure(
+        self, rfp_content: str, old_response_structure: str = ""
+    ) -> List[Dict]:
+        """Generate the complete response structure from the RFP requirements."""
+        system_prompt = """Tu es un expert en réponse aux appels d'offres.
+À partir du contenu d'un appel d'offres, génère la structure complète de la réponse.
 
-Notes de l'étudiante :
-{notes}
+La structure doit inclure:
+- Chapitres principaux
+- Sous-chapitres
+- Annexes requises
+- Documents à fournir
 
-Rédige un texte professionnel et structuré pour cette section, en utilisant les notes fournies.
-Le texte doit être prêt à être intégré dans le rapport final.
+Réponds au format JSON (sans markdown):
+[
+  {
+    "title": "...",
+    "description": "...",
+    "chapter_type": "chapter|sub_chapter|annexe|document_to_provide",
+    "rfp_requirement": "exigence originale de l'AO",
+    "children": [
+      {
+        "title": "...",
+        "description": "...",
+        "chapter_type": "sub_chapter",
+        "rfp_requirement": "...",
+        "children": []
+      }
+    ]
+  }
+]"""
 
-RAPPEL : N'utilise aucun formatage Markdown. Écris en texte brut uniquement."""
+        context = ""
+        if old_response_structure:
+            context = f"\n\nSTRUCTURE DE L'ANCIENNE RÉPONSE (pour référence):\n{old_response_structure}"
 
-        result = await self.generate(system_prompt, user_prompt, temperature=0.6)
-        return clean_markdown_from_text(result)
-
-    async def generate_questions(
-        self,
-        section_title: str,
-        section_description: str,
-        current_notes: str = "",
-        current_content: str = "",
-        school_instructions: str = "",
-    ) -> List[str]:
-        """Generate questions to ask during the internship for a section."""
-        system_prompt = f"""Tu es un assistant spécialisé dans l'accompagnement des étudiants en stage.
-Tu dois aider une étudiante de l'UTC à préparer les questions à poser pendant son stage pour enrichir son rapport.
-
-{UTC_GUIDELINES}
-
-Ton rôle est de suggérer des questions pertinentes et professionnelles que l'étudiante peut poser
-à son tuteur, ses collègues ou observer pendant son stage.
-
-RÈGLES IMPORTANTES :
-- N'utilise JAMAIS de formatage markdown (pas de **, *, #, -, etc.)
-- Écris en texte brut uniquement
-- Chaque question doit être unique et différente des autres
-- Évite toute redondance ou répétition d'idées"""
-
-        context_parts = []
-
-        if current_notes:
-            context_parts.append(f"""Notes actuelles de l'étudiante :
-{current_notes}
-
-Évite les questions dont les réponses sont déjà dans les notes.""")
-
-        if current_content:
-            context_parts.append(f"""Contenu déjà rédigé :
-{current_content}
-
-Évite les questions sur des sujets déjà traités dans le contenu.""")
-
-        if school_instructions:
-            context_parts.append(f"""Instructions de l'école pour le rapport :
-{school_instructions}
-
-Assure-toi que les questions aident à répondre aux exigences de l'école.""")
-
-        context = "\n\n".join(context_parts) if context_parts else ""
-
-        user_prompt = f"""Génère une liste de 5 à 7 questions pertinentes et UNIQUES à poser pendant le stage pour la section suivante :
-
-Section : {section_title}
-Description : {section_description}
-
+        user_prompt = f"""APPEL D'OFFRES:
+{rfp_content[:15000]}
 {context}
 
-Les questions doivent :
-- Être professionnelles et adaptées au contexte d'un stage
-- Permettre de récolter des informations utiles pour le rapport
-- Être ouvertes pour encourager des réponses détaillées
-- Couvrir différents aspects de la section
-- Être TOUTES DIFFÉRENTES les unes des autres (pas de doublons ni de variations mineures)
+Génère la structure complète de la réponse à cet appel d'offres."""
 
-IMPORTANT : Retourne UNIQUEMENT les questions, une par ligne, sans numérotation, sans tirets, sans formatage."""
+        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000)
+        try:
+            json_match = re.search(r'\[[\s\S]*\]', response)
+            if json_match:
+                return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+        return []
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.7)
-        questions = [q.strip() for q in response.strip().split("\n") if q.strip()]
-        # Remove duplicates while preserving order and clean formatting
-        seen = set()
-        unique_questions = []
-        for q in questions:
-            q_clean = q.lstrip("- •0123456789.)").strip()
-            q_lower = q_clean.lower()
-            if len(q_clean) > 10 and q_lower not in seen:
-                seen.add(q_lower)
-                unique_questions.append(q_clean)
-        return unique_questions[:7]
-
-    async def generate_recommendations(
+    async def generate_chapter_content(
         self,
-        section_title: str,
-        section_description: str,
-        status: SectionStatus,
-        current_notes: str = "",
-        current_content: str = "",
-        school_instructions: str = "",
-    ) -> List[str]:
-        """Generate recommendations for improving a section."""
-        system_prompt = f"""Tu es un assistant pédagogique spécialisé dans l'accompagnement des étudiants en stage.
-Tu dois aider une étudiante de l'UTC à améliorer son rapport de stage TN05.
+        chapter_title: str,
+        chapter_description: str,
+        rfp_requirement: str,
+        old_response_content: str = "",
+        context_chunks: str = "",
+        improvement_axes: str = "",
+        notes: str = "",
+    ) -> str:
+        """Generate or enrich content for a chapter."""
+        system_prompt = """Tu es un rédacteur expert en réponses aux appels d'offres.
+Tu dois rédiger un contenu professionnel, précis et convaincant pour un chapitre de réponse.
 
-{UTC_GUIDELINES}
+Règles:
+- Style professionnel et persuasif
+- Répondre précisément aux exigences de l'appel d'offres
+- Mettre en valeur les compétences et l'expérience
+- Être factuel et concret
+- Ne pas utiliser de formatage Markdown
+- Écrire en texte brut structuré en paragraphes"""
 
-Ton rôle est de donner des conseils constructifs et encourageants pour améliorer chaque section du rapport.
-
-RÈGLES DE FORMATAGE STRICTES :
-- N'utilise JAMAIS de formatage markdown (pas de **, *, #, -, etc.)
-- Écris en texte brut uniquement, sans aucune mise en forme
-- Chaque conseil doit être une phrase complète et claire
-- Pas de listes à puces, pas de numérotation visible
-- Chaque conseil doit être UNIQUE et apporter une valeur différente
-- Évite les répétitions et les formulations similaires"""
-
-        status_context = {
-            SectionStatus.NOT_STARTED: "L'étudiante n'a pas encore commencé cette section.",
-            SectionStatus.IN_PROGRESS: "L'étudiante travaille actuellement sur cette section.",
-            SectionStatus.COMPLETED: "L'étudiante pense avoir terminé cette section.",
-            SectionStatus.NEEDS_REVIEW: "Cette section nécessite une relecture.",
-        }
-
-        content_info = ""
-        if current_notes:
-            content_info += f"\nNotes actuelles :\n{current_notes}\n"
-        if current_content:
-            content_info += f"\nContenu rédigé :\n{current_content}\n"
-
-        instructions_context = ""
-        if school_instructions:
-            instructions_context = f"""
-Instructions officielles de l'école :
-{school_instructions}
-
-Adapte tes conseils pour aider l'étudiante à respecter ces instructions."""
-
-        user_prompt = f"""Donne des conseils personnalisés et UNIQUES pour la section suivante :
-
-Section : {section_title}
-Description attendue : {section_description}
-Statut : {status_context.get(status, "Statut inconnu")}
-{content_info}
-{instructions_context}
-
-Fournis exactement 4 conseils qui sont :
-- Adaptés au statut actuel et au contenu existant de la section
-- Constructifs, encourageants et bienveillants
-- Concrets, actionnables et spécifiques à cette section
-- En lien avec les exigences UTC et les instructions de l'école
-- TOUS DIFFÉRENTS les uns des autres (chaque conseil aborde un aspect différent)
-
-IMPORTANT :
-- Écris UNIQUEMENT les conseils, un par ligne
-- Pas de numérotation, pas de tirets, pas de formatage
-- Pas de titres en gras, pas d'astérisques
-- Chaque ligne = un conseil complet et différent des autres"""
-
-        response = await self.generate(system_prompt, user_prompt, temperature=0.7)
-        recommendations = [r.strip() for r in response.strip().split("\n") if r.strip()]
-
-        # Remove duplicates and clean formatting
-        seen = set()
-        unique_recs = []
-        for r in recommendations:
-            r_clean = r.lstrip("- •0123456789.)").strip()
-            # Remove any remaining markdown
-            r_clean = clean_markdown_from_text(r_clean)
-            r_lower = r_clean.lower()
-            if len(r_clean) > 15 and r_lower not in seen:
-                seen.add(r_lower)
-                unique_recs.append(r_clean)
-        return unique_recs[:5]
-
-    async def improve_text(self, text: str, section_context: str, notes: str = "") -> str:
-        """Improve and proofread a text, incorporating notes if provided."""
-        notes_instruction = ""
+        parts = [f"Chapitre: {chapter_title}"]
+        if chapter_description:
+            parts.append(f"Description: {chapter_description}")
+        if rfp_requirement:
+            parts.append(f"Exigence de l'AO: {rfp_requirement}")
+        if old_response_content:
+            parts.append(f"Contenu de l'ancienne réponse (à adapter et améliorer):\n{old_response_content[:5000]}")
+        if context_chunks:
+            parts.append(f"Éléments de contexte pertinents:\n{context_chunks[:3000]}")
+        if improvement_axes:
+            parts.append(f"Axes d'amélioration indiqués par le client:\n{improvement_axes}")
         if notes:
-            notes_instruction = """
-- INTÉGRANT UNIQUEMENT les informations des notes qui ne sont PAS DÉJÀ présentes dans le texte
-- NE JAMAIS répéter ou dupliquer des informations déjà présentes dans le texte actuel
-- Enrichissant le contenu avec SEULEMENT les détails nouveaux et pertinents des notes"""
+            parts.append(f"Notes additionnelles:\n{notes}")
 
-        system_prompt = f"""Tu es un rédacteur et correcteur professionnel spécialisé dans les rapports académiques universitaires.
-Tu dois améliorer le texte fourni en :
-- Corrigeant toutes les fautes d'orthographe et de grammaire
-- REFORMULANT de manière plus élégante et professionnelle
-- Améliorant le style, la fluidité et la clarté
-- Utilisant un vocabulaire riche et précis, adapté au contexte académique
-- Structurant mieux les idées et les paragraphes
-- Rendant le texte plus sophistiqué tout en restant accessible{notes_instruction}
-- Conservant le sens et les informations originales
+        user_prompt = "\n\n".join(parts)
+        user_prompt += "\n\nRédige le contenu complet pour ce chapitre."
 
-Le texte final doit être :
-- Élégant et bien écrit
-- Professionnel et académique
-- Fluide et agréable à lire
-- Cohérent et bien structuré
+        return await self.generate(system_prompt, user_prompt, temperature=0.4, max_tokens=6000)
 
-RÈGLE CRITIQUE ANTI-DUPLICATION :
-- Le texte actuel contient peut-être DÉJÀ des informations issues de notes précédentes.
-- Tu ne dois JAMAIS doubler ou répéter une information déjà présente dans le texte.
-- Si une note contient une information déjà dans le texte, IGNORE cette note.
-- Le texte résultant doit avoir une longueur similaire au texte original, sauf si de NOUVELLES informations des notes doivent être ajoutées.
-
-IMPORTANT : N'utilise JAMAIS de formatage Markdown (pas de **, *, #, -, ```, etc.).
-Retourne uniquement du texte brut sans aucune marque de formatage."""
-
-        notes_section = ""
-        if notes:
-            notes_section = f"""
-
-Notes de l'étudiante (ATTENTION : certaines de ces notes ont peut-être DÉJÀ été intégrées dans le texte actuel lors d'une amélioration précédente. N'intègre QUE les informations qui ne sont PAS ENCORE dans le texte) :
-{notes}
-"""
-
-        user_prompt = f"""Améliore et reformule de manière plus élégante et professionnelle le texte suivant pour la section "{section_context}" d'un rapport de stage :{notes_section}
-
-Texte actuel à améliorer :
-{text}
-
-RAPPEL IMPORTANT : Ne duplique AUCUNE information déjà présente dans le texte. Si les notes contiennent des infos déjà dans le texte, ne les ajoute pas une seconde fois.
-Retourne uniquement le texte amélioré et reformulé, sans explications et sans aucun formatage Markdown."""
-
-        result = await self.generate(system_prompt, user_prompt, temperature=0.4)
-        return clean_markdown_from_text(result)
-
-    async def generate_notes_from_prompt(
+    async def enrich_content(
         self,
-        section_title: str,
-        section_description: str,
-        user_prompt: str,
-        existing_notes: str = "",
-    ) -> List[str]:
-        """Generate notes based on user prompt for a section."""
-        system_prompt = f"""Tu es un assistant spécialisé dans l'accompagnement des étudiants en stage.
-Tu aides une étudiante de l'UTC à prendre des notes pour son rapport de stage TN05.
+        content: str,
+        chapter_title: str,
+        rfp_requirement: str = "",
+        improvement_axes: str = "",
+    ) -> str:
+        """Enrich existing chapter content."""
+        system_prompt = """Tu es un rédacteur expert en réponses aux appels d'offres.
+Tu dois enrichir et améliorer le contenu existant d'un chapitre.
 
-{UTC_GUIDELINES}
+Règles:
+- Conserver les informations existantes
+- Ajouter des détails, exemples et arguments supplémentaires
+- Améliorer le style et la clarté
+- Rendre le contenu plus convaincant
+- Ne pas utiliser de formatage Markdown
+- Retourner uniquement le texte enrichi"""
 
-Ton rôle est de générer des notes pertinentes et structurées basées sur la demande de l'utilisateur.
-Les notes doivent être :
-- Concises mais informatives
-- Factuelles et précises
-- Utiles pour la rédaction du rapport
-- Adaptées au contexte professionnel d'un stage"""
+        user_prompt = f"""Chapitre: {chapter_title}
+Exigence AO: {rfp_requirement}
+Axes d'amélioration: {improvement_axes}
 
-        existing_context = ""
-        if existing_notes:
-            existing_context = f"""
-Notes existantes :
-{existing_notes}
+Contenu actuel à enrichir:
+{content}
 
-Évite de répéter les informations déjà présentes dans les notes existantes."""
+Enrichis et améliore ce contenu."""
 
-        prompt = f"""Génère des notes pour la section suivante du rapport de stage :
-
-Section : {section_title}
-Description : {section_description}
-{existing_context}
-
-Demande de l'utilisateur : {user_prompt}
-
-Génère 3 à 5 notes distinctes et pertinentes basées sur cette demande.
-Chaque note doit être sur une ligne séparée, sans numérotation ni puces."""
-
-        response = await self.generate(system_prompt, prompt, temperature=0.7)
-        notes = [n.strip() for n in response.strip().split("\n") if n.strip()]
-        return [n.lstrip("- •0123456789.").strip() for n in notes if len(n) > 10]
+        return await self.generate(system_prompt, user_prompt, temperature=0.4)
 
     async def analyze_compliance(
-        self,
-        report_content: str,
-        instructions_content: str,
-    ) -> dict:
-        """Analyze if the report complies with the given instructions."""
-        system_prompt = """Tu es un expert en évaluation de rapports de stage universitaires.
-Tu dois analyser si un rapport de stage respecte les instructions données.
+        self, response_content: str, rfp_requirements: str
+    ) -> Dict:
+        """Analyze exhaustiveness and compliance of the response."""
+        system_prompt = """Tu es un expert en évaluation de réponses aux appels d'offres.
+Analyse si la réponse couvre toutes les exigences de l'appel d'offres.
 
-Ton analyse doit être :
-- Précise et factuelle
-- Constructive
-- Structurée
+Réponds au format JSON (sans markdown):
+{
+  "score": 0-100,
+  "covered_requirements": [{"requirement": "...", "coverage": "complete|partial|missing", "comment": "..."}],
+  "missing_elements": [{"requirement": "...", "description": "ce qui manque"}],
+  "recommendations": ["..."],
+  "summary": "..."
+}"""
 
-Tu dois identifier :
-1. Les points conformes aux instructions
-2. Les points non conformes ou manquants
-3. Des recommandations d'amélioration
+        user_prompt = f"""EXIGENCES DE L'APPEL D'OFFRES:
+{rfp_requirements[:10000]}
 
-IMPORTANT : Tu dois IMPÉRATIVEMENT suivre le format de réponse exact demandé."""
+CONTENU DE LA RÉPONSE:
+{response_content[:10000]}
 
-        user_prompt = f"""Analyse la conformité du rapport de stage suivant par rapport aux instructions fournies.
+Analyse l'exhaustivité et la conformité de cette réponse."""
 
-INSTRUCTIONS DU STAGE :
-{instructions_content}
+        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=6000)
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+        return {"score": 0, "summary": response, "covered_requirements": [],
+                "missing_elements": [], "recommendations": []}
 
-CONTENU DU RAPPORT :
-{report_content}
+    async def describe_image(self, image_context: str, surrounding_text: str) -> Dict:
+        """Generate description and tags for an extracted image."""
+        system_prompt = """Tu es un assistant qui analyse des images dans des documents d'appels d'offres.
+À partir du contexte, génère une description et des tags pour cette image.
 
-Fournis une analyse structurée avec :
-1. Un score de conformité global (en pourcentage)
-2. Les points conformes (liste)
-3. Les points non conformes ou manquants (liste)
-4. Les recommandations d'amélioration (liste)
+Réponds au format JSON (sans markdown):
+{
+  "description": "Description détaillée de l'image probable",
+  "tags": ["tag1", "tag2"],
+  "suggested_chapters": ["chapitres où cette image serait pertinente"]
+}"""
 
-IMPORTANT : Format ta réponse EXACTEMENT ainsi (respecte les mots-clés en majuscules) :
-SCORE: [nombre entre 0 et 100]
-CONFORMES:
-- [point conforme 1]
-- [point conforme 2]
-NON_CONFORMES:
-- [point non conforme 1]
-- [point non conforme 2]
-RECOMMANDATIONS:
-- [recommandation 1]
-- [recommandation 2]
+        user_prompt = f"""Contexte de l'image (texte environnant dans le document):
+{surrounding_text[:2000]}
 
-N'ajoute AUCUN texte avant "SCORE:" et respecte exactement ce format."""
+Informations additionnelles: {image_context}
+
+Décris cette image et suggère des tags et chapitres pertinents."""
 
         response = await self.generate(system_prompt, user_prompt, temperature=0.3)
+        try:
+            json_match = re.search(r'\{[\s\S]*\}', response)
+            if json_match:
+                return json.loads(json_match.group())
+        except json.JSONDecodeError:
+            pass
+        return {"description": "", "tags": [], "suggested_chapters": []}
 
-        # Log the raw response for debugging
-        print("=== AI COMPLIANCE RESPONSE ===")
-        print(response)
-        print("=== END RESPONSE ===")
+    async def execute_custom_prompt(self, content: str, prompt: str, context: str = "") -> str:
+        """Execute a custom user prompt on content."""
+        system_prompt = """Tu es un assistant expert en rédaction de réponses aux appels d'offres.
+Applique exactement l'instruction de l'utilisateur au contenu fourni.
+N'utilise pas de formatage Markdown. Retourne uniquement le texte modifié."""
 
-        # Parse the response with more robust parsing
-        result = {
-            "score": 0,
-            "conformes": [],
-            "non_conformes": [],
-            "recommandations": []
-        }
+        user_prompt = f"""Contexte: {context}
 
-        current_section = None
-        for line in response.split("\n"):
-            line = line.strip()
+Instruction: {prompt}
 
-            # Handle SCORE line with more flexibility
-            if line.upper().startswith("SCORE"):
-                try:
-                    # Extract number from line (handles "SCORE: 75", "Score : 75%", etc.)
-                    import re
-                    match = re.search(r'(\d+(?:\.\d+)?)', line)
-                    if match:
-                        score_value = float(match.group(1))
-                        result["score"] = int(score_value)
-                        print(f"Parsed score: {result['score']}")
-                    else:
-                        print(f"Could not extract score from line: {line}")
-                        result["score"] = 0
-                except Exception as e:
-                    print(f"Error parsing score: {e}, line: {line}")
-                    result["score"] = 0
-
-            # Handle section headers with case-insensitive matching
-            elif "CONFORME" in line.upper() and line.upper().endswith(":"):
-                current_section = "conformes"
-                print(f"Switched to section: conformes")
-            elif "NON" in line.upper() and "CONFORME" in line.upper() and line.upper().endswith(":"):
-                current_section = "non_conformes"
-                print(f"Switched to section: non_conformes")
-            elif "RECOMMANDATION" in line.upper() and line.upper().endswith(":"):
-                current_section = "recommandations"
-                print(f"Switched to section: recommandations")
-
-            # Handle bullet points
-            elif line.startswith("- ") and current_section:
-                item = line[2:].strip()
-                if item:  # Only add non-empty items
-                    result[current_section].append(item)
-                    print(f"Added to {current_section}: {item[:50]}...")
-            elif line.startswith("• ") and current_section:
-                item = line[2:].strip()
-                if item:
-                    result[current_section].append(item)
-                    print(f"Added to {current_section}: {item[:50]}...")
-
-        # Log final result
-        print(f"Final parsed result - Score: {result['score']}, Conformes: {len(result['conformes'])}, Non-conformes: {len(result['non_conformes'])}, Recommandations: {len(result['recommandations'])}")
-
-        return result
-
-    async def review_grammar_and_spelling(
-        self,
-        report_content: str,
-    ) -> dict:
-        """Review the entire report for grammar, spelling, and conjugation errors."""
-        system_prompt = """Tu es un correcteur professionnel spécialisé dans les rapports académiques français.
-Tu dois analyser le texte fourni et identifier TOUTES les erreurs :
-- Orthographe
-- Grammaire
-- Conjugaison
-- Ponctuation
-- Syntaxe
-- Style académique
-
-Pour chaque erreur trouvée, tu dois fournir :
-1. Le texte erroné exact (tel qu'il apparaît dans le document)
-2. La correction proposée
-3. Une brève explication de l'erreur
-
-Sois très précis et méticuleux. N'ignore aucune erreur, même mineure."""
-
-        user_prompt = f"""Analyse le rapport de stage suivant et identifie TOUTES les erreurs d'orthographe, de grammaire et de conjugaison :
-
-{report_content}
-
-IMPORTANT : Format ta réponse EXACTEMENT ainsi :
-
-NOMBRE_ERREURS: [nombre total d'erreurs trouvées]
-
-ERREURS:
-[Pour chaque erreur, utilise ce format exact:]
----
-TEXTE_ERRONE: [le texte exact contenant l'erreur]
-CORRECTION: [le texte corrigé]
-EXPLICATION: [explication brève de l'erreur]
----
-
-Si aucune erreur n'est trouvée, réponds uniquement :
-NOMBRE_ERREURS: 0
-ERREURS:
-Aucune erreur détectée. Le texte est bien rédigé sur le plan orthographique, grammatical et de conjugaison.
-
-N'ajoute AUCUN texte avant "NOMBRE_ERREURS:" et respecte exactement ce format."""
-
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2)
-
-        # Log the raw response for debugging
-        print("=== AI GRAMMAR REVIEW RESPONSE ===")
-        print(response)
-        print("=== END RESPONSE ===")
-
-        # Parse the response
-        result = {
-            "nombre_erreurs": 0,
-            "erreurs": [],
-            "message": ""
-        }
-
-        lines = response.strip().split("\n")
-        i = 0
-
-        # Parse number of errors
-        while i < len(lines):
-            line = lines[i].strip()
-            if line.upper().startswith("NOMBRE_ERREURS"):
-                try:
-                    import re
-                    match = re.search(r'(\d+)', line)
-                    if match:
-                        result["nombre_erreurs"] = int(match.group(1))
-                        print(f"Parsed nombre_erreurs: {result['nombre_erreurs']}")
-                except Exception as e:
-                    print(f"Error parsing nombre_erreurs: {e}")
-                i += 1
-                break
-            i += 1
-
-        # Parse errors
-        current_error = {}
-        in_errors_section = False
-
-        while i < len(lines):
-            line = lines[i].strip()
-
-            if line.upper().startswith("ERREURS:"):
-                in_errors_section = True
-                i += 1
-                continue
-
-            if not in_errors_section:
-                i += 1
-                continue
-
-            if line == "---":
-                if current_error and all(k in current_error for k in ["texte_errone", "correction", "explication"]):
-                    result["erreurs"].append(current_error)
-                    print(f"Added error: {current_error['texte_errone'][:50]}...")
-                current_error = {}
-                i += 1
-                continue
-
-            if line.upper().startswith("TEXTE_ERRONE:"):
-                current_error["texte_errone"] = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("CORRECTION:"):
-                current_error["correction"] = line.split(":", 1)[1].strip()
-            elif line.upper().startswith("EXPLICATION:"):
-                current_error["explication"] = line.split(":", 1)[1].strip()
-            elif in_errors_section and not line.startswith("---") and line:
-                # If no errors found, this might be the message
-                if result["nombre_erreurs"] == 0:
-                    result["message"] = line
-
-            i += 1
-
-        # Add last error if exists
-        if current_error and all(k in current_error for k in ["texte_errone", "correction", "explication"]):
-            result["erreurs"].append(current_error)
-
-        # If no errors found, set a positive message
-        if result["nombre_erreurs"] == 0 and not result["message"]:
-            result["message"] = "Aucune erreur détectée. Le texte est bien rédigé sur le plan orthographique, grammatical et de conjugaison."
-
-        print(f"Final parsed result - Nombre d'erreurs: {result['nombre_erreurs']}, Erreurs trouvées: {len(result['erreurs'])}")
-
-        return result
-
-    async def execute_custom_prompt(
-        self,
-        content: str,
-        user_prompt: str,
-        section_title: str,
-    ) -> str:
-        """Execute a custom user prompt on the content."""
-        system_prompt = """Tu es un assistant spécialisé dans la rédaction de rapports de stage universitaires.
-Tu dois modifier le texte fourni selon les instructions de l'utilisateur.
-
-RÈGLES IMPORTANTES :
-- Applique EXACTEMENT ce que l'utilisateur demande
-- Conserve le sens général et les informations importantes du texte original
-- Maintiens un style professionnel et académique
-- N'utilise JAMAIS de formatage Markdown (pas de **, *, #, -, ```, etc.)
-- Écris en texte brut uniquement
-- Retourne UNIQUEMENT le texte modifié, sans explications ni commentaires"""
-
-        prompt = f"""Section : {section_title}
-
-Instruction de l'utilisateur : {user_prompt}
-
-Texte à modifier :
+Contenu:
 {content}
 
-Applique l'instruction de l'utilisateur au texte ci-dessus et retourne le texte modifié.
-RAPPEL : N'utilise aucun formatage Markdown. Écris en texte brut uniquement."""
+Applique l'instruction au contenu."""
 
-        result = await self.generate(system_prompt, prompt, temperature=0.5)
-        return clean_markdown_from_text(result)
+        return await self.generate(system_prompt, user_prompt, temperature=0.4)
 
-    async def adjust_content_length(
-        self,
-        content: str,
-        section_title: str,
-        target_pages: float,
-        target_words: int,
-    ) -> str:
-        """Adjust the content length to match target pages."""
-        current_words = len(content.split())
 
-        if current_words > target_words:
-            direction = "raccourcir"
-            instruction = f"""Tu dois RACCOURCIR ce texte pour qu'il contienne environ {target_words} mots (actuellement {current_words} mots).
+async def run_parallel_ai_tasks(tasks: List[dict], ai_service: MistralAIService) -> List[str]:
+    """Run multiple AI generation tasks in parallel.
 
-Pour raccourcir :
-- Supprime les répétitions et redondances
-- Simplifie les phrases trop longues
-- Garde les informations essentielles
-- Élimine les détails superflus
-- Fusionne les idées similaires"""
-        else:
-            direction = "développer"
-            instruction = f"""Tu dois DÉVELOPPER ce texte pour qu'il contienne environ {target_words} mots (actuellement {current_words} mots).
+    Args:
+        tasks: List of dicts with system_prompt, user_prompt keys
+        ai_service: The AI service instance
 
-Pour développer :
-- Ajoute des détails et exemples pertinents
-- Développe les explications techniques
-- Enrichis la description des processus
-- Ajoute du contexte aux affirmations
-- Approfondis l'analyse et la réflexion"""
-
-        system_prompt = f"""Tu es un assistant spécialisé dans la rédaction de rapports de stage universitaires.
-Tu dois {direction} le texte fourni pour atteindre environ {target_pages} page(s) ({target_words} mots).
-
-{instruction}
-
-RÈGLES IMPORTANTES :
-- Le texte final doit être cohérent et fluide
-- Conserve le style professionnel et académique
-- Garde les informations clés et le sens général
-- N'utilise JAMAIS de formatage Markdown (pas de **, *, #, -, ```, etc.)
-- Écris en texte brut uniquement
-- Retourne UNIQUEMENT le texte modifié, sans explications"""
-
-        prompt = f"""Section : {section_title}
-
-Objectif : {target_pages} page(s) (~{target_words} mots)
-Actuellement : ~{current_words} mots
-
-Texte à {direction} :
-{content}
-
-Retourne le texte ajusté pour atteindre l'objectif de longueur.
-RAPPEL : N'utilise aucun formatage Markdown. Écris en texte brut uniquement."""
-
-        result = await self.generate(system_prompt, prompt, temperature=0.5)
-        return clean_markdown_from_text(result)
+    Returns:
+        List of generated texts in the same order as input tasks
+    """
+    coroutines = [
+        ai_service.generate(
+            task["system_prompt"],
+            task["user_prompt"],
+            temperature=task.get("temperature", 0.4),
+        )
+        for task in tasks
+    ]
+    return await asyncio.gather(*coroutines)

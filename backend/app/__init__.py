@@ -1,1 +1,1 @@
-# UTC Internship Report Assistant Backend
+"""RFP Response Assistant backend application."""

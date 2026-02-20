@@ -1,342 +1,220 @@
 import { Injectable } from '@angular/core';
-import { HttpClient, HttpHeaders } from '@angular/common/http';
+import { HttpClient } from '@angular/common/http';
 import { Observable } from 'rxjs';
 import {
-  ReportData,
-  ReportPlan,
-  ReportProgress,
-  AIProviderConfig,
-  CreateReportRequest,
-  SectionStatus,
+  Workspace, WorkspaceMember,
+  RFPProject, ProjectCreate,
+  DocumentInfo, DocumentImage,
+  Chapter,
+  GapAnalysis, ComplianceAnalysis,
+  ProjectStatistics, AnonymizationMapping,
+  SearchResult, DocumentPreview,
+  AIConfig, AIConfigUpdate,
+  UserInfo, UserCreate, UserUpdate,
 } from '../models/report.model';
 
-@Injectable({
-  providedIn: 'root',
-})
+@Injectable({ providedIn: 'root' })
 export class ApiService {
   private baseUrl = '/api';
 
   constructor(private http: HttpClient) {}
 
-  // Health check
+  // ── Health ──
   healthCheck(): Observable<{ status: string; service: string }> {
-    return this.http.get<{ status: string; service: string }>(
-      `${this.baseUrl}/health`
-    );
+    return this.http.get<any>(`${this.baseUrl}/health`);
   }
 
-  // Get guidelines
-  getGuidelines(): Observable<{ guidelines: string }> {
-    return this.http.get<{ guidelines: string }>(`${this.baseUrl}/guidelines`);
+  // ── Workspaces ──
+  getWorkspaces(): Observable<Workspace[]> {
+    return this.http.get<Workspace[]>(`${this.baseUrl}/workspaces`);
   }
 
-  // Get default plan
-  getDefaultPlan(): Observable<ReportPlan> {
-    return this.http.get<ReportPlan>(`${this.baseUrl}/plan/default`);
+  getWorkspace(id: string): Observable<Workspace> {
+    return this.http.get<Workspace>(`${this.baseUrl}/workspaces/${id}`);
   }
 
-  // Create report
-  createReport(request: CreateReportRequest): Observable<ReportData> {
-    return this.http.post<ReportData>(`${this.baseUrl}/reports`, request);
+  createWorkspace(data: { name: string; description: string }): Observable<Workspace> {
+    return this.http.post<Workspace>(`${this.baseUrl}/workspaces`, data);
   }
 
-  // Get report progress
-  getReportProgress(report: ReportData): Observable<ReportProgress> {
-    return this.http.post<ReportProgress>(
-      `${this.baseUrl}/reports/progress`,
-      report
-    );
+  updateWorkspace(id: string, data: any): Observable<Workspace> {
+    return this.http.put<Workspace>(`${this.baseUrl}/workspaces/${id}`, data);
   }
 
-  // Test AI connection
-  testAIConnection(
-    aiConfig: AIProviderConfig
-  ): Observable<{ success: boolean; message: string }> {
-    return this.http.post<{ success: boolean; message: string }>(
-      `${this.baseUrl}/ai/test`,
-      { ai_config: aiConfig }
-    );
+  getWorkspaceMembers(workspaceId: string): Observable<WorkspaceMember[]> {
+    return this.http.get<WorkspaceMember[]>(`${this.baseUrl}/workspaces/${workspaceId}/members`);
   }
 
-  // Generate questions for a section
-  generateQuestions(
-    sectionId: string,
-    sectionTitle: string,
-    sectionDescription: string,
-    currentNotes: string,
-    currentContent: string,
-    schoolInstructions: string,
-    aiConfig: AIProviderConfig
-  ): Observable<{ success: boolean; questions: string[] }> {
-    return this.http.post<{ success: boolean; questions: string[] }>(
-      `${this.baseUrl}/ai/questions`,
-      {
-        section_id: sectionId,
-        section_title: sectionTitle,
-        section_description: sectionDescription,
-        current_notes: currentNotes,
-        current_content: currentContent,
-        school_instructions: schoolInstructions,
-        ai_config: aiConfig,
-      }
-    );
+  addWorkspaceMember(workspaceId: string, userId: string, role: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/workspaces/${workspaceId}/members`, { user_id: userId, role });
   }
 
-  // Generate recommendations
-  generateRecommendations(
-    sectionId: string,
-    sectionTitle: string,
-    sectionDescription: string,
-    status: SectionStatus,
-    currentNotes: string,
-    currentContent: string,
-    schoolInstructions: string,
-    aiConfig: AIProviderConfig
-  ): Observable<{ success: boolean; recommendations: string[] }> {
-    return this.http.post<{ success: boolean; recommendations: string[] }>(
-      `${this.baseUrl}/ai/recommendations`,
-      {
-        section_id: sectionId,
-        section_title: sectionTitle,
-        section_description: sectionDescription,
-        status: status,
-        current_notes: currentNotes,
-        current_content: currentContent,
-        school_instructions: schoolInstructions,
-        ai_config: aiConfig,
-      }
-    );
+  removeWorkspaceMember(workspaceId: string, userId: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/workspaces/${workspaceId}/members/${userId}`);
   }
 
-  // Generate content for a section
-  generateContent(
-    sectionTitle: string,
-    sectionDescription: string,
-    notes: string,
-    companyContext: string,
-    aiConfig: AIProviderConfig
-  ): Observable<{ success: boolean; content: string }> {
-    return this.http.post<{ success: boolean; content: string }>(
-      `${this.baseUrl}/ai/generate-content`,
-      {
-        section_title: sectionTitle,
-        section_description: sectionDescription,
-        notes: notes,
-        company_context: companyContext,
-        ai_config: aiConfig,
-      }
-    );
+  // ── Projects ──
+  getProjects(workspaceId: string): Observable<RFPProject[]> {
+    return this.http.get<RFPProject[]>(`${this.baseUrl}/projects/workspace/${workspaceId}`);
   }
 
-  // Improve text
-  improveText(
-    text: string,
-    sectionContext: string,
-    notes: string,
-    aiConfig: AIProviderConfig
-  ): Observable<{ success: boolean; improved_text: string }> {
-    return this.http.post<{ success: boolean; improved_text: string }>(
-      `${this.baseUrl}/ai/improve-text`,
-      {
-        text: text,
-        section_context: sectionContext,
-        notes: notes,
-        ai_config: aiConfig,
-      }
-    );
+  getProject(id: string): Observable<RFPProject> {
+    return this.http.get<RFPProject>(`${this.baseUrl}/projects/${id}`);
   }
 
-  // Generate Word document with AI
-  generateWordDocument(
-    reportData: ReportData,
-    aiConfig: AIProviderConfig
-  ): Observable<Blob> {
-    return this.http.post(
-      `${this.baseUrl}/generate-word`,
-      {
-        report_data: reportData,
-        ai_config: aiConfig,
-      },
-      {
-        responseType: 'blob',
-      }
-    );
+  createProject(workspaceId: string, data: ProjectCreate): Observable<RFPProject> {
+    return this.http.post<RFPProject>(`${this.baseUrl}/projects/workspace/${workspaceId}`, data);
   }
 
-  // Generate Word document without AI
-  generateWordDocumentSimple(reportData: ReportData): Observable<Blob> {
-    return this.http.post(`${this.baseUrl}/generate-word-simple`, reportData, {
-      responseType: 'blob',
-    });
+  updateProject(id: string, data: any): Observable<RFPProject> {
+    return this.http.put<RFPProject>(`${this.baseUrl}/projects/${id}`, data);
   }
 
-  // Generate notes from user prompt
-  generateNotes(
-    sectionTitle: string,
-    sectionDescription: string,
-    userPrompt: string,
-    existingNotes: string,
-    aiConfig: AIProviderConfig
-  ): Observable<{ success: boolean; notes: string[] }> {
-    return this.http.post<{ success: boolean; notes: string[] }>(
-      `${this.baseUrl}/ai/generate-notes`,
-      {
-        section_title: sectionTitle,
-        section_description: sectionDescription,
-        user_prompt: userPrompt,
-        existing_notes: existingNotes,
-        ai_config: aiConfig,
-      }
-    );
+  deleteProject(id: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/projects/${id}`);
   }
 
-  // Analyze compliance with instructions
-  analyzeCompliance(
-    reportContent: string,
-    instructionsContent: string,
-    aiConfig: AIProviderConfig
-  ): Observable<{
-    success: boolean;
-    analysis: {
-      score: number;
-      conformes: string[];
-      non_conformes: string[];
-      recommandations: string[];
-    };
-  }> {
-    return this.http.post<{
-      success: boolean;
-      analysis: {
-        score: number;
-        conformes: string[];
-        non_conformes: string[];
-        recommandations: string[];
-      };
-    }>(`${this.baseUrl}/ai/analyze-compliance`, {
-      report_content: reportContent,
-      instructions_content: instructionsContent,
-      ai_config: aiConfig,
-    });
+  // ── Documents ──
+  getDocuments(projectId: string): Observable<DocumentInfo[]> {
+    return this.http.get<DocumentInfo[]>(`${this.baseUrl}/documents/project/${projectId}`);
   }
 
-  // Analyze compliance with PDF instructions
-  analyzePdfCompliance(
-    pdfFile: File,
-    reportData: ReportData,
-    aiConfig: AIProviderConfig
-  ): Observable<{
-    success: boolean;
-    analysis: {
-      score: number;
-      conformes: string[];
-      non_conformes: string[];
-      recommandations: string[];
-    };
-    instructions_filename: string;
-  }> {
+  uploadDocument(projectId: string, file: File, category: string): Observable<DocumentInfo> {
     const formData = new FormData();
-    formData.append('file', pdfFile);
-    formData.append('report_data', JSON.stringify(reportData));
-    formData.append('ai_config', JSON.stringify(aiConfig));
-
-    return this.http.post<{
-      success: boolean;
-      analysis: {
-        score: number;
-        conformes: string[];
-        non_conformes: string[];
-        recommandations: string[];
-      };
-      instructions_filename: string;
-    }>(`${this.baseUrl}/pdf/analyze-compliance`, formData);
+    formData.append('file', file);
+    formData.append('category', category);
+    return this.http.post<DocumentInfo>(`${this.baseUrl}/documents/upload/${projectId}`, formData);
   }
 
-  // Extract text from PDF
-  extractPdfText(pdfFile: File): Observable<{
-    success: boolean;
-    text: string;
-    page_count: number;
-    filename: string;
-  }> {
+  deleteDocument(documentId: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/documents/${documentId}`);
+  }
+
+  getDocumentImages(documentId: string): Observable<DocumentImage[]> {
+    return this.http.get<DocumentImage[]>(`${this.baseUrl}/documents/${documentId}/images`);
+  }
+
+  getProjectImages(projectId: string): Observable<DocumentImage[]> {
+    return this.http.get<DocumentImage[]>(`${this.baseUrl}/documents/images/${projectId}`);
+  }
+
+  getImageUrl(imageId: string): string {
+    return `${this.baseUrl}/documents/image-file/${imageId}`;
+  }
+
+  searchDocuments(projectId: string, query: string, category?: string, topK: number = 10): Observable<{ results: SearchResult[] }> {
+    return this.http.post<{ results: SearchResult[] }>(
+      `${this.baseUrl}/documents/search/${projectId}`,
+      { query, category, top_k: topK }
+    );
+  }
+
+  // ── Chapters ──
+  getChapters(projectId: string): Observable<Chapter[]> {
+    return this.http.get<Chapter[]>(`${this.baseUrl}/chapters/project/${projectId}`);
+  }
+
+  getChapter(chapterId: string): Observable<Chapter> {
+    return this.http.get<Chapter>(`${this.baseUrl}/chapters/${chapterId}`);
+  }
+
+  createChapter(projectId: string, data: any): Observable<Chapter> {
+    return this.http.post<Chapter>(`${this.baseUrl}/chapters/project/${projectId}`, data);
+  }
+
+  updateChapter(chapterId: string, data: any): Observable<Chapter> {
+    return this.http.put<Chapter>(`${this.baseUrl}/chapters/${chapterId}`, data);
+  }
+
+  deleteChapter(chapterId: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/chapters/${chapterId}`);
+  }
+
+  addChapterNote(chapterId: string, content: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/chapters/${chapterId}/note`, { content });
+  }
+
+  generateChapterContent(chapterId: string, action: string, customPrompt: string = '', useOldResponse: boolean = true, includeImprovementAxes: boolean = true): Observable<{ content: string }> {
+    return this.http.post<{ content: string }>(
+      `${this.baseUrl}/chapters/${chapterId}/generate-content`,
+      { action, custom_prompt: customPrompt, use_old_response: useOldResponse, include_improvement_axes: includeImprovementAxes }
+    );
+  }
+
+  reorderChapters(chapterOrders: { id: string; order: number }[]): Observable<any> {
+    return this.http.post(`${this.baseUrl}/chapters/reorder`, { chapter_orders: chapterOrders });
+  }
+
+  // ── AI Operations ──
+  analyzeGap(projectId: string): Observable<{ analysis: GapAnalysis }> {
+    return this.http.post<{ analysis: GapAnalysis }>(`${this.baseUrl}/projects/${projectId}/gap-analysis`, {});
+  }
+
+  generateStructure(projectId: string): Observable<{ chapters_created: number }> {
+    return this.http.post<{ chapters_created: number }>(`${this.baseUrl}/projects/${projectId}/generate-structure`, {});
+  }
+
+  prefillChapters(projectId: string, chapterIds: string[] = []): Observable<{ prefilled_count: number }> {
+    return this.http.post<{ prefilled_count: number }>(`${this.baseUrl}/projects/${projectId}/prefill`, { chapter_ids: chapterIds });
+  }
+
+  analyzeCompliance(projectId: string): Observable<{ analysis: ComplianceAnalysis }> {
+    return this.http.post<{ analysis: ComplianceAnalysis }>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`, {});
+  }
+
+  addImprovementAxis(projectId: string, content: string, source: string = ''): Observable<any> {
+    return this.http.post(`${this.baseUrl}/projects/${projectId}/improvement-axes`, { content, source });
+  }
+
+  getStatistics(projectId: string): Observable<ProjectStatistics> {
+    return this.http.get<ProjectStatistics>(`${this.baseUrl}/projects/${projectId}/statistics`);
+  }
+
+  getAnonymizationMappings(projectId: string): Observable<AnonymizationMapping[]> {
+    return this.http.get<AnonymizationMapping[]>(`${this.baseUrl}/projects/${projectId}/anonymization-mappings`);
+  }
+
+  // ── Export/Import ──
+  exportWord(projectId: string): Observable<Blob> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/word`, {}, { responseType: 'blob' });
+  }
+
+  exportBackup(projectId: string): Observable<Blob> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/backup`, {}, { responseType: 'blob' });
+  }
+
+  importBackup(workspaceId: string, file: File): Observable<any> {
     const formData = new FormData();
-    formData.append('file', pdfFile);
-
-    return this.http.post<{
-      success: boolean;
-      text: string;
-      page_count: number;
-      filename: string;
-    }>(`${this.baseUrl}/pdf/extract-text`, formData);
+    formData.append('file', file);
+    return this.http.post(`${this.baseUrl}/export/import/${workspaceId}`, formData);
   }
 
-  // Review grammar and spelling
-  reviewGrammar(
-    reportContent: string,
-    aiConfig: AIProviderConfig
-  ): Observable<{
-    success: boolean;
-    review: {
-      nombre_erreurs: number;
-      erreurs: Array<{
-        texte_errone: string;
-        correction: string;
-        explication: string;
-      }>;
-      message: string;
-    };
-  }> {
-    return this.http.post<{
-      success: boolean;
-      review: {
-        nombre_erreurs: number;
-        erreurs: Array<{
-          texte_errone: string;
-          correction: string;
-          explication: string;
-        }>;
-        message: string;
-      };
-    }>(`${this.baseUrl}/ai/review-grammar`, {
-      report_content: reportContent,
-      ai_config: aiConfig,
-    });
+  getPreview(projectId: string): Observable<DocumentPreview> {
+    return this.http.get<DocumentPreview>(`${this.baseUrl}/export/${projectId}/preview`);
   }
 
-  // Execute custom prompt on content
-  executeCustomPrompt(
-    content: string,
-    userPrompt: string,
-    sectionTitle: string,
-    aiConfig: AIProviderConfig
-  ): Observable<{ success: boolean; content: string }> {
-    return this.http.post<{ success: boolean; content: string }>(
-      `${this.baseUrl}/ai/custom-prompt`,
-      {
-        content: content,
-        user_prompt: userPrompt,
-        section_title: sectionTitle,
-        ai_config: aiConfig,
-      }
-    );
+  // ── Admin ──
+  getUsers(): Observable<UserInfo[]> {
+    return this.http.get<UserInfo[]>(`${this.baseUrl}/admin/users`);
   }
 
-  // Adjust content length to target pages
-  adjustContentLength(
-    content: string,
-    sectionTitle: string,
-    targetPages: number,
-    targetWords: number,
-    aiConfig: AIProviderConfig
-  ): Observable<{ success: boolean; content: string }> {
-    return this.http.post<{ success: boolean; content: string }>(
-      `${this.baseUrl}/ai/adjust-length`,
-      {
-        content: content,
-        section_title: sectionTitle,
-        target_pages: targetPages,
-        target_words: targetWords,
-        ai_config: aiConfig,
-      }
-    );
+  createUser(data: UserCreate): Observable<UserInfo> {
+    return this.http.post<UserInfo>(`${this.baseUrl}/admin/users`, data);
+  }
+
+  updateUser(userId: string, data: UserUpdate): Observable<UserInfo> {
+    return this.http.put<UserInfo>(`${this.baseUrl}/admin/users/${userId}`, data);
+  }
+
+  deleteUser(userId: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/admin/users/${userId}`);
+  }
+
+  getAIConfig(workspaceId: string): Observable<AIConfig> {
+    return this.http.get<AIConfig>(`${this.baseUrl}/admin/ai-config/${workspaceId}`);
+  }
+
+  updateAIConfig(workspaceId: string, data: AIConfigUpdate): Observable<AIConfig> {
+    return this.http.put<AIConfig>(`${this.baseUrl}/admin/ai-config/${workspaceId}`, data);
   }
 }

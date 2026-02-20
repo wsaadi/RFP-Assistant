@@ -21,7 +21,7 @@ FROM nginx:alpine
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # Copy built application
-COPY --from=build /app/dist/utc-report-assistant/browser /usr/share/nginx/html
+COPY --from=build /app/dist/rfp-assistant/browser /usr/share/nginx/html
 
 EXPOSE 80
 
