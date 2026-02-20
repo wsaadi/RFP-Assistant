@@ -4,6 +4,7 @@ import io
 import re
 import uuid
 import hashlib
+import zipfile
 from typing import List, Dict, Tuple, Optional
 
 import fitz  # PyMuPDF
@@ -35,6 +36,20 @@ class DocumentProcessor:
             "pptx": "pptx",
         }
         return type_map.get(ext, "other")
+
+    @staticmethod
+    def _validate_docx(file_content: bytes) -> bool:
+        """Check if file_content is a valid DOCX (ZIP with Word content type)."""
+        if not zipfile.is_zipfile(io.BytesIO(file_content)):
+            return False
+        try:
+            with zipfile.ZipFile(io.BytesIO(file_content)) as zf:
+                if "[Content_Types].xml" not in zf.namelist():
+                    return False
+                ct = zf.read("[Content_Types].xml").decode("utf-8", errors="ignore")
+                return "wordprocessingml" in ct
+        except Exception:
+            return False
 
     @staticmethod
     def extract_text_from_pdf(file_content: bytes) -> Tuple[str, int, List[Dict]]:
@@ -147,6 +162,11 @@ class DocumentProcessor:
         Returns:
             Tuple of (full_text, sections_data)
         """
+        if not DocumentProcessor._validate_docx(file_content):
+            raise ValueError(
+                "Le fichier n'est pas un document Word (.docx) valide. "
+                "Les fichiers .doc (ancien format) ne sont pas supportés."
+            )
         doc = DocxDocument(io.BytesIO(file_content))
         full_text_parts = []
         sections_data = []
@@ -185,6 +205,8 @@ class DocumentProcessor:
         file_content: bytes, document_id: str
     ) -> List[Dict]:
         """Extract images from DOCX document."""
+        if not DocumentProcessor._validate_docx(file_content):
+            return []
         doc = DocxDocument(io.BytesIO(file_content))
         images = []
         images_dir = os.path.join(settings.images_dir, document_id)
