@@ -3,7 +3,6 @@ import uuid
 from typing import List, Optional, Dict
 
 import chromadb
-from chromadb.config import Settings as ChromaSettings
 
 from ..config import settings
 
@@ -17,12 +16,8 @@ class VectorService:
     def get_client(cls) -> chromadb.ClientAPI:
         """Get or create ChromaDB client (singleton)."""
         if cls._client is None:
-            cls._client = chromadb.Client(
-                ChromaSettings(
-                    chroma_db_impl="duckdb+parquet",
-                    persist_directory=settings.chroma_persist_dir,
-                    anonymized_telemetry=False,
-                )
+            cls._client = chromadb.PersistentClient(
+                path=settings.chroma_persist_dir,
             )
         return cls._client
 
