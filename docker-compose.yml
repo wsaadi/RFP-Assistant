@@ -1,16 +1,50 @@
 services:
+  db:
+    image: postgres:16-alpine
+    container_name: rfp-assistant-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: rfp_assistant
+      POSTGRES_USER: rfp_user
+      POSTGRES_PASSWORD: rfp_secret_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - rfp-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rfp_user -d rfp_assistant"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
   backend:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: utc-report-backend
+    container_name: rfp-assistant-backend
     restart: unless-stopped
     environment:
       - PYTHONUNBUFFERED=1
+      - DATABASE_URL=postgresql+asyncpg://rfp_user:rfp_secret_password@db:5432/rfp_assistant
+      - SECRET_KEY=change-this-to-a-very-long-random-secret-key-in-production
+      - ADMIN_EMAIL=admin@rfp-assistant.fr
+      - ADMIN_PASSWORD=admin123
+      - CORS_ORIGINS=http://localhost,http://localhost:80,http://localhost:4200
+      - UPLOAD_DIR=/app/data/uploads
+      - EXPORT_DIR=/app/data/exports
+      - IMAGES_DIR=/app/data/images
+      - CHROMA_PERSIST_DIR=/app/data/chroma
+    volumes:
+      - backend_data:/app/data
     ports:
       - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
     networks:
-      - utc-network
+      - rfp-network
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -21,15 +55,19 @@ services:
     build:
       context: ./frontend
       dockerfile: Dockerfile
-    container_name: utc-report-frontend
+    container_name: rfp-assistant-frontend
     restart: unless-stopped
     ports:
       - "80:80"
     depends_on:
       - backend
     networks:
-      - utc-network
+      - rfp-network
+
+volumes:
+  postgres_data:
+  backend_data:
 
 networks:
-  utc-network:
+  rfp-network:
     driver: bridge
