@@ -18,8 +18,7 @@ pydantic==2.5.3
 pydantic-settings==2.1.0
 
 # AI - Mistral
-mistralai==1.5.0
-httpx==0.25.2
+mistralai>=1.12.0
 
 # Vector database
 chromadb==0.4.22

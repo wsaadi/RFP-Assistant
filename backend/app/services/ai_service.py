@@ -14,7 +14,7 @@ class MistralAIService:
 
     def __init__(self, api_key: str, model: str = "mistral-large-latest",
                  temperature: float = 0.3, max_tokens: int = 4096):
-        self.client = Mistral(api_key=api_key)
+        self.api_key = api_key
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -33,17 +33,17 @@ class MistralAIService:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> str:
-        """Generate text using Mistral API."""
-        response = await asyncio.to_thread(
-            self.client.chat.complete,
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=temperature or self.temperature,
-            max_tokens=max_tokens or self.max_tokens,
-        )
+        """Generate text using Mistral API (native async)."""
+        async with Mistral(api_key=self.api_key) as client:
+            response = await client.chat.complete_async(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature or self.temperature,
+                max_tokens=max_tokens or self.max_tokens,
+            )
         return response.choices[0].message.content or ""
 
     async def test_connection(self) -> str:
