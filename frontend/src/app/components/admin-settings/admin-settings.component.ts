@@ -10,7 +10,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatSliderModule } from '@angular/material/slider';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { ApiService } from '../../services/api.service';
-import { AIConfig } from '../../models/report.model';
+import { AIConfigUpdate } from '../../models/report.model';
 
 @Component({
   selector: 'app-admin-settings',
@@ -117,7 +117,7 @@ import { AIConfig } from '../../models/report.model';
 })
 export class AdminSettingsComponent implements OnInit {
   workspaceId = '';
-  config: AIConfig = {
+  config: AIConfigUpdate = {
     mistral_api_key: '',
     model_name: 'mistral-large-latest',
     temperature: 0.3,
@@ -139,7 +139,7 @@ export class AdminSettingsComponent implements OnInit {
 
   loadConfig(): void {
     this.api.getAIConfig(this.workspaceId).subscribe({
-      next: (cfg) => {
+      next: (cfg: any) => {
         this.config = {
           mistral_api_key: cfg.mistral_api_key || '',
           model_name: cfg.model_name || 'mistral-large-latest',
