@@ -79,19 +79,19 @@ import { ProjectStatistics, AnonymizationMapping } from '../../models/report.mod
           <div class="status-grid">
             <div class="status-item">
               <div class="status-bar draft" [style.width.%]="statusPercent('draft')"></div>
-              <span>Brouillon: {{ stats.chapters_by_status?.draft || 0 }}</span>
+              <span>Brouillon: {{ statusCount('draft') }}</span>
             </div>
             <div class="status-item">
               <div class="status-bar in-progress" [style.width.%]="statusPercent('in_progress')"></div>
-              <span>En cours: {{ stats.chapters_by_status?.in_progress || 0 }}</span>
+              <span>En cours: {{ statusCount('in_progress') }}</span>
             </div>
             <div class="status-item">
               <div class="status-bar review" [style.width.%]="statusPercent('review')"></div>
-              <span>En revue: {{ stats.chapters_by_status?.review || 0 }}</span>
+              <span>En revue: {{ statusCount('review') }}</span>
             </div>
             <div class="status-item">
               <div class="status-bar completed" [style.width.%]="statusPercent('completed')"></div>
-              <span>Complétés: {{ stats.chapters_by_status?.completed || 0 }}</span>
+              <span>Complétés: {{ statusCount('completed') }}</span>
             </div>
           </div>
         </mat-card>
@@ -169,9 +169,12 @@ export class StatisticsComponent implements OnInit {
     });
   }
 
+  statusCount(status: string): number {
+    return this.stats?.chapters_by_status?.[status] || 0;
+  }
+
   statusPercent(status: string): number {
     if (!this.stats || !this.stats.chapters_total) return 0;
-    const count = this.stats.chapters_by_status?.[status] || 0;
-    return (count / this.stats.chapters_total) * 100;
+    return (this.statusCount(status) / this.stats.chapters_total) * 100;
   }
 }
