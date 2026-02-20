@@ -4,7 +4,7 @@ import { Observable } from 'rxjs';
 import {
   Workspace, WorkspaceMember,
   RFPProject, ProjectCreate,
-  DocumentInfo, DocumentImage,
+  DocumentInfo, DocumentImage, DocumentProgress,
   Chapter,
   GapAnalysis, ComplianceAnalysis,
   ProjectStatistics, AnonymizationMapping,
@@ -107,6 +107,10 @@ export class ApiService {
       `${this.baseUrl}/documents/search/${projectId}`,
       { query, category, top_k: topK }
     );
+  }
+
+  getProcessingProgress(projectId: string): Observable<{ progress: DocumentProgress[] }> {
+    return this.http.get<{ progress: DocumentProgress[] }>(`${this.baseUrl}/documents/progress/${projectId}`);
   }
 
   // ── Chapters ──

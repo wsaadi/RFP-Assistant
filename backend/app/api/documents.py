@@ -18,6 +18,7 @@ from ..services.document_service import DocumentProcessor
 from ..services.vector_service import VectorService
 from ..services.anonymization_service import AnonymizationService
 from ..services.ai_service import MistralAIService
+from ..services.progress_service import ProgressTracker
 from ..config import settings
 from .deps import get_current_user
 
@@ -36,6 +37,7 @@ async def process_document_background(document_id: str, project_id: str):
             if not document:
                 return
 
+            ProgressTracker.start(document_id, document.original_filename)
             document.processing_status = ProcessingStatus.PROCESSING
             await db.commit()
 
@@ -48,15 +50,19 @@ async def process_document_background(document_id: str, project_id: str):
             pages_data = None
             images_data = []
 
+            ProgressTracker.update(document_id, "extracting_text")
+
             if document.file_type == FileType.PDF:
                 text, page_count, pages_data = DocumentProcessor.extract_text_from_pdf(file_content)
                 document.page_count = page_count
+                ProgressTracker.update(document_id, "extracting_images")
                 images_data = DocumentProcessor.extract_images_from_pdf(file_content, document_id)
 
             elif document.file_type == FileType.DOCX:
                 try:
                     text, sections = DocumentProcessor.extract_text_from_docx(file_content)
                     document.page_count = max(1, len(text.split()) // 300)
+                    ProgressTracker.update(document_id, "extracting_images")
                     images_data = DocumentProcessor.extract_images_from_docx(file_content, document_id)
                 except (ValueError, Exception) as docx_err:
                     # Fallback: try PyMuPDF for old .doc or malformed .docx
@@ -72,11 +78,13 @@ async def process_document_background(document_id: str, project_id: str):
                 document.page_count = 1
 
             if not text.strip():
+                ProgressTracker.fail(document_id, "Aucun texte extrait du document")
                 document.processing_status = ProcessingStatus.FAILED
                 await db.commit()
                 return
 
             # Create chunks
+            ProgressTracker.update(document_id, "chunking")
             chunks = DocumentProcessor.create_chunks(
                 text=text,
                 document_id=document_id,
@@ -86,6 +94,7 @@ async def process_document_background(document_id: str, project_id: str):
             )
 
             # Anonymize chunks and store in DB
+            ProgressTracker.update(document_id, "anonymizing")
             for chunk_data in chunks:
                 anonymized = await AnonymizationService.anonymize_text(
                     chunk_data["content"], uuid.UUID(project_id), db
@@ -105,6 +114,7 @@ async def process_document_background(document_id: str, project_id: str):
                 db.add(db_chunk)
 
             # Index anonymized chunks in vector DB
+            ProgressTracker.update(document_id, "indexing")
             vector_chunks = [
                 {
                     "id": chunk_data["id"],
@@ -156,10 +166,12 @@ async def process_document_background(document_id: str, project_id: str):
 
             document.chunk_count = len(chunks)
             document.processing_status = ProcessingStatus.COMPLETED
+            ProgressTracker.update(document_id, "completed")
             await db.commit()
 
         except Exception as e:
             print(f"Error processing document {document_id}: {e}")
+            ProgressTracker.fail(document_id, str(e))
             try:
                 result = await db.execute(select(Document).where(Document.id == uuid.UUID(document_id)))
                 document = result.scalar_one_or_none()
@@ -410,3 +422,21 @@ async def search_documents(
             for r in results
         ],
     }
+
+
+@router.get("/progress/{project_id}")
+async def get_processing_progress(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get processing progress for all documents in a project."""
+    result = await db.execute(
+        select(Document.id).where(
+            Document.project_id == project_id,
+            Document.processing_status.in_([ProcessingStatus.PENDING, ProcessingStatus.PROCESSING]),
+        )
+    )
+    doc_ids = [str(row[0]) for row in result.all()]
+    progress_list = ProgressTracker.get_for_project(doc_ids)
+    return {"progress": progress_list}
