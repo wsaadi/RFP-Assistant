@@ -18,6 +18,7 @@ class MistralAIService:
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self._client = Mistral(api_key=api_key)
 
     @classmethod
     def from_config(cls, config: AIConfig, decrypted_key: str) -> "MistralAIService":
@@ -33,17 +34,16 @@ class MistralAIService:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> str:
-        """Generate text using Mistral API (native async)."""
-        async with Mistral(api_key=self.api_key) as client:
-            response = await client.chat.complete_async(
-                model=self.model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt},
-                ],
-                temperature=temperature or self.temperature,
-                max_tokens=max_tokens or self.max_tokens,
-            )
+        """Generate text using Mistral API (reuses client connection)."""
+        response = await self._client.chat.complete_async(
+            model=self.model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            temperature=temperature or self.temperature,
+            max_tokens=max_tokens or self.max_tokens,
+        )
         return response.choices[0].message.content or ""
 
     async def test_connection(self) -> str:
@@ -77,10 +77,10 @@ Réponds EXACTEMENT au format JSON suivant (sans markdown):
 }"""
 
         user_prompt = f"""ANCIEN APPEL D'OFFRES:
-{old_rfp_content[:50000]}
+{old_rfp_content[:25000]}
 
 NOUVEL APPEL D'OFFRES:
-{new_rfp_content[:50000]}
+{new_rfp_content[:25000]}
 
 Analyse les écarts entre ces deux appels d'offres."""
 
@@ -149,28 +149,34 @@ Valeurs de delta:
 - "unchanged": exigence identique à l'ancien AO
 - "removed_context": chapitre nécessaire même si l'exigence directe a été retirée (contexte, transition)"""
 
-        # Mistral Large supports 128K context — use generous limits
-        # Budget: ~80K chars for new RFP (priority), ~40K each for old RFP and old response
+        # Mistral Large supports 128K context.
+        # When gap analysis is available it already summarises old-vs-new deltas,
+        # so we skip the full old RFP to dramatically reduce input tokens.
         parts = []
 
         parts.append(f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:80000]}")
 
-        if old_rfp_content:
-            parts.append(f"CONTENU DE L'ANCIEN APPEL D'OFFRES:\n{old_rfp_content[:40000]}")
-
-        if old_response_content:
-            parts.append(f"CONTENU DE L'ANCIENNE RÉPONSE (structure et texte):\n{old_response_content[:40000]}")
-
         if gap_analysis:
+            # Gap analysis replaces the need for the full old RFP content
             gap_summary = []
+            if gap_analysis.get("summary"):
+                gap_summary.append(f"  Résumé: {gap_analysis['summary']}")
             for req in gap_analysis.get("new_requirements", []):
                 gap_summary.append(f"  [NOUVEAU] {req.get('title', '')}: {req.get('description', '')}")
             for req in gap_analysis.get("modified_requirements", []):
                 gap_summary.append(f"  [MODIFIÉ] {req.get('title', '')}: {req.get('new_description', '')}")
             for req in gap_analysis.get("removed_requirements", []):
                 gap_summary.append(f"  [SUPPRIMÉ] {req.get('title', '')}: {req.get('description', '')}")
+            for req in gap_analysis.get("unchanged_requirements", []):
+                gap_summary.append(f"  [INCHANGÉ] {req.get('title', '')}")
             if gap_summary:
                 parts.append(f"ANALYSE DES ÉCARTS ANCIEN/NOUVEAU AO:\n" + "\n".join(gap_summary))
+        elif old_rfp_content:
+            # No gap analysis — fall back to sending old RFP content directly
+            parts.append(f"CONTENU DE L'ANCIEN APPEL D'OFFRES:\n{old_rfp_content[:40000]}")
+
+        if old_response_content:
+            parts.append(f"CONTENU DE L'ANCIENNE RÉPONSE (structure et texte):\n{old_response_content[:40000]}")
 
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += "\n\nAnalyse en profondeur le nouvel AO et génère la structure complète et idéale de la réponse."
