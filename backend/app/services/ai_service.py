@@ -77,14 +77,14 @@ Réponds EXACTEMENT au format JSON suivant (sans markdown):
 }"""
 
         user_prompt = f"""ANCIEN APPEL D'OFFRES:
-{old_rfp_content[:15000]}
+{old_rfp_content[:50000]}
 
 NOUVEL APPEL D'OFFRES:
-{new_rfp_content[:15000]}
+{new_rfp_content[:50000]}
 
 Analyse les écarts entre ces deux appels d'offres."""
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000)
+        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=12000)
         try:
             json_match = re.search(r'\{[\s\S]*\}', response)
             if json_match:
@@ -149,15 +149,17 @@ Valeurs de delta:
 - "unchanged": exigence identique à l'ancien AO
 - "removed_context": chapitre nécessaire même si l'exigence directe a été retirée (contexte, transition)"""
 
+        # Mistral Large supports 128K context — use generous limits
+        # Budget: ~80K chars for new RFP (priority), ~40K each for old RFP and old response
         parts = []
 
-        parts.append(f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:20000]}")
+        parts.append(f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:80000]}")
 
         if old_rfp_content:
-            parts.append(f"CONTENU DE L'ANCIEN APPEL D'OFFRES:\n{old_rfp_content[:12000]}")
+            parts.append(f"CONTENU DE L'ANCIEN APPEL D'OFFRES:\n{old_rfp_content[:40000]}")
 
         if old_response_content:
-            parts.append(f"CONTENU DE L'ANCIENNE RÉPONSE (structure et texte):\n{old_response_content[:12000]}")
+            parts.append(f"CONTENU DE L'ANCIENNE RÉPONSE (structure et texte):\n{old_response_content[:40000]}")
 
         if gap_analysis:
             gap_summary = []

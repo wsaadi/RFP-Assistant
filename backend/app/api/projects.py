@@ -9,7 +9,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
 from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus
-from ..models.document import Document, DocumentChunk
+from ..models.document import Document, DocumentChunk, DocumentCategory
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
 from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectOut,
@@ -244,6 +244,22 @@ async def analyze_gap(
     return {"success": True, "analysis": analysis}
 
 
+async def _get_all_chunks_by_category(
+    db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory
+) -> str:
+    """Get ALL document chunks for a category, ordered sequentially.
+    Returns the full concatenated text."""
+    result = await db.execute(
+        select(DocumentChunk)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.project_id == project_id)
+        .where(Document.category == category)
+        .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
+    )
+    chunks = result.scalars().all()
+    return "\n\n".join([c.content for c in chunks if c.content.strip()])
+
+
 @router.post("/{project_id}/generate-structure")
 async def generate_structure(
     project_id: uuid.UUID,
@@ -258,61 +274,26 @@ async def generate_structure(
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
     ai_service = await _get_ai_service(project.workspace_id, db)
-    pid = str(project_id)
 
-    # ── 1. Gather NEW RFP content (multiple queries for full coverage) ──
-    new_rfp_queries = [
-        "sommaire structure plan chapitres organisation document",
-        "exigences techniques spécifications prestations attendues",
-        "critères évaluation notation jugement offres",
-        "annexes documents à fournir pièces administratives",
-        "lots allotissement périmètre objet du marché",
-        "conditions exécution délais planning livrables",
-    ]
-    new_rfp_all_chunks = {}
-    for query in new_rfp_queries:
-        chunks = VectorService.search(pid, query, top_k=15, category_filter="new_rfp")
-        for c in chunks:
-            new_rfp_all_chunks[c["chunk_id"]] = c
-
-    # Sort by page number for logical order
-    new_rfp_sorted = sorted(new_rfp_all_chunks.values(), key=lambda c: (c.get("page_number", 0)))
-    new_rfp_content = "\n\n".join([c["content"] for c in new_rfp_sorted])
-
+    # ── 1. Get ALL content from DB (not vector search) for full coverage ──
+    new_rfp_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.NEW_RFP)
     if not new_rfp_content:
         raise HTTPException(status_code=400, detail="Aucun document de nouvel appel d'offres indexé")
 
-    # ── 2. Gather OLD RFP content ──
-    old_rfp_chunks = {}
-    for query in ["exigences techniques spécifications", "structure chapitres sommaire", "critères évaluation lots"]:
-        chunks = VectorService.search(pid, query, top_k=15, category_filter="old_rfp")
-        for c in chunks:
-            old_rfp_chunks[c["chunk_id"]] = c
-    old_rfp_sorted = sorted(old_rfp_chunks.values(), key=lambda c: (c.get("page_number", 0)))
-    old_rfp_content = "\n\n".join([c["content"] for c in old_rfp_sorted])
+    old_rfp_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.OLD_RFP)
+    old_response_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.OLD_RESPONSE)
 
-    # ── 3. Gather OLD RESPONSE content (actual text, not just titles) ──
-    old_response_chunks = {}
-    for query in ["présentation méthodologie organisation", "compétences références expérience", "solution technique offre proposition"]:
-        chunks = VectorService.search(pid, query, top_k=15, category_filter="old_response")
-        for c in chunks:
-            old_response_chunks[c["chunk_id"]] = c
-    old_response_sorted = sorted(old_response_chunks.values(), key=lambda c: (c.get("page_number", 0)))
-    old_response_content = "\n\n".join([c["content"] for c in old_response_sorted])
-
-    # ── 4. Run gap analysis if both old and new RFP available ──
-    gap_analysis = None
-    if old_rfp_content and new_rfp_content:
-        anon_old_rfp = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
-        anon_new_rfp_gap = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
-        gap_analysis = await ai_service.analyze_gap(anon_old_rfp, anon_new_rfp_gap)
-
-    # ── 5. Anonymize all content before sending to AI ──
+    # ── 2. Anonymize once, reuse for both gap analysis and structure ──
     anon_new_rfp = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
     anon_old_rfp = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db) if old_rfp_content else ""
     anon_old_response = await AnonymizationService.anonymize_text(old_response_content, project_id, db) if old_response_content else ""
 
-    # ── 6. Generate structure with full context ──
+    # ── 3. Run gap analysis if both old and new RFP available ──
+    gap_analysis = None
+    if anon_old_rfp:
+        gap_analysis = await ai_service.analyze_gap(anon_old_rfp, anon_new_rfp)
+
+    # ── 4. Generate structure with full context ──
     structure = await ai_service.generate_response_structure(
         new_rfp_content=anon_new_rfp,
         old_rfp_content=anon_old_rfp,
@@ -320,7 +301,7 @@ async def generate_structure(
         gap_analysis=gap_analysis,
     )
 
-    # ── 7. Create chapters from structure ──
+    # ── 5. Create chapters from structure ──
     order = 0
     created_chapters = []
     delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
@@ -333,7 +314,6 @@ async def generate_structure(
             if delta in delta_stats:
                 delta_stats[delta] += 1
 
-            # Store delta info in notes for UI display
             notes = []
             if delta and delta != "unchanged":
                 notes.append({"type": "delta", "value": delta})
