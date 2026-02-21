@@ -170,11 +170,11 @@ Valeurs de delta:
 - "unchanged": exigence identique à l'ancien AO
 - "removed_context": chapitre nécessaire même si l'exigence directe a été retirée (contexte, transition)"""
 
-        # Budget: ~40K new RFP + gap summary or ~20K old RFP + ~20K old response
-        # This keeps total input under ~20K tokens for faster processing.
+        # Budget: ~60K new RFP + gap summary or ~30K old RFP + ~30K old response
+        # Keeps total input under ~25K tokens — good balance of speed vs coverage.
         parts = []
 
-        parts.append(f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:40000]}")
+        parts.append(f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:60000]}")
 
         if gap_analysis:
             # Gap analysis replaces the need for the full old RFP content
@@ -193,15 +193,15 @@ Valeurs de delta:
                 parts.append(f"ANALYSE DES ÉCARTS ANCIEN/NOUVEAU AO:\n" + "\n".join(gap_summary))
         elif old_rfp_content:
             # No gap analysis — fall back to sending old RFP content directly
-            parts.append(f"CONTENU DE L'ANCIEN APPEL D'OFFRES:\n{old_rfp_content[:20000]}")
+            parts.append(f"CONTENU DE L'ANCIEN APPEL D'OFFRES:\n{old_rfp_content[:30000]}")
 
         if old_response_content:
-            parts.append(f"CONTENU DE L'ANCIENNE RÉPONSE (structure et texte):\n{old_response_content[:20000]}")
+            parts.append(f"CONTENU DE L'ANCIENNE RÉPONSE (structure et texte):\n{old_response_content[:30000]}")
 
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += "\n\nAnalyse en profondeur le nouvel AO et génère la structure complète et idéale de la réponse."
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000, timeout=300)
+        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=10000, timeout=300)
         try:
             json_match = re.search(r'\[[\s\S]*\]', response)
             if json_match:
