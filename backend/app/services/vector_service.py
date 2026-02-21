@@ -3,9 +3,24 @@ import uuid
 from typing import List, Optional, Dict
 
 import chromadb
-from chromadb.utils import embedding_functions
+from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
+from sentence_transformers import SentenceTransformer
 
 from ..config import settings
+
+# Max sequence length supported by multilingual-e5-base
+_MODEL_MAX_SEQ_LENGTH = 512
+
+
+class _E5EmbeddingFunction(EmbeddingFunction[Documents]):
+    """Custom embedding function that sets max_seq_length to 512."""
+
+    def __init__(self, model_name: str):
+        self._model = SentenceTransformer(model_name)
+        self._model.max_seq_length = _MODEL_MAX_SEQ_LENGTH
+
+    def __call__(self, input: Documents) -> Embeddings:
+        return self._model.encode(input, normalize_embeddings=True).tolist()
 
 
 class VectorService:
@@ -27,7 +42,7 @@ class VectorService:
     def get_embedding_function(cls):
         """Get or create the embedding function (singleton)."""
         if cls._embedding_fn is None:
-            cls._embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+            cls._embedding_fn = _E5EmbeddingFunction(
                 model_name=settings.embedding_model,
             )
         return cls._embedding_fn
