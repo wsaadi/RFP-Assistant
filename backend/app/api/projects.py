@@ -356,11 +356,10 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         }
 
     try:
+        # ── Phase 1: Load data from DB (short-lived session) ──
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # ── Step 1: Load pre-anonymized document content ──
-            # Chunks are already anonymized at upload time, no need to re-run GLiNER
             _update("loading", 5, "Chargement des documents du nouvel AO...")
             anon_new_rfp = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP)
             if not anon_new_rfp:
@@ -374,43 +373,45 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             anon_old_rfp = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RFP)
             anon_old_response = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE)
 
-            _update("loading", 25,
-                    f"Documents charges: nouvel AO ({len(anon_new_rfp):,} car.), "
-                    f"ancien AO ({len(anon_old_rfp):,} car.), "
-                    f"ancienne reponse ({len(anon_old_response):,} car.)")
+        # DB session released — all data is now in memory
 
-            # ── Step 3: Gap analysis (if old RFP available) ──
-            gap_analysis = None
-            if anon_old_rfp:
-                _update("gap_analysis", 35, "Analyse des ecarts ancien/nouveau AO (appel IA)...")
-                gap_analysis = await ai_service.analyze_gap(anon_old_rfp, anon_new_rfp)
-                _update("gap_analysis", 50, "Analyse des ecarts terminee")
+        _update("loading", 25,
+                f"Documents charges: nouvel AO ({len(anon_new_rfp):,} car.), "
+                f"ancien AO ({len(anon_old_rfp):,} car.), "
+                f"ancienne reponse ({len(anon_old_response):,} car.)")
 
-            # ── Step 4: Generate structure (main LLM call) ──
-            _update("generating", 55, "Generation de la structure par l'IA (peut prendre 1-2 min)...")
-            structure = await ai_service.generate_response_structure(
-                new_rfp_content=anon_new_rfp,
-                old_rfp_content=anon_old_rfp,
-                old_response_content=anon_old_response,
-                gap_analysis=gap_analysis,
-            )
+        # ── Phase 2: AI calls (no DB connection held) ──
+        gap_analysis = None
+        if anon_old_rfp:
+            _update("gap_analysis", 35, "Analyse des ecarts ancien/nouveau AO (appel IA)...")
+            gap_analysis = await ai_service.analyze_gap(anon_old_rfp, anon_new_rfp)
+            _update("gap_analysis", 50, "Analyse des ecarts terminee")
 
-            if not structure:
-                _generation_progress[pid] = {
-                    "status": "error", "step": "error", "progress": 0,
-                    "message": "L'IA n'a pas retourne de structure valide. Reessayez.",
-                }
-                return
+        _update("generating", 55, "Generation de la structure par l'IA (peut prendre 1-2 min)...")
+        structure = await ai_service.generate_response_structure(
+            new_rfp_content=anon_new_rfp,
+            old_rfp_content=anon_old_rfp,
+            old_response_content=anon_old_response,
+            gap_analysis=gap_analysis,
+        )
 
-            _update("generating", 80,
-                    f"Structure generee: {len(structure)} chapitres principaux")
+        if not structure:
+            _generation_progress[pid] = {
+                "status": "error", "step": "error", "progress": 0,
+                "message": "L'IA n'a pas retourne de structure valide. Reessayez.",
+            }
+            return
 
-            # ── Step 5: Create chapters in DB ──
-            _update("saving", 85, "Enregistrement des chapitres en base...")
-            order = 0
-            created_count = 0
-            delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
+        _update("generating", 80,
+                f"Structure generee: {len(structure)} chapitres principaux")
 
+        # ── Phase 3: Save to DB (short-lived session) ──
+        _update("saving", 85, "Enregistrement des chapitres en base...")
+        order = 0
+        created_count = 0
+        delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
+
+        async with async_session() as db:
             async def create_chapters_recursive(items, parent_id=None):
                 nonlocal order, created_count
                 for item in items:
@@ -444,15 +445,15 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             await create_chapters_recursive(structure)
             await db.commit()
 
-            _generation_progress[pid] = {
-                "status": "completed",
-                "step": "done",
-                "progress": 100,
-                "chapters_created": created_count,
-                "delta_stats": delta_stats,
-                "has_gap_analysis": gap_analysis is not None,
-                "message": f"{created_count} chapitres crees ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifies, {delta_stats['unchanged']} inchanges)",
-            }
+        _generation_progress[pid] = {
+            "status": "completed",
+            "step": "done",
+            "progress": 100,
+            "chapters_created": created_count,
+            "delta_stats": delta_stats,
+            "has_gap_analysis": gap_analysis is not None,
+            "message": f"{created_count} chapitres crees ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifies, {delta_stats['unchanged']} inchanges)",
+        }
 
     except Exception as e:
         logger.exception("Structure generation failed for project %s", project_id)
