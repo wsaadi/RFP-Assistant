@@ -102,6 +102,57 @@ class AnonymizationService:
         mappings = result.scalars().all()
         return {m.anonymized_value: m.original_value for m in mappings}
 
+    # Max words per segment for GLiNER (DeBERTa max_position_embeddings=384 tokens)
+    # ~250 words stays safely under 384 tokens for French text
+    _GLINER_SEGMENT_WORDS = 250
+    _GLINER_OVERLAP_WORDS = 30
+
+    @classmethod
+    def _predict_on_segments(cls, model, text: str) -> List[Tuple[str, str, int, int]]:
+        """Run GLiNER prediction on overlapping text segments to avoid truncation."""
+        words = text.split()
+        if len(words) <= cls._GLINER_SEGMENT_WORDS:
+            # Short text — predict directly
+            predictions = model.predict_entities(text, GLINER_LABELS, threshold=0.4)
+            return [
+                (p["text"], p["label"], p["start"], p["end"])
+                for p in predictions
+            ]
+
+        entities = []
+        seen = set()  # (entity_text, start) to deduplicate overlapping segments
+        step = cls._GLINER_SEGMENT_WORDS - cls._GLINER_OVERLAP_WORDS
+        char_offset = 0
+
+        for i in range(0, len(words), step):
+            segment_words = words[i: i + cls._GLINER_SEGMENT_WORDS]
+            segment_text = " ".join(segment_words)
+
+            # Calculate the character offset of this segment in the original text
+            if i == 0:
+                char_offset = 0
+            else:
+                # Find the start of the i-th word in the original text
+                char_offset = 0
+                count = 0
+                for j, ch in enumerate(text):
+                    if count == i:
+                        char_offset = j
+                        break
+                    if ch == ' ' and (j == 0 or text[j - 1] != ' '):
+                        count += 1
+
+            predictions = model.predict_entities(segment_text, GLINER_LABELS, threshold=0.4)
+            for pred in predictions:
+                abs_start = char_offset + pred["start"]
+                abs_end = char_offset + pred["end"]
+                key = (pred["text"], abs_start)
+                if key not in seen:
+                    seen.add(key)
+                    entities.append((pred["text"], pred["label"], abs_start, abs_end))
+
+        return entities
+
     @classmethod
     def detect_entities(cls, text: str) -> List[Tuple[str, str, int, int]]:
         """Detect named entities in text using GLiNER and regex.
@@ -110,18 +161,11 @@ class AnonymizationService:
         """
         entities = []
 
-        # Try GLiNER first
+        # Try GLiNER first (split into segments to avoid truncation)
         model = cls._get_model()
         if model is not None:
             try:
-                predictions = model.predict_entities(text, GLINER_LABELS, threshold=0.4)
-                for pred in predictions:
-                    entities.append((
-                        pred["text"],
-                        pred["label"],
-                        pred["start"],
-                        pred["end"],
-                    ))
+                entities.extend(cls._predict_on_segments(model, text))
             except Exception as e:
                 print(f"GLiNER prediction error: {e}")
 
