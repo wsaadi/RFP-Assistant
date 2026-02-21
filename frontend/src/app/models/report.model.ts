@@ -167,6 +167,17 @@ export interface ComplianceAnalysis {
   summary: string;
 }
 
+// ── Generation Progress ──
+export interface GenerationStatus {
+  status: 'idle' | 'running' | 'completed' | 'error';
+  step: string;
+  progress: number;
+  message: string;
+  chapters_created?: number;
+  delta_stats?: { new: number; modified: number; unchanged: number };
+  has_gap_analysis?: boolean;
+}
+
 // ── Statistics ──
 export interface ProjectStatistics {
   total_pages: number;

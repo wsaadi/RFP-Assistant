@@ -18,7 +18,7 @@ import { MatExpansionModule } from '@angular/material/expansion';
 import { Subscription, interval } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
-import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics } from '../../models/report.model';
+import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus } from '../../models/report.model';
 
 @Component({
   selector: 'app-project-dashboard',
@@ -131,17 +131,47 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics 
         <mat-tab label="Structure">
           <div class="tab-content">
             <div class="chapter-actions">
-              <button mat-raised-button color="primary" (click)="generateStructure()" [disabled]="generatingStructure">
-                <mat-spinner *ngIf="generatingStructure" diameter="18"></mat-spinner>
-                <mat-icon *ngIf="!generatingStructure">auto_fix_high</mat-icon>
-                Générer la structure depuis l'AO
+              <button mat-raised-button color="primary" (click)="generateStructure()"
+                [disabled]="generatingStructure || genStatus?.status === 'running'">
+                <mat-spinner *ngIf="generatingStructure || genStatus?.status === 'running'" diameter="18"></mat-spinner>
+                <mat-icon *ngIf="!generatingStructure && genStatus?.status !== 'running'">auto_fix_high</mat-icon>
+                Generer la structure depuis l'AO
               </button>
               <button mat-raised-button color="accent" (click)="prefillAll()" [disabled]="prefilling">
                 <mat-spinner *ngIf="prefilling" diameter="18"></mat-spinner>
                 <mat-icon *ngIf="!prefilling">auto_awesome</mat-icon>
-                Pré-remplir depuis ancienne réponse
+                Pre-remplir depuis ancienne reponse
               </button>
             </div>
+
+            <!-- Generation progress panel -->
+            <mat-card *ngIf="genStatus && genStatus.status === 'running'" class="gen-progress-card">
+              <div class="gen-progress-header">
+                <mat-icon class="spin-icon">autorenew</mat-icon>
+                <h3>Generation de la structure en cours...</h3>
+              </div>
+              <mat-progress-bar mode="determinate" [value]="genStatus.progress"></mat-progress-bar>
+              <div class="gen-progress-detail">
+                <span class="gen-step">{{ genStepLabel(genStatus.step) }}</span>
+                <span class="gen-pct">{{ genStatus.progress }}%</span>
+              </div>
+              <p class="gen-message">{{ genStatus.message }}</p>
+            </mat-card>
+
+            <mat-card *ngIf="genStatus && genStatus.status === 'error'" class="gen-error-card">
+              <mat-icon>error_outline</mat-icon>
+              <div>
+                <strong>Echec de la generation</strong>
+                <p>{{ genStatus.message }}</p>
+              </div>
+            </mat-card>
+
+            <mat-card *ngIf="genStatus && genStatus.status === 'completed' && genStatus.chapters_created" class="gen-success-card">
+              <mat-icon>check_circle</mat-icon>
+              <div>
+                <strong>{{ genStatus.message }}</strong>
+              </div>
+            </mat-card>
 
             <div class="chapter-tree">
               <mat-accordion multi>
@@ -292,6 +322,20 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics 
     .full-width { width: 100%; }
     .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
+    .gen-progress-card { margin: 16px 0; padding: 20px; border-left: 4px solid #1976d2; }
+    .gen-progress-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .gen-progress-header h3 { margin: 0; color: #1976d2; font-size: 15px; }
+    .gen-progress-detail { display: flex; justify-content: space-between; margin-top: 8px; }
+    .gen-step { font-size: 13px; color: #1976d2; font-weight: 500; }
+    .gen-pct { font-size: 13px; color: #888; }
+    .gen-message { font-size: 13px; color: #555; margin: 8px 0 0 0; }
+    .gen-error-card { margin: 16px 0; padding: 20px; border-left: 4px solid #d32f2f; display: flex; align-items: flex-start; gap: 12px; }
+    .gen-error-card mat-icon { color: #d32f2f; }
+    .gen-error-card p { margin: 4px 0 0 0; color: #666; font-size: 13px; }
+    .gen-success-card { margin: 16px 0; padding: 20px; border-left: 4px solid #4caf50; display: flex; align-items: center; gap: 12px; }
+    .gen-success-card mat-icon { color: #4caf50; font-size: 28px; width: 28px; height: 28px; }
+    @keyframes spin { 100% { transform: rotate(360deg); } }
+    .spin-icon { animation: spin 1.5s linear infinite; color: #1976d2; }
     .doc-item-wrap { border-bottom: 1px solid #eee; }
     .doc-progress { padding: 0 16px 12px 56px; }
     .progress-info { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
@@ -308,6 +352,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   progressMap: Record<string, DocumentProgress> = {};
   loading = true;
   generatingStructure = false;
+  genStatus: GenerationStatus | null = null;
+  private genPollSub: Subscription | null = null;
   prefilling = false;
   showImprovementForm = false;
   improvementContent = '';
@@ -334,6 +380,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.stopPolling();
+    this.stopGenPolling();
   }
 
   loadAll(): void {
@@ -439,17 +486,53 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   generateStructure(): void {
     this.generatingStructure = true;
+    this.genStatus = null;
     this.api.generateStructure(this.projectId).subscribe({
-      next: (res) => {
-        this.snackBar.open(res.message || `${res.chapters_created} chapitres crees`, 'OK', { duration: 5000 });
+      next: () => {
         this.generatingStructure = false;
-        this.loadAll();
+        this.startGenPolling();
       },
       error: (err) => {
         this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
         this.generatingStructure = false;
       },
     });
+  }
+
+  private startGenPolling(): void {
+    this.stopGenPolling();
+    this.genPollSub = interval(2000).pipe(
+      switchMap(() => this.api.getGenerationStatus(this.projectId))
+    ).subscribe({
+      next: (status) => {
+        this.genStatus = status;
+        if (status.status === 'completed') {
+          this.stopGenPolling();
+          this.snackBar.open(status.message || 'Structure generee', 'OK', { duration: 5000 });
+          this.loadAll();
+        } else if (status.status === 'error') {
+          this.stopGenPolling();
+        }
+      },
+    });
+  }
+
+  private stopGenPolling(): void {
+    this.genPollSub?.unsubscribe();
+    this.genPollSub = null;
+  }
+
+  genStepLabel(step: string): string {
+    const labels: Record<string, string> = {
+      starting: 'Demarrage',
+      loading: 'Chargement des documents',
+      anonymizing: 'Anonymisation',
+      gap_analysis: 'Analyse des ecarts',
+      generating: 'Generation IA',
+      saving: 'Enregistrement',
+      done: 'Termine',
+    };
+    return labels[step] || step;
   }
 
   prefillAll(): void {
