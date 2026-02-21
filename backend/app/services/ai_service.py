@@ -119,15 +119,24 @@ class MistralAIService:
                     if chunk.choices:
                         delta = chunk.choices[0].delta
                         content = getattr(delta, "content", None)
-                        if content and content is not None:
-                            # content may be str or list; coerce to str
-                            text = content if isinstance(content, str) else str(content)
-                            chunks.append(text)
-                            token_count += 1
+                        if content is not None and content:
+                            # content may be str or list of TextChunk/ThinkChunk
+                            if isinstance(content, str):
+                                text = content
+                            elif isinstance(content, list):
+                                text = "".join(
+                                    getattr(part, "text", "") for part in content
+                                )
+                            else:
+                                text = str(content)
 
-                            if on_progress and token_count % 50 == 0:
-                                total_chars = sum(len(c) for c in chunks)
-                                await on_progress(token_count, total_chars)
+                            if text:
+                                chunks.append(text)
+                                token_count += 1
+
+                                if on_progress and token_count % 50 == 0:
+                                    total_chars = sum(len(c) for c in chunks)
+                                    await on_progress(token_count, total_chars)
 
         except asyncio.TimeoutError:
             logger.error("Mistral stream init timed out after 60s (input ~%d chars)", input_chars)
