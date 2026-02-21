@@ -36,6 +36,8 @@ services:
       - EXPORT_DIR=/app/data/exports
       - IMAGES_DIR=/app/data/images
       - CHROMA_PERSIST_DIR=/app/data/chroma
+      - HF_TOKEN=${HF_TOKEN:-}
+      - HF_HOME=/app/data/huggingface
     volumes:
       - backend_data:/app/data
     ports:

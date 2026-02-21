@@ -19,6 +19,7 @@ class DocumentCategory(str, enum.Enum):
 class FileType(str, enum.Enum):
     PDF = "pdf"
     DOCX = "docx"
+    DOC = "doc"
     XLSX = "xlsx"
     XLS = "xls"
     PPTX = "pptx"

@@ -4,6 +4,9 @@ import io
 import re
 import uuid
 import hashlib
+import shutil
+import subprocess
+import tempfile
 import zipfile
 from typing import List, Dict, Tuple, Optional
 
@@ -30,12 +33,43 @@ class DocumentProcessor:
         type_map = {
             "pdf": "pdf",
             "docx": "docx",
-            "doc": "docx",
+            "doc": "doc",
             "xlsx": "xlsx",
             "xls": "xls",
             "pptx": "pptx",
         }
         return type_map.get(ext, "other")
+
+    @staticmethod
+    def convert_doc_to_docx(file_content: bytes) -> bytes:
+        """Convert old .doc format to .docx using LibreOffice.
+
+        Returns the .docx file content as bytes.
+        Raises RuntimeError if conversion fails.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            doc_path = os.path.join(tmpdir, "input.doc")
+            with open(doc_path, "wb") as f:
+                f.write(file_content)
+
+            result = subprocess.run(
+                [
+                    "libreoffice", "--headless", "--norestore",
+                    "--convert-to", "docx",
+                    "--outdir", tmpdir,
+                    doc_path,
+                ],
+                capture_output=True,
+                timeout=120,
+            )
+
+            docx_path = os.path.join(tmpdir, "input.docx")
+            if result.returncode != 0 or not os.path.exists(docx_path):
+                stderr = result.stderr.decode(errors="ignore")
+                raise RuntimeError(f"LibreOffice conversion failed: {stderr[:200]}")
+
+            with open(docx_path, "rb") as f:
+                return f.read()
 
     @staticmethod
     def _validate_docx(file_content: bytes) -> bool:

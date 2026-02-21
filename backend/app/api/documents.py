@@ -58,6 +58,18 @@ async def process_document_background(document_id: str, project_id: str):
                 ProgressTracker.update(document_id, "extracting_images")
                 images_data = DocumentProcessor.extract_images_from_pdf(file_content, document_id)
 
+            elif document.file_type == FileType.DOC:
+                # Convert .doc to .docx via LibreOffice, then process as DOCX
+                try:
+                    docx_content = DocumentProcessor.convert_doc_to_docx(file_content)
+                    text, sections = DocumentProcessor.extract_text_from_docx(docx_content)
+                    document.page_count = max(1, len(text.split()) // 300)
+                    ProgressTracker.update(document_id, "extracting_images")
+                    images_data = DocumentProcessor.extract_images_from_docx(docx_content, document_id)
+                except Exception as doc_err:
+                    print(f"DOC conversion/parsing failed: {doc_err}")
+                    text = ""
+
             elif document.file_type == FileType.DOCX:
                 try:
                     text, sections = DocumentProcessor.extract_text_from_docx(file_content)
@@ -65,13 +77,8 @@ async def process_document_background(document_id: str, project_id: str):
                     ProgressTracker.update(document_id, "extracting_images")
                     images_data = DocumentProcessor.extract_images_from_docx(file_content, document_id)
                 except (ValueError, Exception) as docx_err:
-                    # Fallback: try PyMuPDF for old .doc or malformed .docx
-                    print(f"DOCX parsing failed, trying PyMuPDF fallback: {docx_err}")
-                    try:
-                        text, page_count, pages_data = DocumentProcessor.extract_text_from_pdf(file_content)
-                        document.page_count = page_count
-                    except Exception:
-                        text = ""
+                    print(f"DOCX parsing failed: {docx_err}")
+                    text = ""
 
             elif document.file_type in (FileType.XLSX, FileType.XLS):
                 text = DocumentProcessor.extract_text_from_excel(file_content)
