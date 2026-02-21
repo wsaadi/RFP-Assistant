@@ -3,7 +3,7 @@ import asyncio
 import json
 import logging
 import re
-from typing import List, Optional, Dict
+from typing import Awaitable, Callable, List, Optional, Dict
 
 from mistralai import Mistral
 
@@ -67,6 +67,88 @@ class MistralAIService:
         logger.info("Mistral response: %d chars (~%d tokens)", len(result), len(result) // 4)
         return result
 
+    async def generate_streaming(
+        self, system_prompt: str, user_prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout: float = 600,
+        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    ) -> str:
+        """Generate text using Mistral streaming API.
+
+        Streams tokens one by one. Calls ``on_progress(tokens_received, chars_received)``
+        every ~50 tokens so the caller can update a progress indicator with real data.
+
+        Args:
+            on_progress: async callback(token_count, char_count) called periodically.
+            timeout: Hard wall-clock timeout for the entire stream (default 10 min).
+        """
+        import time
+
+        input_chars = len(system_prompt) + len(user_prompt)
+        effective_max = max_tokens or self.max_tokens
+        logger.info("Mistral STREAM call: ~%d input chars (~%d tokens), max_output=%d, model=%s",
+                     input_chars, input_chars // 4, effective_max, self.model)
+
+        t0 = time.monotonic()
+        chunks: list[str] = []
+        token_count = 0
+
+        try:
+            stream = await asyncio.wait_for(
+                self._client.chat.stream_async(
+                    model=self.model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt},
+                    ],
+                    temperature=temperature or self.temperature,
+                    max_tokens=effective_max,
+                ),
+                timeout=60,  # 60s to *start* the stream
+            )
+
+            async with stream as event_stream:
+                async for event in event_stream:
+                    # Wall-clock guard
+                    if time.monotonic() - t0 > timeout:
+                        logger.error("Streaming timed out after %.0fs", timeout)
+                        raise TimeoutError(f"L'appel IA a expire apres {timeout:.0f}s.")
+
+                    chunk = event.data
+                    if chunk.choices:
+                        delta = chunk.choices[0].delta
+                        content = getattr(delta, "content", None)
+                        if content is not None and content:
+                            # content may be str or list of TextChunk/ThinkChunk
+                            if isinstance(content, str):
+                                text = content
+                            elif isinstance(content, list):
+                                text = "".join(
+                                    getattr(part, "text", "") for part in content
+                                )
+                            else:
+                                text = str(content)
+
+                            if text:
+                                chunks.append(text)
+                                token_count += 1
+
+                                if on_progress and token_count % 50 == 0:
+                                    total_chars = sum(len(c) for c in chunks)
+                                    await on_progress(token_count, total_chars)
+
+        except asyncio.TimeoutError:
+            logger.error("Mistral stream init timed out after 60s (input ~%d chars)", input_chars)
+            raise TimeoutError("L'appel IA a expire en attendant le debut du stream.")
+
+        result = "".join(chunks)
+        elapsed = time.monotonic() - t0
+        logger.info("Mistral stream done: %d tokens, %d chars in %.1fs (%.0f tok/s)",
+                     token_count, len(result), elapsed,
+                     token_count / elapsed if elapsed > 0 else 0)
+        return result
+
     async def test_connection(self) -> str:
         """Test the API connection."""
         return await self.generate(
@@ -76,7 +158,8 @@ class MistralAIService:
         )
 
     async def analyze_gap(
-        self, old_rfp_content: str, new_rfp_content: str
+        self, old_rfp_content: str, new_rfp_content: str,
+        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
     ) -> Dict:
         """Analyze differences between old and new RFP."""
         system_prompt = """Tu es un expert en analyse d'appels d'offres.
@@ -105,7 +188,10 @@ NOUVEL APPEL D'OFFRES:
 
 Analyse les écarts entre ces deux appels d'offres."""
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=12000, timeout=600)
+        response = await self.generate_streaming(
+            system_prompt, user_prompt, temperature=0.2, max_tokens=12000,
+            timeout=600, on_progress=on_progress,
+        )
         try:
             json_match = re.search(r'\{[\s\S]*\}', response)
             if json_match:
@@ -121,6 +207,7 @@ Analyse les écarts entre ces deux appels d'offres."""
         old_rfp_content: str = "",
         old_response_content: str = "",
         gap_analysis: Optional[Dict] = None,
+        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
     ) -> List[Dict]:
         """Generate the complete response structure by deeply analyzing the new RFP,
         comparing with the old RFP, and leveraging the old response."""
@@ -201,7 +288,10 @@ Valeurs de delta:
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += "\n\nAnalyse en profondeur le nouvel AO et génère la structure complète et idéale de la réponse."
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=12000, timeout=600)
+        response = await self.generate_streaming(
+            system_prompt, user_prompt, temperature=0.2, max_tokens=12000,
+            timeout=600, on_progress=on_progress,
+        )
         try:
             json_match = re.search(r'\[[\s\S]*\]', response)
             if json_match:
