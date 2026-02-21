@@ -15,7 +15,7 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatExpansionModule } from '@angular/material/expansion';
-import { Subscription, interval } from 'rxjs';
+import { Subscription, interval, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus } from '../../models/report.model';
@@ -376,6 +376,15 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
     this.loadAll();
+    // Resume generation polling if a task was already running (e.g. page refresh)
+    this.api.getGenerationStatus(this.projectId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.genStatus = status;
+          this.startGenPolling();
+        }
+      },
+    });
   }
 
   ngOnDestroy(): void {
@@ -486,7 +495,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   generateStructure(): void {
     this.generatingStructure = true;
-    this.genStatus = null;
+    // Show progress card immediately instead of null
+    this.genStatus = {
+      status: 'running',
+      step: 'starting',
+      progress: 0,
+      message: 'Lancement de la generation...',
+    };
     this.api.generateStructure(this.projectId).subscribe({
       next: () => {
         this.generatingStructure = false;
@@ -495,13 +510,15 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       error: (err) => {
         this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
         this.generatingStructure = false;
+        this.genStatus = null;
       },
     });
   }
 
   private startGenPolling(): void {
     this.stopGenPolling();
-    this.genPollSub = interval(2000).pipe(
+    // timer(0, 2000) emits immediately at t=0, then every 2s (unlike interval which waits)
+    this.genPollSub = timer(0, 2000).pipe(
       switchMap(() => this.api.getGenerationStatus(this.projectId))
     ).subscribe({
       next: (status) => {
