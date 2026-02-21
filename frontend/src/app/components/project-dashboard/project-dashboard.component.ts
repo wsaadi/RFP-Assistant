@@ -441,7 +441,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.generatingStructure = true;
     this.api.generateStructure(this.projectId).subscribe({
       next: (res) => {
-        this.snackBar.open(`${res.chapters_created} chapitres créés`, 'OK', { duration: 3000 });
+        this.snackBar.open(res.message || `${res.chapters_created} chapitres crees`, 'OK', { duration: 5000 });
         this.generatingStructure = false;
         this.loadAll();
       },

@@ -7,7 +7,7 @@ import {
   DocumentInfo, DocumentImage, DocumentProgress,
   Chapter,
   GapAnalysis, ComplianceAnalysis,
-  ProjectStatistics, AnonymizationMapping,
+  ProjectStatistics, AnonymizationMapping, AnonymizationReport,
   SearchResult, DocumentPreview,
   AIConfig, AIConfigUpdate,
   UserInfo, UserCreate, UserUpdate,
@@ -154,7 +154,7 @@ export class ApiService {
     return this.http.post<{ analysis: GapAnalysis }>(`${this.baseUrl}/projects/${projectId}/gap-analysis`, {});
   }
 
-  generateStructure(projectId: string): Observable<{ chapters_created: number }> {
+  generateStructure(projectId: string): Observable<{ chapters_created: number; message?: string; delta_stats?: any }> {
     return this.http.post<{ chapters_created: number }>(`${this.baseUrl}/projects/${projectId}/generate-structure`, {});
   }
 
@@ -176,6 +176,10 @@ export class ApiService {
 
   getAnonymizationMappings(projectId: string): Observable<AnonymizationMapping[]> {
     return this.http.get<AnonymizationMapping[]>(`${this.baseUrl}/projects/${projectId}/anonymization-mappings`);
+  }
+
+  getAnonymizationReport(projectId: string): Observable<AnonymizationReport> {
+    return this.http.get<AnonymizationReport>(`${this.baseUrl}/projects/${projectId}/anonymization-report`);
   }
 
   // ── Export/Import ──

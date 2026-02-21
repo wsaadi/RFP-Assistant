@@ -95,48 +95,85 @@ Analyse les écarts entre ces deux appels d'offres."""
                 "modified_requirements": [], "unchanged_requirements": []}
 
     async def generate_response_structure(
-        self, rfp_content: str, old_response_structure: str = ""
+        self,
+        new_rfp_content: str,
+        old_rfp_content: str = "",
+        old_response_content: str = "",
+        gap_analysis: Optional[Dict] = None,
     ) -> List[Dict]:
-        """Generate the complete response structure from the RFP requirements."""
-        system_prompt = """Tu es un expert en réponse aux appels d'offres.
-À partir du contenu d'un appel d'offres, génère la structure complète de la réponse.
+        """Generate the complete response structure by deeply analyzing the new RFP,
+        comparing with the old RFP, and leveraging the old response."""
+        system_prompt = """Tu es un expert senior en réponse aux appels d'offres avec 20 ans d'expérience.
 
-La structure doit inclure:
-- Chapitres principaux
-- Sous-chapitres
-- Annexes requises
-- Documents à fournir
+Ta mission est de créer la STRUCTURE IDÉALE et COMPLÈTE de la réponse au nouvel appel d'offres.
 
-Réponds au format JSON (sans markdown):
+## Ta méthodologie:
+1. ANALYSE EXHAUSTIVE du nouvel AO: identifie TOUTES les exigences, critères, lots, livrables demandés
+2. COMPARAISON avec l'ancien AO: identifie ce qui a changé, ce qui est nouveau, ce qui a disparu
+3. CAPITALISATION sur l'ancienne réponse: reprends la structure qui fonctionnait et adapte-la
+4. CONSTRUCTION du chapitrage idéal: crée une structure qui couvre 100% des exigences du nouvel AO
+
+## Règles pour la structure:
+- Chaque exigence du nouvel AO DOIT être couverte par au moins un chapitre/sous-chapitre
+- Les chapitres suivent l'ordre logique attendu par l'acheteur (souvent celui du RC/CCTP)
+- Inclure les chapitres administratifs (présentation société, références, moyens, etc.)
+- Inclure les annexes et documents à fournir mentionnés dans l'AO
+- Les descriptions doivent être précises et indiquer clairement le contenu attendu
+- Le champ rfp_requirement doit citer EXACTEMENT l'exigence de l'AO concernée
+- Le champ delta indique si c'est une exigence nouvelle, modifiée, ou inchangée par rapport à l'ancien AO
+
+Réponds UNIQUEMENT au format JSON suivant (sans markdown, sans commentaire):
 [
   {
-    "title": "...",
-    "description": "...",
-    "chapter_type": "chapter|sub_chapter|annexe|document_to_provide",
-    "rfp_requirement": "exigence originale de l'AO",
+    "title": "Titre du chapitre",
+    "description": "Description détaillée du contenu attendu dans ce chapitre",
+    "chapter_type": "chapter",
+    "rfp_requirement": "Citation exacte ou résumé de l'exigence du nouvel AO",
+    "delta": "new|modified|unchanged|removed_context",
     "children": [
       {
-        "title": "...",
-        "description": "...",
+        "title": "Titre du sous-chapitre",
+        "description": "Description détaillée",
         "chapter_type": "sub_chapter",
-        "rfp_requirement": "...",
+        "rfp_requirement": "Exigence spécifique",
+        "delta": "new|modified|unchanged",
         "children": []
       }
     ]
   }
-]"""
+]
 
-        context = ""
-        if old_response_structure:
-            context = f"\n\nSTRUCTURE DE L'ANCIENNE RÉPONSE (pour référence):\n{old_response_structure}"
+Valeurs de delta:
+- "new": exigence absente de l'ancien AO
+- "modified": exigence existante mais modifiée
+- "unchanged": exigence identique à l'ancien AO
+- "removed_context": chapitre nécessaire même si l'exigence directe a été retirée (contexte, transition)"""
 
-        user_prompt = f"""APPEL D'OFFRES:
-{rfp_content[:15000]}
-{context}
+        parts = []
 
-Génère la structure complète de la réponse à cet appel d'offres."""
+        parts.append(f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:20000]}")
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000)
+        if old_rfp_content:
+            parts.append(f"CONTENU DE L'ANCIEN APPEL D'OFFRES:\n{old_rfp_content[:12000]}")
+
+        if old_response_content:
+            parts.append(f"CONTENU DE L'ANCIENNE RÉPONSE (structure et texte):\n{old_response_content[:12000]}")
+
+        if gap_analysis:
+            gap_summary = []
+            for req in gap_analysis.get("new_requirements", []):
+                gap_summary.append(f"  [NOUVEAU] {req.get('title', '')}: {req.get('description', '')}")
+            for req in gap_analysis.get("modified_requirements", []):
+                gap_summary.append(f"  [MODIFIÉ] {req.get('title', '')}: {req.get('new_description', '')}")
+            for req in gap_analysis.get("removed_requirements", []):
+                gap_summary.append(f"  [SUPPRIMÉ] {req.get('title', '')}: {req.get('description', '')}")
+            if gap_summary:
+                parts.append(f"ANALYSE DES ÉCARTS ANCIEN/NOUVEAU AO:\n" + "\n".join(gap_summary))
+
+        user_prompt = "\n\n---\n\n".join(parts)
+        user_prompt += "\n\nAnalyse en profondeur le nouvel AO et génère la structure complète et idéale de la réponse."
+
+        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=12000)
         try:
             json_match = re.search(r'\[[\s\S]*\]', response)
             if json_match:
