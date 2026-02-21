@@ -266,6 +266,25 @@ async def _get_all_chunks_by_category(
     return "\n\n".join([c.content for c in chunks if c.content.strip()])
 
 
+async def _get_all_chunks_anonymized_by_category(
+    db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory
+) -> str:
+    """Get ALL pre-anonymized document chunks for a category.
+    Uses anonymized_content already computed at upload time, avoiding
+    redundant GLiNER inference."""
+    result = await db.execute(
+        select(DocumentChunk)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.project_id == project_id)
+        .where(Document.category == category)
+        .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
+    )
+    chunks = result.scalars().all()
+    return "\n\n".join([
+        (c.anonymized_content or c.content) for c in chunks if (c.anonymized_content or c.content).strip()
+    ])
+
+
 @router.post("/{project_id}/generate-structure")
 async def generate_structure(
     project_id: uuid.UUID,
@@ -340,43 +359,25 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # ── Step 1: Load all document content ──
+            # ── Step 1: Load pre-anonymized document content ──
+            # Chunks are already anonymized at upload time, no need to re-run GLiNER
             _update("loading", 5, "Chargement des documents du nouvel AO...")
-            new_rfp_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.NEW_RFP)
-            if not new_rfp_content:
+            anon_new_rfp = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP)
+            if not anon_new_rfp:
                 _generation_progress[pid] = {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "Aucun document de nouvel appel d'offres indexe",
                 }
                 return
 
-            _update("loading", 10, "Chargement de l'ancien AO et ancienne reponse...")
-            old_rfp_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.OLD_RFP)
-            old_response_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.OLD_RESPONSE)
+            _update("loading", 15, "Chargement de l'ancien AO et ancienne reponse...")
+            anon_old_rfp = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RFP)
+            anon_old_response = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE)
 
-            new_len = len(new_rfp_content)
-            old_rfp_len = len(old_rfp_content)
-            old_resp_len = len(old_response_content)
-            _update("loading", 15,
-                    f"Documents charges: nouvel AO ({new_len:,} car.), "
-                    f"ancien AO ({old_rfp_len:,} car.), "
-                    f"ancienne reponse ({old_resp_len:,} car.)")
-
-            # ── Step 2: Anonymize ──
-            _update("anonymizing", 20, "Anonymisation du nouvel AO...")
-            anon_new_rfp = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
-
-            anon_old_rfp = ""
-            if old_rfp_content:
-                _update("anonymizing", 25, "Anonymisation de l'ancien AO...")
-                anon_old_rfp = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
-
-            anon_old_response = ""
-            if old_response_content:
-                _update("anonymizing", 30, "Anonymisation de l'ancienne reponse...")
-                anon_old_response = await AnonymizationService.anonymize_text(old_response_content, project_id, db)
-
-            await db.commit()  # persist new anonymization mappings
+            _update("loading", 25,
+                    f"Documents charges: nouvel AO ({len(anon_new_rfp):,} car.), "
+                    f"ancien AO ({len(anon_old_rfp):,} car.), "
+                    f"ancienne reponse ({len(anon_old_response):,} car.)")
 
             # ── Step 3: Gap analysis (if old RFP available) ──
             gap_analysis = None
