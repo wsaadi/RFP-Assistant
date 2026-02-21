@@ -41,15 +41,12 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_db()
 
-    # Ensure 'doc' value exists in file_type enum (for .doc support)
-    from .database import async_session as _session
+    # Ensure 'DOC' value exists in file_type enum (for .doc support)
+    # SQLAlchemy persists enum member names (uppercase), not values
     from sqlalchemy import text
-    async with _session() as _db:
-        try:
-            await _db.execute(text("ALTER TYPE file_type ADD VALUE IF NOT EXISTS 'doc'"))
-            await _db.commit()
-        except Exception:
-            await _db.rollback()
+    async with engine.connect() as conn:
+        await conn.execute(text("COMMIT"))
+        await conn.execute(text("ALTER TYPE file_type ADD VALUE IF NOT EXISTS 'DOC'"))
 
     # Create data directories
     for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir]:
