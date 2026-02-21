@@ -342,6 +342,50 @@ async def get_generation_status(
     })
 
 
+async def _run_ai_with_progress(
+    coro,
+    pid: str,
+    step: str,
+    start_pct: int,
+    end_pct: int,
+    message_template: str,
+    tick_interval: int = 15,
+):
+    """Run an AI coroutine while ticking progress every `tick_interval` seconds.
+
+    `message_template` may contain {elapsed} for the elapsed time in seconds.
+    Progress linearly interpolates between start_pct and end_pct over time,
+    capped at end_pct - 1 so the final jump is visible when the call completes.
+    """
+    import time
+    t0 = time.monotonic()
+
+    async def _ticker():
+        while True:
+            await asyncio.sleep(tick_interval)
+            elapsed = int(time.monotonic() - t0)
+            # Slow asymptotic progress: reaches ~75% of range after 3 min,
+            # ~90% after 6 min. Never reaches end_pct.
+            ratio = 1 - (1 / (1 + elapsed / 180))
+            pct = start_pct + int((end_pct - start_pct - 1) * ratio)
+            _generation_progress[pid] = {
+                "status": "running",
+                "step": step,
+                "progress": pct,
+                "message": message_template.format(elapsed=elapsed),
+            }
+
+    ticker = asyncio.create_task(_ticker())
+    try:
+        return await coro
+    finally:
+        ticker.cancel()
+        try:
+            await ticker
+        except asyncio.CancelledError:
+            pass
+
+
 async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UUID):
     """Background task for the full structure generation pipeline."""
     from ..database import async_session
@@ -369,30 +413,44 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 }
                 return
 
-            _update("loading", 15, "Chargement de l'ancien AO et ancienne reponse...")
+            _update("loading", 10, "Chargement de l'ancien AO et ancienne reponse...")
             anon_old_rfp = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RFP)
             anon_old_response = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE)
 
         # DB session released — all data is now in memory
 
-        _update("loading", 25,
-                f"Documents charges: nouvel AO ({len(anon_new_rfp):,} car.), "
-                f"ancien AO ({len(anon_old_rfp):,} car.), "
-                f"ancienne reponse ({len(anon_old_response):,} car.)")
+        new_rfp_k = len(anon_new_rfp) // 1000
+        old_rfp_k = len(anon_old_rfp) // 1000
+        old_resp_k = len(anon_old_response) // 1000
+        _update("loading", 15,
+                f"Documents charges: nouvel AO ({new_rfp_k}K car.), "
+                f"ancien AO ({old_rfp_k}K car.), "
+                f"ancienne reponse ({old_resp_k}K car.)")
 
-        # ── Phase 2: AI calls (no DB connection held) ──
+        # ── Phase 2: Gap analysis (if old RFP available, no DB held) ──
         gap_analysis = None
         if anon_old_rfp:
-            _update("gap_analysis", 35, "Analyse des ecarts ancien/nouveau AO (appel IA)...")
-            gap_analysis = await ai_service.analyze_gap(anon_old_rfp, anon_new_rfp)
-            _update("gap_analysis", 50, "Analyse des ecarts terminee")
+            gap_analysis = await _run_ai_with_progress(
+                ai_service.analyze_gap(anon_old_rfp, anon_new_rfp),
+                pid, "gap_analysis", 15, 40,
+                "Analyse des ecarts ancien/nouveau AO... ({elapsed}s ecoules)",
+            )
+            gap_new = len(gap_analysis.get("new_requirements", []))
+            gap_mod = len(gap_analysis.get("modified_requirements", []))
+            gap_del = len(gap_analysis.get("removed_requirements", []))
+            _update("gap_analysis", 40,
+                    f"Ecarts identifies: {gap_new} nouvelles, {gap_mod} modifiees, {gap_del} supprimees")
 
-        _update("generating", 55, "Generation de la structure par l'IA (peut prendre 1-2 min)...")
-        structure = await ai_service.generate_response_structure(
-            new_rfp_content=anon_new_rfp,
-            old_rfp_content=anon_old_rfp,
-            old_response_content=anon_old_response,
-            gap_analysis=gap_analysis,
+        # ── Phase 3: Generate structure (main LLM call, no DB held) ──
+        structure = await _run_ai_with_progress(
+            ai_service.generate_response_structure(
+                new_rfp_content=anon_new_rfp,
+                old_rfp_content=anon_old_rfp,
+                old_response_content=anon_old_response,
+                gap_analysis=gap_analysis,
+            ),
+            pid, "generating", 40, 85,
+            "Generation IA de la structure en cours... ({elapsed}s ecoules)",
         )
 
         if not structure:
@@ -402,11 +460,11 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             }
             return
 
-        _update("generating", 80,
+        _update("generating", 85,
                 f"Structure generee: {len(structure)} chapitres principaux")
 
-        # ── Phase 3: Save to DB (short-lived session) ──
-        _update("saving", 85, "Enregistrement des chapitres en base...")
+        # ── Phase 4: Save to DB (short-lived session) ──
+        _update("saving", 88, "Enregistrement des chapitres en base...")
         order = 0
         created_count = 0
         delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
