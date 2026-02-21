@@ -1,7 +1,9 @@
 """RFP Project API routes."""
 import uuid
 import asyncio
-from fastapi import APIRouter, Depends, HTTPException, status
+import logging
+from typing import Dict
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -23,6 +25,10 @@ from ..services.anonymization_service import AnonymizationService
 from .deps import get_current_user
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
+logger = logging.getLogger(__name__)
+
+# In-memory progress tracking for long-running generation tasks
+_generation_progress: Dict[str, dict] = {}
 
 
 async def _get_ai_service(workspace_id: uuid.UUID, db: AsyncSession) -> MistralAIService:
@@ -263,89 +269,198 @@ async def _get_all_chunks_by_category(
 @router.post("/{project_id}/generate-structure")
 async def generate_structure(
     project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate the complete response structure by deeply analyzing the new RFP,
-    comparing with old RFP, and leveraging the old response."""
+    """Launch structure generation as a background task (returns immediately)."""
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    ai_service = await _get_ai_service(project.workspace_id, db)
+    # Quick check: has new RFP docs?
+    doc_count = (await db.execute(
+        select(func.count()).select_from(Document)
+        .where(Document.project_id == project_id)
+        .where(Document.category == DocumentCategory.NEW_RFP)
+    )).scalar() or 0
+    if doc_count == 0:
+        raise HTTPException(status_code=400, detail="Aucun document de nouvel appel d'offres indexe")
 
-    # ── 1. Get ALL content from DB (not vector search) for full coverage ──
-    new_rfp_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.NEW_RFP)
-    if not new_rfp_content:
-        raise HTTPException(status_code=400, detail="Aucun document de nouvel appel d'offres indexé")
+    pid = str(project_id)
 
-    old_rfp_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.OLD_RFP)
-    old_response_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.OLD_RESPONSE)
+    # Check if already running
+    existing = _generation_progress.get(pid)
+    if existing and existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Generation deja en cours")
 
-    # ── 2. Anonymize once, reuse for both gap analysis and structure ──
-    anon_new_rfp = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
-    anon_old_rfp = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db) if old_rfp_content else ""
-    anon_old_response = await AnonymizationService.anonymize_text(old_response_content, project_id, db) if old_response_content else ""
-
-    # ── 3. Run gap analysis if both old and new RFP available ──
-    gap_analysis = None
-    if anon_old_rfp:
-        gap_analysis = await ai_service.analyze_gap(anon_old_rfp, anon_new_rfp)
-
-    # ── 4. Generate structure with full context ──
-    structure = await ai_service.generate_response_structure(
-        new_rfp_content=anon_new_rfp,
-        old_rfp_content=anon_old_rfp,
-        old_response_content=anon_old_response,
-        gap_analysis=gap_analysis,
-    )
-
-    # ── 5. Create chapters from structure ──
-    order = 0
-    created_chapters = []
-    delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
-
-    async def create_chapters_recursive(items, parent_id=None):
-        nonlocal order
-        for item in items:
-            order += 1
-            delta = item.get("delta", "unchanged")
-            if delta in delta_stats:
-                delta_stats[delta] += 1
-
-            notes = []
-            if delta and delta != "unchanged":
-                notes.append({"type": "delta", "value": delta})
-
-            chapter = Chapter(
-                project_id=project_id,
-                parent_id=parent_id,
-                title=item.get("title", ""),
-                description=item.get("description", ""),
-                order=order,
-                chapter_type=item.get("chapter_type", "chapter"),
-                rfp_requirement=item.get("rfp_requirement", ""),
-                notes=notes,
-            )
-            db.add(chapter)
-            await db.flush()
-            created_chapters.append(chapter)
-
-            children = item.get("children", [])
-            if children:
-                await create_chapters_recursive(children, parent_id=chapter.id)
-
-    await create_chapters_recursive(structure)
-    await db.commit()
-
-    return {
-        "success": True,
-        "chapters_created": len(created_chapters),
-        "delta_stats": delta_stats,
-        "has_gap_analysis": gap_analysis is not None,
-        "message": f"{len(created_chapters)} chapitres créés ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifiés, {delta_stats['unchanged']} inchangés)",
+    workspace_id = project.workspace_id
+    _generation_progress[pid] = {
+        "status": "running",
+        "step": "starting",
+        "progress": 0,
+        "message": "Demarrage de la generation...",
     }
+
+    background_tasks.add_task(_run_structure_generation, project_id, workspace_id)
+
+    return {"success": True, "message": "Generation lancee en arriere-plan"}
+
+
+@router.get("/{project_id}/generation-status")
+async def get_generation_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of the structure generation task."""
+    pid = str(project_id)
+    return _generation_progress.get(pid, {
+        "status": "idle",
+        "step": "idle",
+        "progress": 0,
+        "message": "",
+    })
+
+
+async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UUID):
+    """Background task for the full structure generation pipeline."""
+    from ..database import async_session
+    pid = str(project_id)
+
+    def _update(step: str, progress: int, message: str):
+        _generation_progress[pid] = {
+            "status": "running",
+            "step": step,
+            "progress": progress,
+            "message": message,
+        }
+
+    try:
+        async with async_session() as db:
+            ai_service = await _get_ai_service(workspace_id, db)
+
+            # ── Step 1: Load all document content ──
+            _update("loading", 5, "Chargement des documents du nouvel AO...")
+            new_rfp_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.NEW_RFP)
+            if not new_rfp_content:
+                _generation_progress[pid] = {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "Aucun document de nouvel appel d'offres indexe",
+                }
+                return
+
+            _update("loading", 10, "Chargement de l'ancien AO et ancienne reponse...")
+            old_rfp_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.OLD_RFP)
+            old_response_content = await _get_all_chunks_by_category(db, project_id, DocumentCategory.OLD_RESPONSE)
+
+            new_len = len(new_rfp_content)
+            old_rfp_len = len(old_rfp_content)
+            old_resp_len = len(old_response_content)
+            _update("loading", 15,
+                    f"Documents charges: nouvel AO ({new_len:,} car.), "
+                    f"ancien AO ({old_rfp_len:,} car.), "
+                    f"ancienne reponse ({old_resp_len:,} car.)")
+
+            # ── Step 2: Anonymize ──
+            _update("anonymizing", 20, "Anonymisation du nouvel AO...")
+            anon_new_rfp = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
+
+            anon_old_rfp = ""
+            if old_rfp_content:
+                _update("anonymizing", 25, "Anonymisation de l'ancien AO...")
+                anon_old_rfp = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
+
+            anon_old_response = ""
+            if old_response_content:
+                _update("anonymizing", 30, "Anonymisation de l'ancienne reponse...")
+                anon_old_response = await AnonymizationService.anonymize_text(old_response_content, project_id, db)
+
+            await db.commit()  # persist new anonymization mappings
+
+            # ── Step 3: Gap analysis (if old RFP available) ──
+            gap_analysis = None
+            if anon_old_rfp:
+                _update("gap_analysis", 35, "Analyse des ecarts ancien/nouveau AO (appel IA)...")
+                gap_analysis = await ai_service.analyze_gap(anon_old_rfp, anon_new_rfp)
+                _update("gap_analysis", 50, "Analyse des ecarts terminee")
+
+            # ── Step 4: Generate structure (main LLM call) ──
+            _update("generating", 55, "Generation de la structure par l'IA (peut prendre 1-2 min)...")
+            structure = await ai_service.generate_response_structure(
+                new_rfp_content=anon_new_rfp,
+                old_rfp_content=anon_old_rfp,
+                old_response_content=anon_old_response,
+                gap_analysis=gap_analysis,
+            )
+
+            if not structure:
+                _generation_progress[pid] = {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "L'IA n'a pas retourne de structure valide. Reessayez.",
+                }
+                return
+
+            _update("generating", 80,
+                    f"Structure generee: {len(structure)} chapitres principaux")
+
+            # ── Step 5: Create chapters in DB ──
+            _update("saving", 85, "Enregistrement des chapitres en base...")
+            order = 0
+            created_count = 0
+            delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
+
+            async def create_chapters_recursive(items, parent_id=None):
+                nonlocal order, created_count
+                for item in items:
+                    order += 1
+                    created_count += 1
+                    delta = item.get("delta", "unchanged")
+                    if delta in delta_stats:
+                        delta_stats[delta] += 1
+
+                    notes = []
+                    if delta and delta != "unchanged":
+                        notes.append({"type": "delta", "value": delta})
+
+                    chapter = Chapter(
+                        project_id=project_id,
+                        parent_id=parent_id,
+                        title=item.get("title", ""),
+                        description=item.get("description", ""),
+                        order=order,
+                        chapter_type=item.get("chapter_type", "chapter"),
+                        rfp_requirement=item.get("rfp_requirement", ""),
+                        notes=notes,
+                    )
+                    db.add(chapter)
+                    await db.flush()
+
+                    children = item.get("children", [])
+                    if children:
+                        await create_chapters_recursive(children, parent_id=chapter.id)
+
+            await create_chapters_recursive(structure)
+            await db.commit()
+
+            _generation_progress[pid] = {
+                "status": "completed",
+                "step": "done",
+                "progress": 100,
+                "chapters_created": created_count,
+                "delta_stats": delta_stats,
+                "has_gap_analysis": gap_analysis is not None,
+                "message": f"{created_count} chapitres crees ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifies, {delta_stats['unchanged']} inchanges)",
+            }
+
+    except Exception as e:
+        logger.exception("Structure generation failed for project %s", project_id)
+        _generation_progress[pid] = {
+            "status": "error",
+            "step": "error",
+            "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        }
 
 
 @router.post("/{project_id}/prefill")
