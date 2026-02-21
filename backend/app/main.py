@@ -1,6 +1,12 @@
 """Main FastAPI application for RFP Response Assistant."""
 import os
+import warnings
 from contextlib import asynccontextmanager
+
+# Suppress noisy third-party warnings
+warnings.filterwarnings("ignore", message=".*resume_download.*is deprecated.*", category=FutureWarning)
+warnings.filterwarnings("ignore", message=".*resume_download.*is deprecated.*", category=UserWarning)
+os.environ.setdefault("ORT_LOG_LEVEL", "ERROR")  # Suppress ONNX Runtime CPU vendor warnings
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
