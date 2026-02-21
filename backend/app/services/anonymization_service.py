@@ -102,17 +102,18 @@ class AnonymizationService:
         mappings = result.scalars().all()
         return {m.anonymized_value: m.original_value for m in mappings}
 
-    # Max words per segment for GLiNER (DeBERTa max_position_embeddings=384 tokens)
-    # French text averages ~1.8 tokens/word, so 200 words ≈ 360 tokens (under 384)
-    _GLINER_SEGMENT_WORDS = 200
-    _GLINER_OVERLAP_WORDS = 30
+    # Max words per segment for GLiNER (DeBERTa tokenizer, max_position=384 tokens)
+    # French/technical text can reach ~2.5 tokens/word, so 150 words ≈ 375 tokens
+    _GLINER_SEGMENT_WORDS = 150
+    _GLINER_OVERLAP_WORDS = 20
 
     @classmethod
     def _predict_on_segments(cls, model, text: str) -> List[Tuple[str, str, int, int]]:
         """Run GLiNER prediction on overlapping text segments to avoid truncation."""
-        words = text.split()
-        if len(words) <= cls._GLINER_SEGMENT_WORDS:
-            # Short text — predict directly
+        # Build word boundary list: [(word_start_char, word_end_char), ...]
+        word_spans = [(m.start(), m.end()) for m in re.finditer(r'\S+', text)]
+
+        if len(word_spans) <= cls._GLINER_SEGMENT_WORDS:
             predictions = model.predict_entities(text, GLINER_LABELS, threshold=0.4)
             return [
                 (p["text"], p["label"], p["start"], p["end"])
@@ -120,32 +121,19 @@ class AnonymizationService:
             ]
 
         entities = []
-        seen = set()  # (entity_text, start) to deduplicate overlapping segments
+        seen = set()
         step = cls._GLINER_SEGMENT_WORDS - cls._GLINER_OVERLAP_WORDS
-        char_offset = 0
 
-        for i in range(0, len(words), step):
-            segment_words = words[i: i + cls._GLINER_SEGMENT_WORDS]
-            segment_text = " ".join(segment_words)
-
-            # Calculate the character offset of this segment in the original text
-            if i == 0:
-                char_offset = 0
-            else:
-                # Find the start of the i-th word in the original text
-                char_offset = 0
-                count = 0
-                for j, ch in enumerate(text):
-                    if count == i:
-                        char_offset = j
-                        break
-                    if ch == ' ' and (j == 0 or text[j - 1] != ' '):
-                        count += 1
+        for i in range(0, len(word_spans), step):
+            span_slice = word_spans[i: i + cls._GLINER_SEGMENT_WORDS]
+            seg_char_start = span_slice[0][0]
+            seg_char_end = span_slice[-1][1]
+            segment_text = text[seg_char_start:seg_char_end]
 
             predictions = model.predict_entities(segment_text, GLINER_LABELS, threshold=0.4)
             for pred in predictions:
-                abs_start = char_offset + pred["start"]
-                abs_end = char_offset + pred["end"]
+                abs_start = seg_char_start + pred["start"]
+                abs_end = seg_char_start + pred["end"]
                 key = (pred["text"], abs_start)
                 if key not in seen:
                     seen.add(key)
