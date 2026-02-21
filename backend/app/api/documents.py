@@ -100,12 +100,13 @@ async def process_document_background(document_id: str, project_id: str):
                 pages_data=pages_data,
             )
 
-            # Anonymize chunks and store in DB
+            # Anonymize chunks in batch (single NER pass + single DB round-trip)
             ProgressTracker.update(document_id, "anonymizing")
-            for chunk_data in chunks:
-                anonymized = await AnonymizationService.anonymize_text(
-                    chunk_data["content"], uuid.UUID(project_id), db
-                )
+            chunk_texts = [c["content"] for c in chunks]
+            anonymized_texts = await AnonymizationService.anonymize_chunks_batch(
+                chunk_texts, uuid.UUID(project_id), db
+            )
+            for chunk_data, anonymized in zip(chunks, anonymized_texts):
                 db_chunk = DocumentChunk(
                     document_id=uuid.UUID(document_id),
                     chunk_index=chunk_data["chunk_index"],

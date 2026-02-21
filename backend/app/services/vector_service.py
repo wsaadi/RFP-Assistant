@@ -20,7 +20,9 @@ class _E5EmbeddingFunction(EmbeddingFunction[Documents]):
         self._model.max_seq_length = _MODEL_MAX_SEQ_LENGTH
 
     def __call__(self, input: Documents) -> Embeddings:
-        return self._model.encode(input, normalize_embeddings=True).tolist()
+        return self._model.encode(
+            input, normalize_embeddings=True, batch_size=64, show_progress_bar=False,
+        ).tolist()
 
 
 class VectorService:

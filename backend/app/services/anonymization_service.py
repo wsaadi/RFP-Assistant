@@ -142,6 +142,67 @@ class AnonymizationService:
         return entities
 
     @classmethod
+    def _batch_detect_entities(cls, texts: List[str]) -> List[List[Tuple[str, str, int, int]]]:
+        """Detect entities across multiple texts using batched GLiNER inference.
+
+        Much faster than calling detect_entities() per text, because GLiNER
+        batches the transformer forward pass across all segments.
+        """
+        results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
+        seen: List[set] = [set() for _ in texts]
+
+        model = cls._get_model()
+        if model is not None:
+            # Build all segments from all texts
+            all_segments: List[Tuple[int, int, str]] = []  # (text_idx, seg_char_start, segment_text)
+            for text_idx, text in enumerate(texts):
+                word_spans = [(m.start(), m.end()) for m in re.finditer(r'\S+', text)]
+                if not word_spans:
+                    continue
+                if len(word_spans) <= cls._GLINER_SEGMENT_WORDS:
+                    all_segments.append((text_idx, 0, text))
+                else:
+                    step = cls._GLINER_SEGMENT_WORDS - cls._GLINER_OVERLAP_WORDS
+                    for i in range(0, len(word_spans), step):
+                        span_slice = word_spans[i: i + cls._GLINER_SEGMENT_WORDS]
+                        seg_start = span_slice[0][0]
+                        seg_end = span_slice[-1][1]
+                        all_segments.append((text_idx, seg_start, text[seg_start:seg_end]))
+
+            if all_segments:
+                segment_texts = [s[2] for s in all_segments]
+                try:
+                    batch_predictions = model.predict_entities(
+                        segment_texts, GLINER_LABELS, threshold=0.4
+                    )
+                    # predict_entities returns list-of-lists when given a list input
+                    for (text_idx, seg_start, _), preds in zip(all_segments, batch_predictions):
+                        for pred in preds:
+                            abs_start = seg_start + pred["start"]
+                            abs_end = seg_start + pred["end"]
+                            key = (pred["text"], abs_start)
+                            if key not in seen[text_idx]:
+                                seen[text_idx].add(key)
+                                results[text_idx].append(
+                                    (pred["text"], pred["label"], abs_start, abs_end)
+                                )
+                except Exception as e:
+                    print(f"GLiNER batch prediction error: {e}")
+
+        # Apply regex patterns per text
+        for text_idx, text in enumerate(texts):
+            for entity_type, pattern in REGEX_PATTERNS.items():
+                for match in re.finditer(pattern, text):
+                    matched_text = match.group()
+                    if not any(e[0] == matched_text for e in results[text_idx]):
+                        results[text_idx].append(
+                            (matched_text, entity_type.value, match.start(), match.end())
+                        )
+            results[text_idx].sort(key=lambda x: x[2])
+
+        return results
+
+    @classmethod
     def detect_entities(cls, text: str) -> List[Tuple[str, str, int, int]]:
         """Detect named entities in text using GLiNER and regex.
 
@@ -234,6 +295,65 @@ class AnonymizationService:
 
         await db.flush()
         return result
+
+    @classmethod
+    async def anonymize_chunks_batch(
+        cls,
+        texts: List[str],
+        project_id: uuid.UUID,
+        db: AsyncSession,
+    ) -> List[str]:
+        """Anonymize multiple texts in one pass (batch NER + single DB round-trip).
+
+        Much faster than calling anonymize_text() per chunk.
+        """
+        if not texts:
+            return []
+
+        # Single DB read for existing mappings
+        existing_mappings = await cls.get_mappings(db, project_id)
+        type_counts: Dict[EntityType, int] = defaultdict(int)
+        for mapping in existing_mappings.values():
+            type_counts[mapping.entity_type] += 1
+
+        # Batch NER across all texts
+        all_entities = cls._batch_detect_entities(texts)
+
+        # Process each text
+        results = []
+        for text, entities in zip(texts, all_entities):
+            replacements = []
+            for entity_text, label, start, end in entities:
+                entity_text_clean = entity_text.strip()
+                if len(entity_text_clean) < 2:
+                    continue
+
+                if entity_text_clean in existing_mappings:
+                    placeholder = existing_mappings[entity_text_clean].anonymized_value
+                else:
+                    entity_type = LABEL_TO_ENTITY_TYPE.get(label, EntityType.OTHER)
+                    prefix = ENTITY_PREFIXES.get(entity_type, "ENTITE")
+                    type_counts[entity_type] += 1
+                    placeholder = f"[{prefix}_{type_counts[entity_type]}]"
+
+                    new_mapping = AnonymizationMapping(
+                        project_id=project_id,
+                        entity_type=entity_type,
+                        original_value=entity_text_clean,
+                        anonymized_value=placeholder,
+                    )
+                    db.add(new_mapping)
+                    existing_mappings[entity_text_clean] = new_mapping
+
+                replacements.append((start, end, placeholder))
+
+            result = text
+            for start, end, placeholder in reversed(replacements):
+                result = result[:start] + placeholder + result[end:]
+            results.append(result)
+
+        await db.flush()
+        return results
 
     @classmethod
     async def deanonymize_text(
