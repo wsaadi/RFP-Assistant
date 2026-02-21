@@ -45,8 +45,12 @@ async def lifespan(app: FastAPI):
     # SQLAlchemy persists enum member names (uppercase), not values
     # Use AUTOCOMMIT isolation since ALTER TYPE ADD VALUE cannot run in a transaction
     from sqlalchemy import text
-    async with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
+    conn = await engine.connect()
+    conn = await conn.execution_options(isolation_level="AUTOCOMMIT")
+    try:
         await conn.execute(text("ALTER TYPE file_type ADD VALUE IF NOT EXISTS 'DOC'"))
+    finally:
+        await conn.close()
 
     # Create data directories
     for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir]:
