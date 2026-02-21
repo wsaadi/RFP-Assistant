@@ -1,12 +1,15 @@
 """AI service for Mistral API integration."""
 import asyncio
 import json
+import logging
 import re
 from typing import List, Optional, Dict
 
 from mistralai import Mistral
 
 from ..models.project import AIConfig
+
+logger = logging.getLogger(__name__)
 
 
 class MistralAIService:
@@ -33,18 +36,36 @@ class MistralAIService:
         self, system_prompt: str, user_prompt: str,
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
+        timeout: float = 300,
     ) -> str:
-        """Generate text using Mistral API (reuses client connection)."""
-        response = await self._client.chat.complete_async(
+        """Generate text using Mistral API (reuses client connection).
+
+        Args:
+            timeout: Maximum seconds to wait for the API response (default 5 min).
+        """
+        input_chars = len(system_prompt) + len(user_prompt)
+        effective_max = max_tokens or self.max_tokens
+        logger.info("Mistral call: ~%d input chars (~%d tokens), max_output=%d, model=%s",
+                     input_chars, input_chars // 4, effective_max, self.model)
+
+        coro = self._client.chat.complete_async(
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt},
             ],
             temperature=temperature or self.temperature,
-            max_tokens=max_tokens or self.max_tokens,
+            max_tokens=effective_max,
         )
-        return response.choices[0].message.content or ""
+        try:
+            response = await asyncio.wait_for(coro, timeout=timeout)
+        except asyncio.TimeoutError:
+            logger.error("Mistral call timed out after %.0fs (input ~%d chars)", timeout, input_chars)
+            raise TimeoutError(f"L'appel IA a expire apres {timeout:.0f}s. Essayez avec des documents plus courts.")
+
+        result = response.choices[0].message.content or ""
+        logger.info("Mistral response: %d chars (~%d tokens)", len(result), len(result) // 4)
+        return result
 
     async def test_connection(self) -> str:
         """Test the API connection."""
@@ -84,7 +105,7 @@ NOUVEL APPEL D'OFFRES:
 
 Analyse les écarts entre ces deux appels d'offres."""
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=12000)
+        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000, timeout=180)
         try:
             json_match = re.search(r'\{[\s\S]*\}', response)
             if json_match:
@@ -149,12 +170,11 @@ Valeurs de delta:
 - "unchanged": exigence identique à l'ancien AO
 - "removed_context": chapitre nécessaire même si l'exigence directe a été retirée (contexte, transition)"""
 
-        # Mistral Large supports 128K context.
-        # When gap analysis is available it already summarises old-vs-new deltas,
-        # so we skip the full old RFP to dramatically reduce input tokens.
+        # Budget: ~40K new RFP + gap summary or ~20K old RFP + ~20K old response
+        # This keeps total input under ~20K tokens for faster processing.
         parts = []
 
-        parts.append(f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:80000]}")
+        parts.append(f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:40000]}")
 
         if gap_analysis:
             # Gap analysis replaces the need for the full old RFP content
@@ -173,15 +193,15 @@ Valeurs de delta:
                 parts.append(f"ANALYSE DES ÉCARTS ANCIEN/NOUVEAU AO:\n" + "\n".join(gap_summary))
         elif old_rfp_content:
             # No gap analysis — fall back to sending old RFP content directly
-            parts.append(f"CONTENU DE L'ANCIEN APPEL D'OFFRES:\n{old_rfp_content[:40000]}")
+            parts.append(f"CONTENU DE L'ANCIEN APPEL D'OFFRES:\n{old_rfp_content[:20000]}")
 
         if old_response_content:
-            parts.append(f"CONTENU DE L'ANCIENNE RÉPONSE (structure et texte):\n{old_response_content[:40000]}")
+            parts.append(f"CONTENU DE L'ANCIENNE RÉPONSE (structure et texte):\n{old_response_content[:20000]}")
 
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += "\n\nAnalyse en profondeur le nouvel AO et génère la structure complète et idéale de la réponse."
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=12000)
+        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000, timeout=300)
         try:
             json_match = re.search(r'\[[\s\S]*\]', response)
             if json_match:

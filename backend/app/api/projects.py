@@ -387,7 +387,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             gap_analysis = await ai_service.analyze_gap(anon_old_rfp, anon_new_rfp)
             _update("gap_analysis", 50, "Analyse des ecarts terminee")
 
-        _update("generating", 55, "Generation de la structure par l'IA (peut prendre 1-2 min)...")
+        _update("generating", 55, "Generation de la structure par l'IA (2-4 min selon la taille des documents)...")
         structure = await ai_service.generate_response_structure(
             new_rfp_content=anon_new_rfp,
             old_rfp_content=anon_old_rfp,
