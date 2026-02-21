@@ -18,9 +18,9 @@ from PIL import Image
 from ..config import settings
 
 
-# Chunk size configuration
-CHUNK_SIZE = 800  # words
-CHUNK_OVERLAP = 100  # words overlap between chunks
+# Chunk size configuration (aligned with multilingual-e5-base 512 token limit)
+CHUNK_SIZE = 350  # words
+CHUNK_OVERLAP = 50  # words overlap between chunks
 
 
 class DocumentProcessor:

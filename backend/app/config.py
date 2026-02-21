@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     # ChromaDB
     chroma_persist_dir: str = "/app/data/chroma"
 
+    # Embedding model
+    embedding_model: str = "intfloat/multilingual-e5-base"
+
     # GLiNER model
     gliner_model: str = "urchade/gliner_multi-v2.1"
 

@@ -3,6 +3,7 @@ import uuid
 from typing import List, Optional, Dict
 
 import chromadb
+from chromadb.utils import embedding_functions
 
 from ..config import settings
 
@@ -11,6 +12,7 @@ class VectorService:
     """Service for managing vector embeddings with ChromaDB."""
 
     _client = None
+    _embedding_fn = None
 
     @classmethod
     def get_client(cls) -> chromadb.ClientAPI:
@@ -22,12 +24,22 @@ class VectorService:
         return cls._client
 
     @classmethod
+    def get_embedding_function(cls):
+        """Get or create the embedding function (singleton)."""
+        if cls._embedding_fn is None:
+            cls._embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
+                model_name=settings.embedding_model,
+            )
+        return cls._embedding_fn
+
+    @classmethod
     def get_collection(cls, project_id: str) -> chromadb.Collection:
         """Get or create a collection for a project."""
         client = cls.get_client()
         return client.get_or_create_collection(
             name=f"project_{project_id}",
             metadata={"hnsw:space": "cosine"},
+            embedding_function=cls.get_embedding_function(),
         )
 
     @classmethod
@@ -54,7 +66,7 @@ class VectorService:
         for chunk in chunks:
             chunk_id = str(chunk.get("id", uuid.uuid4()))
             ids.append(chunk_id)
-            documents.append(chunk["content"])
+            documents.append(f"passage: {chunk['content']}")
             metadatas.append({
                 "document_id": str(chunk.get("document_id", "")),
                 "document_name": chunk.get("document_name", ""),
@@ -100,7 +112,7 @@ class VectorService:
 
         try:
             results = collection.query(
-                query_texts=[query],
+                query_texts=[f"query: {query}"],
                 n_results=top_k,
                 where=where_filter,
             )
