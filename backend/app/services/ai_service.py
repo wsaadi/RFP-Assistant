@@ -12,6 +12,145 @@ from ..models.project import AIConfig
 logger = logging.getLogger(__name__)
 
 
+# ── Robust JSON parsing helpers ──────────────────────────────────────
+
+def _clean_json_response(raw: str) -> str:
+    """Strip markdown fences, leading/trailing prose around JSON."""
+    text = raw.strip()
+    # Remove ```json ... ``` or ``` ... ``` wrappers
+    text = re.sub(r'^```(?:json)?\s*\n?', '', text)
+    text = re.sub(r'\n?```\s*$', '', text)
+    return text.strip()
+
+
+def _repair_truncated_json(text: str, target: str = "array") -> str:
+    """Attempt to close unclosed brackets/braces in truncated JSON.
+
+    LLMs sometimes hit max_tokens and produce truncated JSON like:
+        [{"title": "A", "children": [{"title": "B"
+    Uses a stack-based approach to close structures in the correct
+    nesting order (e.g. }]}] not }}]]).
+    """
+    text = text.rstrip()
+
+    # Step 1: Detect if we're inside an unclosed string and close it
+    in_string = False
+    escape = False
+    for c in text:
+        if escape:
+            escape = False
+            continue
+        if c == '\\' and in_string:
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+    if in_string:
+        text += '"'
+
+    # Step 2: Remove trailing comma or colon (incomplete key-value pair)
+    text = re.sub(r'[,:]\s*$', '', text)
+
+    # Step 3: Track nesting with a stack to know what to close
+    stack: list[str] = []
+    in_string = False
+    escape = False
+    for c in text:
+        if escape:
+            escape = False
+            continue
+        if c == '\\' and in_string:
+            escape = True
+            continue
+        if c == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if c in ('{', '['):
+            stack.append(c)
+        elif c == '}' and stack and stack[-1] == '{':
+            stack.pop()
+        elif c == ']' and stack and stack[-1] == '[':
+            stack.pop()
+
+    # Step 4: Close in reverse nesting order
+    closing = []
+    for opener in reversed(stack):
+        closing.append('}' if opener == '{' else ']')
+
+    return text + ''.join(closing)
+
+
+def _parse_json_array(raw: str) -> Optional[List]:
+    """Try to parse a JSON array from a raw LLM response, with repair."""
+    cleaned = _clean_json_response(raw)
+
+    # 1. Try direct parse of the full cleaned text
+    if cleaned.startswith('['):
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Try regex extraction
+    match = re.search(r'\[[\s\S]*\]', cleaned)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Try to repair truncated JSON (find the opening [ and close it)
+    idx = cleaned.find('[')
+    if idx >= 0:
+        fragment = cleaned[idx:]
+        repaired = _repair_truncated_json(fragment, target="array")
+        try:
+            result = json.loads(repaired)
+            logger.warning("JSON was truncated — repaired by closing %d brackets/braces",
+                          repaired.count(']') + repaired.count('}') - fragment.count(']') - fragment.count('}'))
+            return result
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _parse_json_object(raw: str) -> Optional[Dict]:
+    """Try to parse a JSON object from a raw LLM response, with repair."""
+    cleaned = _clean_json_response(raw)
+
+    # 1. Try direct parse
+    if cleaned.startswith('{'):
+        try:
+            return json.loads(cleaned)
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Try regex extraction
+    match = re.search(r'\{[\s\S]*\}', cleaned)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    # 3. Try to repair truncated JSON
+    idx = cleaned.find('{')
+    if idx >= 0:
+        fragment = cleaned[idx:]
+        repaired = _repair_truncated_json(fragment, target="object")
+        try:
+            result = json.loads(repaired)
+            logger.warning("JSON object was truncated — repaired")
+            return result
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
 class MistralAIService:
     """Service for AI-powered operations using Mistral API."""
 
@@ -192,13 +331,11 @@ Analyse les écarts entre ces deux appels d'offres."""
             system_prompt, user_prompt, temperature=0.2, max_tokens=12000,
             timeout=600, on_progress=on_progress,
         )
-        try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
-        return {"summary": response, "new_requirements": [], "removed_requirements": [],
+        result = _parse_json_object(response)
+        if result:
+            return result
+        logger.warning("Gap analysis: JSON parse failed. Raw response (first 500 chars): %s", response[:500])
+        return {"summary": response[:2000], "new_requirements": [], "removed_requirements": [],
                 "modified_requirements": [], "unchanged_requirements": []}
 
     async def generate_response_structure(
@@ -288,16 +425,41 @@ Valeurs de delta:
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += "\n\nAnalyse en profondeur le nouvel AO et génère la structure complète et idéale de la réponse."
 
+        # First attempt
         response = await self.generate_streaming(
             system_prompt, user_prompt, temperature=0.2, max_tokens=12000,
             timeout=600, on_progress=on_progress,
         )
-        try:
-            json_match = re.search(r'\[[\s\S]*\]', response)
-            if json_match:
-                return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
+        result = _parse_json_array(response)
+        if result:
+            return result
+
+        # Log the failure for diagnostics
+        logger.warning("Structure gen: JSON parse failed on first attempt. "
+                       "Response length: %d chars. First 500 chars: %s",
+                       len(response), response[:500])
+        logger.warning("Structure gen: Last 300 chars: %s", response[-300:])
+
+        # Retry once with a more explicit prompt asking for valid JSON
+        logger.info("Structure gen: retrying with explicit JSON instruction...")
+        retry_prompt = (
+            user_prompt
+            + "\n\nIMPORTANT: Ta réponse précédente n'était pas du JSON valide. "
+            "Réponds UNIQUEMENT avec le tableau JSON, sans texte avant ni après, "
+            "sans balises markdown. Commence directement par [ et termine par ]."
+        )
+        response2 = await self.generate_streaming(
+            system_prompt, retry_prompt, temperature=0.1, max_tokens=12000,
+            timeout=600, on_progress=on_progress,
+        )
+        result2 = _parse_json_array(response2)
+        if result2:
+            logger.info("Structure gen: retry succeeded with %d chapters", len(result2))
+            return result2
+
+        logger.error("Structure gen: JSON parse failed on retry too. "
+                     "Response length: %d chars. First 500: %s",
+                     len(response2), response2[:500])
         return []
 
     async def generate_chapter_content(
@@ -396,13 +558,11 @@ CONTENU DE LA RÉPONSE:
 Analyse l'exhaustivité et la conformité de cette réponse."""
 
         response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=6000)
-        try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
-        return {"score": 0, "summary": response, "covered_requirements": [],
+        result = _parse_json_object(response)
+        if result:
+            return result
+        logger.warning("Compliance analysis: JSON parse failed. First 300 chars: %s", response[:300])
+        return {"score": 0, "summary": response[:2000], "covered_requirements": [],
                 "missing_elements": [], "recommendations": []}
 
     async def describe_image(self, image_context: str, surrounding_text: str) -> Dict:
@@ -425,12 +585,9 @@ Informations additionnelles: {image_context}
 Décris cette image et suggère des tags et chapitres pertinents."""
 
         response = await self.generate(system_prompt, user_prompt, temperature=0.3)
-        try:
-            json_match = re.search(r'\{[\s\S]*\}', response)
-            if json_match:
-                return json.loads(json_match.group())
-        except json.JSONDecodeError:
-            pass
+        result = _parse_json_object(response)
+        if result:
+            return result
         return {"description": "", "tags": [], "suggested_chapters": []}
 
     async def execute_custom_prompt(self, content: str, prompt: str, context: str = "") -> str:

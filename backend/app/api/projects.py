@@ -439,7 +439,8 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         if not structure:
             _generation_progress[pid] = {
                 "status": "error", "step": "error", "progress": 0,
-                "message": "L'IA n'a pas retourne de structure valide. Reessayez.",
+                "message": "L'IA n'a pas retourne de JSON valide apres 2 tentatives. "
+                           "Verifiez les logs serveur pour le diagnostic. Reessayez.",
             }
             return
 
