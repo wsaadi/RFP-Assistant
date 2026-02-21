@@ -16,7 +16,7 @@ from ..schemas.project import (
     ImprovementAxisRequest, GapAnalysisRequest,
     GenerateStructureRequest, PrefillRequest, ComplianceAnalysisRequest,
 )
-from ..schemas.document import StatisticsOut, AnonymizationMappingOut
+from ..schemas.document import StatisticsOut, AnonymizationMappingOut, AnonymizationReportOut, AnonymizationEntityGroup
 from ..services.ai_service import MistralAIService
 from ..services.vector_service import VectorService
 from ..services.anonymization_service import AnonymizationService
@@ -250,44 +250,94 @@ async def generate_structure(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate the complete response structure from the new RFP."""
+    """Generate the complete response structure by deeply analyzing the new RFP,
+    comparing with old RFP, and leveraging the old response."""
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
     ai_service = await _get_ai_service(project.workspace_id, db)
+    pid = str(project_id)
 
-    # Get new RFP content
-    new_rfp_chunks = VectorService.search(str(project_id), "structure exigences chapitres", top_k=30, category_filter="new_rfp")
-    rfp_content = "\n\n".join([c["content"] for c in new_rfp_chunks])
+    # ── 1. Gather NEW RFP content (multiple queries for full coverage) ──
+    new_rfp_queries = [
+        "sommaire structure plan chapitres organisation document",
+        "exigences techniques spécifications prestations attendues",
+        "critères évaluation notation jugement offres",
+        "annexes documents à fournir pièces administratives",
+        "lots allotissement périmètre objet du marché",
+        "conditions exécution délais planning livrables",
+    ]
+    new_rfp_all_chunks = {}
+    for query in new_rfp_queries:
+        chunks = VectorService.search(pid, query, top_k=15, category_filter="new_rfp")
+        for c in chunks:
+            new_rfp_all_chunks[c["chunk_id"]] = c
 
-    if not rfp_content:
+    # Sort by page number for logical order
+    new_rfp_sorted = sorted(new_rfp_all_chunks.values(), key=lambda c: (c.get("page_number", 0)))
+    new_rfp_content = "\n\n".join([c["content"] for c in new_rfp_sorted])
+
+    if not new_rfp_content:
         raise HTTPException(status_code=400, detail="Aucun document de nouvel appel d'offres indexé")
 
-    # Get old response structure if available
-    old_chapters = await db.execute(
-        select(Chapter)
-        .where(Chapter.project_id == project_id)
-        .where(Chapter.parent_id.is_(None))
-        .order_by(Chapter.order)
+    # ── 2. Gather OLD RFP content ──
+    old_rfp_chunks = {}
+    for query in ["exigences techniques spécifications", "structure chapitres sommaire", "critères évaluation lots"]:
+        chunks = VectorService.search(pid, query, top_k=15, category_filter="old_rfp")
+        for c in chunks:
+            old_rfp_chunks[c["chunk_id"]] = c
+    old_rfp_sorted = sorted(old_rfp_chunks.values(), key=lambda c: (c.get("page_number", 0)))
+    old_rfp_content = "\n\n".join([c["content"] for c in old_rfp_sorted])
+
+    # ── 3. Gather OLD RESPONSE content (actual text, not just titles) ──
+    old_response_chunks = {}
+    for query in ["présentation méthodologie organisation", "compétences références expérience", "solution technique offre proposition"]:
+        chunks = VectorService.search(pid, query, top_k=15, category_filter="old_response")
+        for c in chunks:
+            old_response_chunks[c["chunk_id"]] = c
+    old_response_sorted = sorted(old_response_chunks.values(), key=lambda c: (c.get("page_number", 0)))
+    old_response_content = "\n\n".join([c["content"] for c in old_response_sorted])
+
+    # ── 4. Run gap analysis if both old and new RFP available ──
+    gap_analysis = None
+    if old_rfp_content and new_rfp_content:
+        anon_old_rfp = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
+        anon_new_rfp_gap = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
+        gap_analysis = await ai_service.analyze_gap(anon_old_rfp, anon_new_rfp_gap)
+
+    # ── 5. Anonymize all content before sending to AI ──
+    anon_new_rfp = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
+    anon_old_rfp = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db) if old_rfp_content else ""
+    anon_old_response = await AnonymizationService.anonymize_text(old_response_content, project_id, db) if old_response_content else ""
+
+    # ── 6. Generate structure with full context ──
+    structure = await ai_service.generate_response_structure(
+        new_rfp_content=anon_new_rfp,
+        old_rfp_content=anon_old_rfp,
+        old_response_content=anon_old_response,
+        gap_analysis=gap_analysis,
     )
-    existing = old_chapters.scalars().all()
-    old_structure = "\n".join([f"- {c.title}: {c.description}" for c in existing]) if existing else ""
 
-    # Anonymize
-    anon_rfp = await AnonymizationService.anonymize_text(rfp_content, project_id, db)
-
-    structure = await ai_service.generate_response_structure(anon_rfp, old_structure)
-
-    # Create chapters from structure
+    # ── 7. Create chapters from structure ──
     order = 0
     created_chapters = []
+    delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
 
     async def create_chapters_recursive(items, parent_id=None):
         nonlocal order
         for item in items:
             order += 1
+            delta = item.get("delta", "unchanged")
+            if delta in delta_stats:
+                delta_stats[delta] += 1
+
+            # Store delta info in notes for UI display
+            notes = []
+            if delta and delta != "unchanged":
+                notes.append({"type": "delta", "value": delta})
+
             chapter = Chapter(
                 project_id=project_id,
                 parent_id=parent_id,
@@ -296,6 +346,7 @@ async def generate_structure(
                 order=order,
                 chapter_type=item.get("chapter_type", "chapter"),
                 rfp_requirement=item.get("rfp_requirement", ""),
+                notes=notes,
             )
             db.add(chapter)
             await db.flush()
@@ -311,7 +362,9 @@ async def generate_structure(
     return {
         "success": True,
         "chapters_created": len(created_chapters),
-        "message": f"{len(created_chapters)} chapitres créés",
+        "delta_stats": delta_stats,
+        "has_gap_analysis": gap_analysis is not None,
+        "message": f"{len(created_chapters)} chapitres créés ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifiés, {delta_stats['unchanged']} inchangés)",
     }
 
 
@@ -524,3 +577,88 @@ async def get_anonymization_mappings(
         )
         for m in mappings
     ]
+
+
+@router.get("/{project_id}/anonymization-report", response_model=AnonymizationReportOut)
+async def get_anonymization_report(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get a structured anonymization report with statistics and samples."""
+    from ..models.project import EntityType
+    from collections import defaultdict
+
+    result = await db.execute(
+        select(AnonymizationMapping)
+        .where(AnonymizationMapping.project_id == project_id)
+        .order_by(AnonymizationMapping.entity_type, AnonymizationMapping.created_at)
+    )
+    all_mappings = result.scalars().all()
+
+    # Group by entity type
+    groups_dict = defaultdict(list)
+    for m in all_mappings:
+        groups_dict[m.entity_type].append(m)
+
+    # Human-readable labels
+    type_labels = {
+        EntityType.COMPANY: "Entreprises / Organisations",
+        EntityType.PERSON: "Personnes",
+        EntityType.EMAIL: "Adresses email",
+        EntityType.PHONE: "Numéros de téléphone",
+        EntityType.ADDRESS: "Adresses postales",
+        EntityType.PROJECT_CODE: "Codes projet",
+        EntityType.RFP_CODE: "Codes AO",
+        EntityType.SOLUTION_NAME: "Noms de solutions",
+        EntityType.DATE: "Dates",
+        EntityType.AMOUNT: "Montants",
+        EntityType.OTHER: "Autres entités",
+    }
+
+    entity_groups = []
+    for entity_type in EntityType:
+        mappings_for_type = groups_dict.get(entity_type, [])
+        if not mappings_for_type:
+            continue
+        entity_groups.append(AnonymizationEntityGroup(
+            entity_type=entity_type.value,
+            label=type_labels.get(entity_type, entity_type.value),
+            count=len(mappings_for_type),
+            mappings=[
+                AnonymizationMappingOut(
+                    id=str(m.id),
+                    entity_type=m.entity_type.value,
+                    original_value=m.original_value,
+                    anonymized_value=m.anonymized_value,
+                    is_active=m.is_active,
+                )
+                for m in mappings_for_type
+            ],
+        ))
+
+    # Generate a sample before/after from a real document chunk
+    sample_before = ""
+    sample_after = ""
+    chunk_result = await db.execute(
+        select(DocumentChunk)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.project_id == project_id)
+        .where(DocumentChunk.anonymized_content != "")
+        .where(DocumentChunk.anonymized_content != DocumentChunk.content)
+        .limit(1)
+    )
+    sample_chunk = chunk_result.scalar_one_or_none()
+    if sample_chunk:
+        sample_before = sample_chunk.content[:500]
+        sample_after = sample_chunk.anonymized_content[:500]
+
+    active_count = sum(1 for m in all_mappings if m.is_active)
+
+    return AnonymizationReportOut(
+        total_entities=len(all_mappings),
+        active_entities=active_count,
+        entity_groups=entity_groups,
+        sample_before=sample_before,
+        sample_after=sample_after,
+    )

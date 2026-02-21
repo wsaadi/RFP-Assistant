@@ -207,6 +207,21 @@ export interface AnonymizationMapping {
   is_active: boolean;
 }
 
+export interface AnonymizationEntityGroup {
+  entity_type: string;
+  label: string;
+  count: number;
+  mappings: AnonymizationMapping[];
+}
+
+export interface AnonymizationReport {
+  total_entities: number;
+  active_entities: number;
+  entity_groups: AnonymizationEntityGroup[];
+  sample_before: string;
+  sample_after: string;
+}
+
 // ── Search ──
 export interface SearchResult {
   chunk_id: string;

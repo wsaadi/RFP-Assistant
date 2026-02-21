@@ -83,6 +83,21 @@ class StatisticsOut(BaseModel):
     completion_percentage: float = 0.0
 
 
+class AnonymizationEntityGroup(BaseModel):
+    entity_type: str
+    label: str
+    count: int
+    mappings: List[AnonymizationMappingOut]
+
+
+class AnonymizationReportOut(BaseModel):
+    total_entities: int = 0
+    active_entities: int = 0
+    entity_groups: List[AnonymizationEntityGroup] = []
+    sample_before: str = ""
+    sample_after: str = ""
+
+
 class ExportMetadata(BaseModel):
     project_name: str
     exported_at: str
