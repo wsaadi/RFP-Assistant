@@ -342,48 +342,28 @@ async def get_generation_status(
     })
 
 
-async def _run_ai_with_progress(
-    coro,
-    pid: str,
-    step: str,
-    start_pct: int,
-    end_pct: int,
-    message_template: str,
-    tick_interval: int = 15,
-):
-    """Run an AI coroutine while ticking progress every `tick_interval` seconds.
+def _make_stream_progress_callback(pid: str, step: str, start_pct: int, end_pct: int, label: str, max_tokens: int):
+    """Create a streaming progress callback for use with generate_streaming().
 
-    `message_template` may contain {elapsed} for the elapsed time in seconds.
-    Progress linearly interpolates between start_pct and end_pct over time,
-    capped at end_pct - 1 so the final jump is visible when the call completes.
+    Returns an async callback(token_count, char_count) that updates
+    _generation_progress based on *real* tokens received from Mistral.
     """
     import time
     t0 = time.monotonic()
 
-    async def _ticker():
-        while True:
-            await asyncio.sleep(tick_interval)
-            elapsed = int(time.monotonic() - t0)
-            # Slow asymptotic progress: reaches ~75% of range after 3 min,
-            # ~90% after 6 min. Never reaches end_pct.
-            ratio = 1 - (1 / (1 + elapsed / 180))
-            pct = start_pct + int((end_pct - start_pct - 1) * ratio)
-            _generation_progress[pid] = {
-                "status": "running",
-                "step": step,
-                "progress": pct,
-                "message": message_template.format(elapsed=elapsed),
-            }
+    async def _on_progress(token_count: int, char_count: int):
+        elapsed = int(time.monotonic() - t0)
+        # Real progress based on actual tokens received vs expected max
+        ratio = min(token_count / max_tokens, 0.95)
+        pct = start_pct + int((end_pct - start_pct) * ratio)
+        _generation_progress[pid] = {
+            "status": "running",
+            "step": step,
+            "progress": pct,
+            "message": f"{label} — {token_count} tokens recus ({char_count:,} car.) — {elapsed}s",
+        }
 
-    ticker = asyncio.create_task(_ticker())
-    try:
-        return await coro
-    finally:
-        ticker.cancel()
-        try:
-            await ticker
-        except asyncio.CancelledError:
-            pass
+    return _on_progress
 
 
 async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UUID):
@@ -427,13 +407,15 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 f"ancien AO ({old_rfp_k}K car.), "
                 f"ancienne reponse ({old_resp_k}K car.)")
 
-        # ── Phase 2: Gap analysis (if old RFP available, no DB held) ──
+        # ── Phase 2: Gap analysis (streamed, real token progress) ──
         gap_analysis = None
         if anon_old_rfp:
-            gap_analysis = await _run_ai_with_progress(
-                ai_service.analyze_gap(anon_old_rfp, anon_new_rfp),
-                pid, "gap_analysis", 15, 40,
-                "Analyse des ecarts ancien/nouveau AO... ({elapsed}s ecoules)",
+            _update("gap_analysis", 15, "Analyse des ecarts ancien/nouveau AO...")
+            gap_cb = _make_stream_progress_callback(
+                pid, "gap_analysis", 15, 40, "Analyse des ecarts", max_tokens=12000,
+            )
+            gap_analysis = await ai_service.analyze_gap(
+                anon_old_rfp, anon_new_rfp, on_progress=gap_cb,
             )
             gap_new = len(gap_analysis.get("new_requirements", []))
             gap_mod = len(gap_analysis.get("modified_requirements", []))
@@ -441,16 +423,17 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             _update("gap_analysis", 40,
                     f"Ecarts identifies: {gap_new} nouvelles, {gap_mod} modifiees, {gap_del} supprimees")
 
-        # ── Phase 3: Generate structure (main LLM call, no DB held) ──
-        structure = await _run_ai_with_progress(
-            ai_service.generate_response_structure(
-                new_rfp_content=anon_new_rfp,
-                old_rfp_content=anon_old_rfp,
-                old_response_content=anon_old_response,
-                gap_analysis=gap_analysis,
-            ),
-            pid, "generating", 40, 85,
-            "Generation IA de la structure en cours... ({elapsed}s ecoules)",
+        # ── Phase 3: Generate structure (streamed, real token progress) ──
+        _update("generating", 40, "Generation IA de la structure en cours...")
+        gen_cb = _make_stream_progress_callback(
+            pid, "generating", 40, 85, "Generation structure", max_tokens=12000,
+        )
+        structure = await ai_service.generate_response_structure(
+            new_rfp_content=anon_new_rfp,
+            old_rfp_content=anon_old_rfp,
+            old_response_content=anon_old_response,
+            gap_analysis=gap_analysis,
+            on_progress=gen_cb,
         )
 
         if not structure:
