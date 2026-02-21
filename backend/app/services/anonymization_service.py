@@ -103,8 +103,8 @@ class AnonymizationService:
         return {m.anonymized_value: m.original_value for m in mappings}
 
     # Max words per segment for GLiNER (DeBERTa max_position_embeddings=384 tokens)
-    # ~250 words stays safely under 384 tokens for French text
-    _GLINER_SEGMENT_WORDS = 250
+    # French text averages ~1.8 tokens/word, so 200 words ≈ 360 tokens (under 384)
+    _GLINER_SEGMENT_WORDS = 200
     _GLINER_OVERLAP_WORDS = 30
 
     @classmethod
