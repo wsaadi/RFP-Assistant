@@ -6,6 +6,8 @@ from contextlib import asynccontextmanager
 # Suppress noisy third-party warnings
 warnings.filterwarnings("ignore", message=".*resume_download.*is deprecated.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*resume_download.*is deprecated.*", category=UserWarning)
+warnings.filterwarnings("ignore", message=".*has been truncated to.*", module="gliner")
+warnings.filterwarnings("ignore", message=".*UNEXPECTED.*", module="gliner")
 os.environ.setdefault("ORT_LOG_LEVEL", "ERROR")  # Suppress ONNX Runtime CPU vendor warnings
 
 from fastapi import FastAPI, Request, status
