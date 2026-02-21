@@ -19,7 +19,8 @@ from ..config import settings
 
 
 # Chunk size configuration (aligned with multilingual-e5-base 512 token limit)
-CHUNK_SIZE = 350  # words
+# ~300 words ≈ 400-450 tokens in French, safely under the 512 max_seq_length
+CHUNK_SIZE = 300  # words
 CHUNK_OVERLAP = 50  # words overlap between chunks
 
 
