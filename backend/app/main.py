@@ -34,8 +34,22 @@ from .api.export import router as export_router
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan: startup and shutdown."""
+    # Configure HuggingFace token if provided
+    if settings.hf_token:
+        os.environ["HF_TOKEN"] = settings.hf_token
+
     # Startup
     await init_db()
+
+    # Ensure 'doc' value exists in file_type enum (for .doc support)
+    from .database import async_session as _session
+    from sqlalchemy import text
+    async with _session() as _db:
+        try:
+            await _db.execute(text("ALTER TYPE file_type ADD VALUE IF NOT EXISTS 'doc'"))
+            await _db.commit()
+        except Exception:
+            await _db.rollback()
 
     # Create data directories
     for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir]:

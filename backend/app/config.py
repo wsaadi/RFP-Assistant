@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     # GLiNER model
     gliner_model: str = "urchade/gliner_multi-v2.1"
 
+    # HuggingFace
+    hf_token: Optional[str] = None
+
     # Admin defaults
     admin_email: str = "admin@rfp-assistant.fr"
     admin_password: str = "admin123"

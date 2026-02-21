@@ -514,7 +514,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   }
 
   fileIcon(type: string): string {
-    const icons: Record<string, string> = { pdf: 'picture_as_pdf', docx: 'article', xlsx: 'table_chart' };
+    const icons: Record<string, string> = { pdf: 'picture_as_pdf', docx: 'article', doc: 'article', xlsx: 'table_chart' };
     return icons[type] || 'insert_drive_file';
   }
 

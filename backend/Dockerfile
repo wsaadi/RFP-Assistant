@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     g++ \
     curl \
     libpq-dev \
+    libreoffice-writer-nogui \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
