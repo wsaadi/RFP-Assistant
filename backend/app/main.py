@@ -27,7 +27,7 @@ from .models import (
     User, Workspace, WorkspaceMember,
     Document, DocumentChunk, DocumentImage,
     RFPProject, AnonymizationMapping, AIConfig,
-    Chapter,
+    Chapter, ResponseDocument,
 )
 
 from .api.auth import router as auth_router
@@ -59,6 +59,42 @@ async def lifespan(app: FastAPI):
         await conn.execute(text("ALTER TYPE file_type ADD VALUE IF NOT EXISTS 'DOC'"))
     finally:
         await conn.close()
+
+    # Schema migrations for existing databases:
+    # 1. Create document_format enum if not exists
+    # 2. Create response_documents table if not exists
+    # 3. Add response_document_id column to chapters if not exists
+    async with engine.begin() as conn:
+        # Create enum type
+        await conn.execute(text("""
+            DO $$ BEGIN
+                CREATE TYPE document_format AS ENUM ('DOCX', 'XLSX', 'PDF', 'OTHER');
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$
+        """))
+        # Create response_documents table
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS response_documents (
+                id UUID PRIMARY KEY,
+                project_id UUID NOT NULL REFERENCES rfp_projects(id) ON DELETE CASCADE,
+                title VARCHAR(500) NOT NULL,
+                description TEXT DEFAULT '',
+                expected_format document_format DEFAULT 'DOCX',
+                is_selected BOOLEAN DEFAULT TRUE,
+                "order" INTEGER NOT NULL DEFAULT 0,
+                rfp_source TEXT DEFAULT '',
+                created_at TIMESTAMPTZ DEFAULT NOW(),
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """))
+        # Add response_document_id column to chapters
+        await conn.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE chapters ADD COLUMN response_document_id UUID
+                    REFERENCES response_documents(id) ON DELETE SET NULL;
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
 
     # Create data directories
     for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir]:
