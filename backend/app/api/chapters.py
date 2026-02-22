@@ -28,6 +28,7 @@ def _chapter_to_out(chapter: Chapter, children: list = None) -> ChapterOut:
         id=str(chapter.id),
         project_id=str(chapter.project_id),
         parent_id=str(chapter.parent_id) if chapter.parent_id else None,
+        response_document_id=str(chapter.response_document_id) if chapter.response_document_id else None,
         title=chapter.title,
         description=chapter.description,
         order=chapter.order,

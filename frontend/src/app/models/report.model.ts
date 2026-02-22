@@ -125,6 +125,7 @@ export interface Chapter {
   id: string;
   project_id: string;
   parent_id: string | null;
+  response_document_id: string | null;
   title: string;
   description: string;
   order: number;
@@ -176,6 +177,29 @@ export interface GenerationStatus {
   chapters_created?: number;
   delta_stats?: { new: number; modified: number; unchanged: number };
   has_gap_analysis?: boolean;
+}
+
+// ── Response Documents (Deliverables) ──
+export interface ResponseDocument {
+  id: string;
+  project_id: string;
+  title: string;
+  description: string;
+  expected_format: string;
+  is_selected: boolean;
+  order: number;
+  rfp_source: string;
+  created_at: string;
+  updated_at: string;
+  chapter_count: number;
+}
+
+export interface DetectDeliverablesStatus {
+  status: 'idle' | 'running' | 'completed' | 'error';
+  step: string;
+  progress: number;
+  message: string;
+  deliverables_count?: number;
 }
 
 // ── Prefill Progress ──

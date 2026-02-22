@@ -20,7 +20,7 @@ import { MatDialogModule } from '@angular/material/dialog';
 import { Subscription, interval, timer, forkJoin } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
-import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus } from '../../models/report.model';
+import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus, DetectDeliverablesStatus, ResponseDocument } from '../../models/report.model';
 
 @Component({
   selector: 'app-project-dashboard',
@@ -133,18 +133,26 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
         <!-- Chapters tab -->
         <mat-tab label="Structure">
           <div class="tab-content">
+            <!-- Step 1: Detect deliverables -->
             <div class="chapter-actions">
+              <button mat-raised-button (click)="detectDeliverables()"
+                [disabled]="detectingDeliverables || detectStatus?.status === 'running'"
+                style="background: #7b1fa2; color: white;">
+                <mat-spinner *ngIf="detectingDeliverables || detectStatus?.status === 'running'" diameter="18"></mat-spinner>
+                <mat-icon *ngIf="!detectingDeliverables && detectStatus?.status !== 'running'">find_in_page</mat-icon>
+                1. Detecter les livrables attendus
+              </button>
               <button mat-raised-button color="primary" (click)="generateStructure()"
                 [disabled]="generatingStructure || genStatus?.status === 'running'">
                 <mat-spinner *ngIf="generatingStructure || genStatus?.status === 'running'" diameter="18"></mat-spinner>
                 <mat-icon *ngIf="!generatingStructure && genStatus?.status !== 'running'">auto_fix_high</mat-icon>
-                Generer la structure depuis l'AO
+                2. Generer la structure
               </button>
               <button mat-raised-button color="accent" (click)="prefillAll()"
                 [disabled]="prefilling || prefillStatus?.status === 'running'">
                 <mat-spinner *ngIf="prefilling || prefillStatus?.status === 'running'" diameter="18"></mat-spinner>
                 <mat-icon *ngIf="!prefilling && prefillStatus?.status !== 'running'">auto_awesome</mat-icon>
-                Pre-remplir depuis ancienne reponse
+                3. Pre-remplir
               </button>
               <span class="spacer"></span>
               <button mat-raised-button color="warn" (click)="deleteSelectedChapters()"
@@ -159,6 +167,53 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                 Tout supprimer
               </button>
             </div>
+
+            <!-- Detection progress -->
+            <mat-card *ngIf="detectStatus && detectStatus.status === 'running'" class="gen-progress-card detect-progress-card">
+              <div class="gen-progress-header">
+                <mat-icon class="spin-icon">find_in_page</mat-icon>
+                <h3>Detection des livrables attendus...</h3>
+              </div>
+              <mat-progress-bar mode="determinate" [value]="detectStatus.progress"></mat-progress-bar>
+              <div class="gen-progress-detail">
+                <span class="gen-step detect-step">{{ detectStatus.step === 'analyzing' ? 'Analyse IA' : 'Chargement' }}</span>
+                <span class="gen-pct">{{ detectStatus.progress }}%</span>
+              </div>
+              <p class="gen-message">{{ detectStatus.message }}</p>
+            </mat-card>
+
+            <mat-card *ngIf="detectStatus && detectStatus.status === 'error'" class="gen-error-card">
+              <mat-icon>error_outline</mat-icon>
+              <div>
+                <strong>Echec de la detection</strong>
+                <p>{{ detectStatus.message }}</p>
+              </div>
+            </mat-card>
+
+            <!-- Deliverables list -->
+            <mat-card *ngIf="responseDocuments.length > 0" class="deliverables-card">
+              <div class="deliverables-header">
+                <mat-icon>description</mat-icon>
+                <h3>Documents attendus par l'AO ({{ selectedDocCount() }}/{{ responseDocuments.length }} selectionnes)</h3>
+              </div>
+              <div class="deliverables-list">
+                <div *ngFor="let rd of responseDocuments" class="deliverable-item"
+                  [class.deselected]="!rd.is_selected">
+                  <mat-checkbox [checked]="rd.is_selected"
+                    (change)="toggleDeliverable(rd, $event.checked)">
+                  </mat-checkbox>
+                  <div class="deliverable-info">
+                    <strong>{{ rd.title }}</strong>
+                    <span class="deliverable-desc">{{ rd.description }}</span>
+                    <div class="deliverable-meta">
+                      <mat-chip size="small">{{ rd.expected_format | uppercase }}</mat-chip>
+                      <span class="deliverable-source" *ngIf="rd.rfp_source">{{ rd.rfp_source }}</span>
+                      <span class="deliverable-chapters" *ngIf="rd.chapter_count > 0">{{ rd.chapter_count }} chapitres</span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </mat-card>
 
             <!-- Generation progress panel -->
             <mat-card *ngIf="genStatus && genStatus.status === 'running'" class="gen-progress-card">
@@ -228,9 +283,17 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </mat-checkbox>
             </div>
 
-            <div class="chapter-tree">
+            <div class="chapter-tree" *ngFor="let group of getGroupedChapters()">
+              <!-- Document group header -->
+              <div class="doc-group-header" *ngIf="group.document">
+                <mat-icon>description</mat-icon>
+                <strong>{{ group.document.title }}</strong>
+                <mat-chip size="small">{{ group.document.expected_format | uppercase }}</mat-chip>
+                <span class="doc-group-count">{{ group.chapters.length }} chapitres</span>
+              </div>
+
               <mat-accordion multi>
-                <mat-expansion-panel *ngFor="let ch of chapters; let i = index">
+                <mat-expansion-panel *ngFor="let ch of group.chapters; let i = index">
                   <mat-expansion-panel-header>
                     <mat-panel-title>
                       <mat-checkbox class="ch-checkbox"
@@ -409,6 +472,27 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .gen-error-card p { margin: 4px 0 0 0; color: #666; font-size: 13px; }
     .gen-success-card { margin: 16px 0; padding: 20px; border-left: 4px solid #4caf50; display: flex; align-items: center; gap: 12px; }
     .gen-success-card mat-icon { color: #4caf50; font-size: 28px; width: 28px; height: 28px; }
+    .detect-progress-card { border-left-color: #7b1fa2; }
+    .detect-progress-card .gen-progress-header h3 { color: #7b1fa2; }
+    .detect-progress-card .spin-icon { color: #7b1fa2; }
+    .detect-step { color: #7b1fa2 !important; }
+    .deliverables-card { margin: 16px 0; padding: 20px; border-left: 4px solid #7b1fa2; }
+    .deliverables-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .deliverables-header mat-icon { color: #7b1fa2; }
+    .deliverables-header h3 { margin: 0; color: #1B3A5C; font-size: 15px; }
+    .deliverables-list { display: flex; flex-direction: column; gap: 8px; }
+    .deliverable-item { display: flex; align-items: flex-start; gap: 8px; padding: 10px; border-radius: 6px; background: #fafafa; }
+    .deliverable-item.deselected { opacity: 0.5; }
+    .deliverable-info { flex: 1; }
+    .deliverable-info strong { display: block; color: #1B3A5C; }
+    .deliverable-desc { display: block; font-size: 13px; color: #666; margin: 2px 0; }
+    .deliverable-meta { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+    .deliverable-source { font-size: 12px; color: #888; font-style: italic; }
+    .deliverable-chapters { font-size: 12px; color: #2C5F8A; font-weight: 500; }
+    .doc-group-header { display: flex; align-items: center; gap: 8px; padding: 12px 0 6px 0; border-bottom: 2px solid #7b1fa2; margin-bottom: 8px; margin-top: 16px; }
+    .doc-group-header mat-icon { color: #7b1fa2; }
+    .doc-group-header strong { color: #1B3A5C; font-size: 15px; }
+    .doc-group-count { font-size: 12px; color: #888; margin-left: auto; }
     .prefill-progress-card { border-left-color: #7b1fa2; }
     .prefill-progress-card .gen-progress-header h3 { color: #7b1fa2; }
     .prefill-step { color: #7b1fa2 !important; }
@@ -436,6 +520,10 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   prefilling = false;
   prefillStatus: PrefillStatus | null = null;
   private prefillPollSub: Subscription | null = null;
+  responseDocuments: ResponseDocument[] = [];
+  detectingDeliverables = false;
+  detectStatus: DetectDeliverablesStatus | null = null;
+  private detectPollSub: Subscription | null = null;
   selectedChapters = new Set<string>();
   deletingChapters = false;
   showImprovementForm = false;
@@ -478,12 +566,23 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         }
       },
     });
+    // Resume detect polling if already running
+    this.api.getDetectDeliverablesStatus(this.projectId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.detectStatus = status;
+          this.detectingDeliverables = true;
+          this.startDetectPolling();
+        }
+      },
+    });
   }
 
   ngOnDestroy(): void {
     this.stopPolling();
     this.stopGenPolling();
     this.stopPrefillPolling();
+    this.stopDetectPolling();
   }
 
   loadAll(): void {
@@ -509,6 +608,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.api.getStatistics(this.projectId).subscribe({
       next: (s) => this.stats = s,
     });
+    this.loadResponseDocuments();
   }
 
   private startPolling(): void {
@@ -822,6 +922,113 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.deletingChapters = false;
       },
     });
+  }
+
+  // ── Deliverables detection ──
+
+  loadResponseDocuments(): void {
+    this.api.getResponseDocuments(this.projectId).subscribe({
+      next: (docs) => this.responseDocuments = docs,
+    });
+  }
+
+  detectDeliverables(): void {
+    this.detectingDeliverables = true;
+    this.detectStatus = {
+      status: 'running',
+      step: 'starting',
+      progress: 0,
+      message: 'Lancement de la detection...',
+    };
+    this.api.detectDeliverables(this.projectId).subscribe({
+      next: () => {
+        this.detectingDeliverables = false;
+        this.startDetectPolling();
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
+        this.detectingDeliverables = false;
+        this.detectStatus = null;
+      },
+    });
+  }
+
+  private startDetectPolling(): void {
+    this.stopDetectPolling();
+    this.detectPollSub = timer(0, 2000).pipe(
+      switchMap(() => this.api.getDetectDeliverablesStatus(this.projectId))
+    ).subscribe({
+      next: (status) => {
+        this.detectStatus = status;
+        if (status.status === 'completed') {
+          this.stopDetectPolling();
+          this.detectingDeliverables = false;
+          this.snackBar.open(status.message || 'Livrables detectes', 'OK', { duration: 5000 });
+          this.loadResponseDocuments();
+        } else if (status.status === 'error') {
+          this.stopDetectPolling();
+          this.detectingDeliverables = false;
+        }
+      },
+    });
+  }
+
+  private stopDetectPolling(): void {
+    this.detectPollSub?.unsubscribe();
+    this.detectPollSub = null;
+  }
+
+  toggleDeliverable(rd: ResponseDocument, checked: boolean): void {
+    rd.is_selected = checked;
+    this.api.updateResponseDocument(this.projectId, rd.id, { is_selected: checked }).subscribe({
+      error: () => {
+        rd.is_selected = !checked; // revert on error
+        this.snackBar.open('Erreur mise a jour', 'OK', { duration: 3000 });
+      },
+    });
+  }
+
+  selectedDocCount(): number {
+    return this.responseDocuments.filter(rd => rd.is_selected).length;
+  }
+
+  getGroupedChapters(): { document: ResponseDocument | null; chapters: Chapter[] }[] {
+    if (this.responseDocuments.length === 0) {
+      // No deliverables detected — show all chapters in a single group
+      return [{ document: null, chapters: this.chapters }];
+    }
+
+    const groups: { document: ResponseDocument | null; chapters: Chapter[] }[] = [];
+    const docMap = new Map<string, ResponseDocument>();
+    for (const rd of this.responseDocuments) {
+      docMap.set(rd.id, rd);
+    }
+
+    // Group chapters by response_document_id
+    const grouped = new Map<string | null, Chapter[]>();
+    for (const ch of this.chapters) {
+      const key = ch.response_document_id || null;
+      if (!grouped.has(key)) {
+        grouped.set(key, []);
+      }
+      grouped.get(key)!.push(ch);
+    }
+
+    // Build ordered groups: first by document order, then ungrouped at end
+    for (const rd of this.responseDocuments) {
+      const chs = grouped.get(rd.id);
+      if (chs && chs.length > 0) {
+        groups.push({ document: rd, chapters: chs });
+      }
+    }
+
+    // Add chapters not linked to any document
+    const ungrouped = grouped.get(null);
+    if (ungrouped && ungrouped.length > 0) {
+      groups.push({ document: null, chapters: ungrouped });
+    }
+
+    return groups;
   }
 
   addImprovement(): void {

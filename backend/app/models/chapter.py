@@ -37,6 +37,9 @@ class Chapter(Base):
     parent_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("chapters.id", ondelete="CASCADE"), nullable=True
     )
+    response_document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("response_documents.id", ondelete="SET NULL"), nullable=True
+    )
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     order: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
@@ -72,3 +75,4 @@ class Chapter(Base):
         order_by="Chapter.order",
     )
     parent = relationship("Chapter", back_populates="children", remote_side=[id])
+    response_document = relationship("ResponseDocument", back_populates="chapters")

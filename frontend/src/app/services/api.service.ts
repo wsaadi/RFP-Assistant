@@ -7,7 +7,8 @@ import {
   DocumentInfo, DocumentImage, DocumentProgress,
   Chapter,
   GapAnalysis, ComplianceAnalysis,
-  ProjectStatistics, AnonymizationMapping, AnonymizationReport, GenerationStatus, PrefillStatus,
+  ProjectStatistics, AnonymizationMapping, AnonymizationReport,
+  GenerationStatus, PrefillStatus, DetectDeliverablesStatus, ResponseDocument,
   SearchResult, DocumentPreview,
   AIConfig, AIConfigUpdate,
   UserInfo, UserCreate, UserUpdate,
@@ -172,6 +173,27 @@ export class ApiService {
 
   getPrefillStatus(projectId: string): Observable<PrefillStatus> {
     return this.http.get<PrefillStatus>(`${this.baseUrl}/projects/${projectId}/prefill-status`);
+  }
+
+  // ── Response Documents (Deliverables) ──
+  detectDeliverables(projectId: string): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/detect-deliverables`, {});
+  }
+
+  getDetectDeliverablesStatus(projectId: string): Observable<DetectDeliverablesStatus> {
+    return this.http.get<DetectDeliverablesStatus>(`${this.baseUrl}/projects/${projectId}/detect-deliverables-status`);
+  }
+
+  getResponseDocuments(projectId: string): Observable<ResponseDocument[]> {
+    return this.http.get<ResponseDocument[]>(`${this.baseUrl}/projects/${projectId}/response-documents`);
+  }
+
+  updateResponseDocument(projectId: string, docId: string, data: any): Observable<ResponseDocument> {
+    return this.http.put<ResponseDocument>(`${this.baseUrl}/projects/${projectId}/response-documents/${docId}`, data);
+  }
+
+  confirmDocumentSelection(projectId: string, selections: { id: string; is_selected: boolean }[]): Observable<any> {
+    return this.http.post(`${this.baseUrl}/projects/${projectId}/response-documents/confirm-selection`, { selections });
   }
 
   analyzeCompliance(projectId: string): Observable<{ analysis: ComplianceAnalysis }> {
