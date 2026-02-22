@@ -97,7 +97,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
             <div *ngFor="let cat of categories" class="doc-category">
               <h4>{{ cat.label }}</h4>
               <mat-list>
-                <div *ngFor="let doc of getDocsByCategory(cat.value)" class="doc-item-wrap">
+                <div *ngFor="let doc of docsByCategory[cat.value]" class="doc-item-wrap">
                   <mat-list-item>
                     <mat-icon matListItemIcon>{{ fileIcon(doc.file_type) }}</mat-icon>
                     <span matListItemTitle>{{ doc.original_filename }}</span>
@@ -299,7 +299,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </mat-checkbox>
             </div>
 
-            <div class="chapter-tree" *ngFor="let group of getGroupedChapters()">
+            <div class="chapter-tree" *ngFor="let group of groupedChapters">
               <!-- Document group header -->
               <div class="doc-group-header" *ngIf="group.document">
                 <mat-icon>description</mat-icon>
@@ -564,6 +564,10 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   improvementSource = '';
   private pollSub: Subscription | null = null;
 
+  // Cached computed data to avoid method calls in template (prevents change detection loops)
+  groupedChapters: { document: ResponseDocument | null; chapters: Chapter[] }[] = [];
+  docsByCategory: Record<string, DocumentInfo[]> = {};
+
   categories = [
     { value: 'old_rfp', label: 'Ancien AO', desc: 'Documents de l\'ancien appel d\'offres', icon: 'history', color: '#1976d2' },
     { value: 'old_response', label: 'Ancienne Réponse', desc: 'Réponse à l\'ancien AO', icon: 'reply', color: '#388e3c' },
@@ -625,12 +629,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       error: () => { this.loading = false; },
     });
     this.api.getChapters(this.projectId).subscribe({
-      next: (ch) => this.chapters = ch,
+      next: (ch) => { this.chapters = ch; this._refreshGroupedChapters(); },
       error: () => {},
     });
     this.api.getDocuments(this.projectId).subscribe({
       next: (d) => {
         this.documents = d;
+        this._refreshDocsByCategory();
         const hasProcessing = d.some(doc => doc.processing_status === 'pending' || doc.processing_status === 'processing');
         if (hasProcessing) {
           this.startPolling();
@@ -665,7 +670,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
           this.stopPolling();
           this.progressMap = {};
           this.api.getDocuments(this.projectId).subscribe({
-            next: (d) => this.documents = d,
+            next: (d) => { this.documents = d; this._refreshDocsByCategory(); },
           });
         } else if (res.progress.every(p => p.step === 'completed' || p.step === 'failed')) {
           this.stopPolling();
@@ -690,6 +695,14 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       pending: 'En attente', processing: 'Traitement...', completed: 'Traité', failed: 'Échec',
     };
     return labels[status] || status;
+  }
+
+  private _refreshDocsByCategory(): void {
+    const map: Record<string, DocumentInfo[]> = {};
+    for (const cat of this.categories) {
+      map[cat.value] = this.documents.filter((d) => d.category === cat.value);
+    }
+    this.docsByCategory = map;
   }
 
   getDocsByCategory(category: string): DocumentInfo[] {
@@ -974,7 +987,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   loadResponseDocuments(): void {
     this.api.getResponseDocuments(this.projectId).subscribe({
-      next: (docs) => this.responseDocuments = docs,
+      next: (docs) => { this.responseDocuments = docs; this._refreshGroupedChapters(); },
       error: () => {},
     });
   }
@@ -1037,6 +1050,10 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   selectedDocCount(): number {
     return this.responseDocuments.filter(rd => rd.is_selected).length;
+  }
+
+  private _refreshGroupedChapters(): void {
+    this.groupedChapters = this.getGroupedChapters();
   }
 
   getGroupedChapters(): { document: ResponseDocument | null; chapters: Chapter[] }[] {
