@@ -622,9 +622,11 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.loading = true;
     this.api.getProject(this.projectId).subscribe({
       next: (p) => { this.project = p; this.loading = false; },
+      error: () => { this.loading = false; },
     });
     this.api.getChapters(this.projectId).subscribe({
       next: (ch) => this.chapters = ch,
+      error: () => {},
     });
     this.api.getDocuments(this.projectId).subscribe({
       next: (d) => {
@@ -637,9 +639,11 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
           this.progressMap = {};
         }
       },
+      error: () => {},
     });
     this.api.getStatistics(this.projectId).subscribe({
       next: (s) => this.stats = s,
+      error: () => {},
     });
     this.loadResponseDocuments();
   }
@@ -655,11 +659,20 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
           map[p.document_id] = p;
         }
         this.progressMap = map;
-        if (res.progress.length === 0 || res.progress.every(p => p.step === 'completed' || p.step === 'failed')) {
+        if (res.progress.length === 0) {
+          // No active progress tracked server-side (e.g. after a restart).
+          // Refresh documents only to avoid an infinite loadAll→poll loop.
+          this.stopPolling();
+          this.progressMap = {};
+          this.api.getDocuments(this.projectId).subscribe({
+            next: (d) => this.documents = d,
+          });
+        } else if (res.progress.every(p => p.step === 'completed' || p.step === 'failed')) {
           this.stopPolling();
           this.loadAll();
         }
       },
+      error: () => { this.stopPolling(); },
     });
   }
 
@@ -962,6 +975,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   loadResponseDocuments(): void {
     this.api.getResponseDocuments(this.projectId).subscribe({
       next: (docs) => this.responseDocuments = docs,
+      error: () => {},
     });
   }
 
