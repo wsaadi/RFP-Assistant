@@ -42,6 +42,10 @@ export class ApiService {
     return this.http.put<Workspace>(`${this.baseUrl}/workspaces/${id}`, data);
   }
 
+  deleteWorkspace(id: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/workspaces/${id}`);
+  }
+
   getWorkspaceMembers(workspaceId: string): Observable<WorkspaceMember[]> {
     return this.http.get<WorkspaceMember[]>(`${this.baseUrl}/workspaces/${workspaceId}/members`);
   }

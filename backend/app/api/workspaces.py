@@ -164,6 +164,32 @@ async def update_workspace(
     )
 
 
+@router.delete("/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_workspace(
+    workspace_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete a workspace and all its projects (owner only)."""
+    # Check that current user is owner
+    result = await db.execute(
+        select(WorkspaceMember)
+        .where(WorkspaceMember.workspace_id == workspace_id)
+        .where(WorkspaceMember.user_id == current_user.id)
+    )
+    membership = result.scalar_one_or_none()
+    if not membership or membership.role != MemberRole.OWNER:
+        raise HTTPException(status_code=403, detail="Seul le proprietaire peut supprimer le workspace")
+
+    result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
+    workspace = result.scalar_one_or_none()
+    if not workspace:
+        raise HTTPException(status_code=404, detail="Workspace non trouve")
+
+    await db.delete(workspace)
+    await db.commit()
+
+
 @router.get("/{workspace_id}/members", response_model=list[WorkspaceMemberOut])
 async def list_members(
     workspace_id: uuid.UUID,
