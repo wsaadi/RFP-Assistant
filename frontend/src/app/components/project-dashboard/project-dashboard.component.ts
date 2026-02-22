@@ -20,7 +20,7 @@ import { MatDialogModule } from '@angular/material/dialog';
 import { Subscription, interval, timer, forkJoin } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
-import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus } from '../../models/report.model';
+import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus } from '../../models/report.model';
 
 @Component({
   selector: 'app-project-dashboard',
@@ -140,9 +140,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                 <mat-icon *ngIf="!generatingStructure && genStatus?.status !== 'running'">auto_fix_high</mat-icon>
                 Generer la structure depuis l'AO
               </button>
-              <button mat-raised-button color="accent" (click)="prefillAll()" [disabled]="prefilling">
-                <mat-spinner *ngIf="prefilling" diameter="18"></mat-spinner>
-                <mat-icon *ngIf="!prefilling">auto_awesome</mat-icon>
+              <button mat-raised-button color="accent" (click)="prefillAll()"
+                [disabled]="prefilling || prefillStatus?.status === 'running'">
+                <mat-spinner *ngIf="prefilling || prefillStatus?.status === 'running'" diameter="18"></mat-spinner>
+                <mat-icon *ngIf="!prefilling && prefillStatus?.status !== 'running'">auto_awesome</mat-icon>
                 Pre-remplir depuis ancienne reponse
               </button>
               <span class="spacer"></span>
@@ -185,6 +186,35 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               <mat-icon>check_circle</mat-icon>
               <div>
                 <strong>{{ genStatus.message }}</strong>
+              </div>
+            </mat-card>
+
+            <!-- Prefill progress panel -->
+            <mat-card *ngIf="prefillStatus && prefillStatus.status === 'running'" class="gen-progress-card prefill-progress-card">
+              <div class="gen-progress-header">
+                <mat-icon class="spin-icon">auto_awesome</mat-icon>
+                <h3>Pre-remplissage depuis l'ancienne reponse...</h3>
+              </div>
+              <mat-progress-bar mode="determinate" [value]="prefillStatus.progress"></mat-progress-bar>
+              <div class="gen-progress-detail">
+                <span class="gen-step prefill-step">{{ prefillStepLabel(prefillStatus.step) }}</span>
+                <span class="gen-pct">{{ prefillStatus.progress }}%</span>
+              </div>
+              <p class="gen-message">{{ prefillStatus.message }}</p>
+            </mat-card>
+
+            <mat-card *ngIf="prefillStatus && prefillStatus.status === 'error'" class="gen-error-card">
+              <mat-icon>error_outline</mat-icon>
+              <div>
+                <strong>Echec du pre-remplissage</strong>
+                <p>{{ prefillStatus.message }}</p>
+              </div>
+            </mat-card>
+
+            <mat-card *ngIf="prefillStatus && prefillStatus.status === 'completed' && prefillStatus.prefilled_count !== undefined" class="gen-success-card">
+              <mat-icon>check_circle</mat-icon>
+              <div>
+                <strong>{{ prefillStatus.message }}</strong>
               </div>
             </mat-card>
 
@@ -379,6 +409,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .gen-error-card p { margin: 4px 0 0 0; color: #666; font-size: 13px; }
     .gen-success-card { margin: 16px 0; padding: 20px; border-left: 4px solid #4caf50; display: flex; align-items: center; gap: 12px; }
     .gen-success-card mat-icon { color: #4caf50; font-size: 28px; width: 28px; height: 28px; }
+    .prefill-progress-card { border-left-color: #7b1fa2; }
+    .prefill-progress-card .gen-progress-header h3 { color: #7b1fa2; }
+    .prefill-step { color: #7b1fa2 !important; }
+    .prefill-progress-card .spin-icon { color: #7b1fa2; }
     @keyframes spin { 100% { transform: rotate(360deg); } }
     .spin-icon { animation: spin 1.5s linear infinite; color: #1976d2; }
     .doc-item-wrap { border-bottom: 1px solid #eee; }
@@ -400,6 +434,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   genStatus: GenerationStatus | null = null;
   private genPollSub: Subscription | null = null;
   prefilling = false;
+  prefillStatus: PrefillStatus | null = null;
+  private prefillPollSub: Subscription | null = null;
   selectedChapters = new Set<string>();
   deletingChapters = false;
   showImprovementForm = false;
@@ -432,11 +468,22 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         }
       },
     });
+    // Resume prefill polling if already running
+    this.api.getPrefillStatus(this.projectId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.prefillStatus = status;
+          this.prefilling = true;
+          this.startPrefillPolling();
+        }
+      },
+    });
   }
 
   ngOnDestroy(): void {
     this.stopPolling();
     this.stopGenPolling();
+    this.stopPrefillPolling();
   }
 
   loadAll(): void {
@@ -601,17 +648,58 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   prefillAll(): void {
     this.prefilling = true;
+    this.prefillStatus = {
+      status: 'running',
+      step: 'starting',
+      progress: 0,
+      message: 'Lancement du pre-remplissage...',
+    };
     this.api.prefillChapters(this.projectId).subscribe({
-      next: (res) => {
-        this.snackBar.open(`${res.prefilled_count} chapitres pré-remplis`, 'OK', { duration: 3000 });
-        this.prefilling = false;
-        this.loadAll();
+      next: () => {
+        this.startPrefillPolling();
       },
       error: (err) => {
         this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
         this.prefilling = false;
+        this.prefillStatus = null;
       },
     });
+  }
+
+  private startPrefillPolling(): void {
+    this.stopPrefillPolling();
+    this.prefillPollSub = timer(0, 2000).pipe(
+      switchMap(() => this.api.getPrefillStatus(this.projectId))
+    ).subscribe({
+      next: (status) => {
+        this.prefillStatus = status;
+        if (status.status === 'completed') {
+          this.stopPrefillPolling();
+          this.prefilling = false;
+          this.snackBar.open(status.message || 'Pre-remplissage termine', 'OK', { duration: 5000 });
+          this.loadAll();
+        } else if (status.status === 'error') {
+          this.stopPrefillPolling();
+          this.prefilling = false;
+        }
+      },
+    });
+  }
+
+  private stopPrefillPolling(): void {
+    this.prefillPollSub?.unsubscribe();
+    this.prefillPollSub = null;
+  }
+
+  prefillStepLabel(step: string): string {
+    const labels: Record<string, string> = {
+      starting: 'Demarrage',
+      loading: 'Chargement des chapitres',
+      prefilling: 'Pre-remplissage IA',
+      saving: 'Enregistrement',
+      done: 'Termine',
+    };
+    return labels[step] || step;
   }
 
   // ── Chapter selection & deletion ──
