@@ -63,3 +63,7 @@ class AddNoteRequest(BaseModel):
 
 class ReorderChaptersRequest(BaseModel):
     chapter_orders: List[dict] = Field(..., description="List of {id, order} dicts")
+
+
+class BulkDeleteChaptersRequest(BaseModel):
+    chapter_ids: List[str] = Field(..., min_length=1, description="List of chapter UUIDs to delete")

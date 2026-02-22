@@ -15,7 +15,9 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatExpansionModule } from '@angular/material/expansion';
-import { Subscription, interval, timer } from 'rxjs';
+import { MatCheckboxModule } from '@angular/material/checkbox';
+import { MatDialogModule } from '@angular/material/dialog';
+import { Subscription, interval, timer, forkJoin } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus } from '../../models/report.model';
@@ -28,6 +30,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     MatCardModule, MatButtonModule, MatIconModule, MatTabsModule, MatChipsModule,
     MatProgressSpinnerModule, MatProgressBarModule, MatListModule,
     MatInputModule, MatSelectModule, MatSnackBarModule, MatTooltipModule, MatExpansionModule,
+    MatCheckboxModule, MatDialogModule,
   ],
   template: `
     <div class="page-container" *ngIf="project">
@@ -142,6 +145,18 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                 <mat-icon *ngIf="!prefilling">auto_awesome</mat-icon>
                 Pre-remplir depuis ancienne reponse
               </button>
+              <span class="spacer"></span>
+              <button mat-raised-button color="warn" (click)="deleteSelectedChapters()"
+                *ngIf="selectedChapters.size > 0" [disabled]="deletingChapters">
+                <mat-spinner *ngIf="deletingChapters" diameter="18"></mat-spinner>
+                <mat-icon *ngIf="!deletingChapters">delete</mat-icon>
+                Supprimer ({{ selectedChapters.size }})
+              </button>
+              <button mat-button color="warn" (click)="deleteAllChapters()"
+                *ngIf="chapters.length > 0" [disabled]="deletingChapters">
+                <mat-icon>delete_sweep</mat-icon>
+                Tout supprimer
+              </button>
             </div>
 
             <!-- Generation progress panel -->
@@ -173,11 +188,26 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
             </mat-card>
 
+            <!-- Select all checkbox -->
+            <div class="select-all-bar" *ngIf="chapters.length > 0">
+              <mat-checkbox
+                [checked]="allChaptersSelected()"
+                [indeterminate]="someChaptersSelected() && !allChaptersSelected()"
+                (change)="toggleSelectAll($event.checked)">
+                Tout selectionner
+              </mat-checkbox>
+            </div>
+
             <div class="chapter-tree">
               <mat-accordion multi>
                 <mat-expansion-panel *ngFor="let ch of chapters; let i = index">
                   <mat-expansion-panel-header>
                     <mat-panel-title>
+                      <mat-checkbox class="ch-checkbox"
+                        [checked]="selectedChapters.has(ch.id)"
+                        (change)="toggleChapterSelection(ch, $event.checked)"
+                        (click)="$event.stopPropagation()">
+                      </mat-checkbox>
                       <mat-chip [class]="'status-' + ch.status" size="small">{{ statusIcon(ch.status) }}</mat-chip>
                       <span class="ch-numbering">{{ i + 1 }}.</span> {{ ch.title }}
                     </mat-panel-title>
@@ -191,19 +221,30 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
 
                   <div class="ch-actions">
                     <button mat-raised-button color="primary" [routerLink]="['/project', projectId, 'chapter', ch.id]">
-                      <mat-icon>edit</mat-icon> Éditer
+                      <mat-icon>edit</mat-icon> Editer
+                    </button>
+                    <button mat-icon-button color="warn" (click)="deleteSingleChapter(ch.id)" matTooltip="Supprimer ce chapitre">
+                      <mat-icon>delete</mat-icon>
                     </button>
                   </div>
 
                   <!-- Sub-chapters -->
                   <div *ngIf="ch.children?.length" class="sub-chapters">
                     <div *ngFor="let sub of ch.children; let j = index" class="sub-chapter-item">
+                      <mat-checkbox class="sub-checkbox"
+                        [checked]="selectedChapters.has(sub.id)"
+                        (change)="toggleSubChapterSelection(sub.id, $event.checked)"
+                        (click)="$event.stopPropagation()">
+                      </mat-checkbox>
                       <mat-chip [class]="'status-' + sub.status" size="small">{{ statusIcon(sub.status) }}</mat-chip>
                       <span class="ch-numbering">{{ i + 1 }}.{{ j + 1 }}</span>
                       <span>{{ sub.title }}</span>
                       <span class="sub-meta">{{ sub.content ? (sub.content.split(' ').length + ' mots') : 'Vide' }}</span>
                       <button mat-icon-button [routerLink]="['/project', projectId, 'chapter', sub.id]">
                         <mat-icon>edit</mat-icon>
+                      </button>
+                      <button mat-icon-button color="warn" (click)="deleteSingleChapter(sub.id)" matTooltip="Supprimer">
+                        <mat-icon>delete_outline</mat-icon>
                       </button>
                     </div>
                   </div>
@@ -298,7 +339,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .proc-processing { background: #fff3e0 !important; }
     .proc-pending { background: #e0e0e0 !important; }
     .proc-failed { background: #ffcdd2 !important; }
-    .chapter-actions { display: flex; gap: 8px; margin-bottom: 16px; }
+    .chapter-actions { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
+    .spacer { flex: 1; }
     .ch-numbering { font-weight: bold; color: #2C5F8A; margin-right: 4px; }
     .ch-desc { color: #666; font-size: 13px; }
     .ch-req { font-size: 13px; background: #f5f5f5; padding: 8px; border-radius: 4px; }
@@ -306,6 +348,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .sub-chapters { margin-top: 12px; padding-left: 24px; }
     .sub-chapter-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #eee; }
     .sub-meta { color: #888; font-size: 12px; margin-left: auto; }
+    .select-all-bar { padding: 8px 0; margin-bottom: 4px; }
+    .ch-checkbox { margin-right: 8px; }
+    .sub-checkbox { margin-right: 4px; }
     .status-not_started { background: #e0e0e0 !important; }
     .status-in_progress { background: #bbdefb !important; }
     .status-completed { background: #c8e6c9 !important; }
@@ -355,6 +400,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   genStatus: GenerationStatus | null = null;
   private genPollSub: Subscription | null = null;
   prefilling = false;
+  selectedChapters = new Set<string>();
+  deletingChapters = false;
   showImprovementForm = false;
   improvementContent = '';
   improvementSource = '';
@@ -563,6 +610,128 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       error: (err) => {
         this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
         this.prefilling = false;
+      },
+    });
+  }
+
+  // ── Chapter selection & deletion ──
+
+  toggleChapterSelection(ch: Chapter, checked: boolean): void {
+    if (checked) {
+      this.selectedChapters.add(ch.id);
+      // Also select all children
+      for (const sub of (ch.children || [])) {
+        this.selectedChapters.add(sub.id);
+      }
+    } else {
+      this.selectedChapters.delete(ch.id);
+      for (const sub of (ch.children || [])) {
+        this.selectedChapters.delete(sub.id);
+      }
+    }
+  }
+
+  toggleSubChapterSelection(subId: string, checked: boolean): void {
+    if (checked) {
+      this.selectedChapters.add(subId);
+    } else {
+      this.selectedChapters.delete(subId);
+    }
+  }
+
+  allChaptersSelected(): boolean {
+    if (this.chapters.length === 0) return false;
+    return this.getAllChapterIds().every(id => this.selectedChapters.has(id));
+  }
+
+  someChaptersSelected(): boolean {
+    return this.selectedChapters.size > 0;
+  }
+
+  toggleSelectAll(checked: boolean): void {
+    if (checked) {
+      for (const id of this.getAllChapterIds()) {
+        this.selectedChapters.add(id);
+      }
+    } else {
+      this.selectedChapters.clear();
+    }
+  }
+
+  private getAllChapterIds(): string[] {
+    const ids: string[] = [];
+    for (const ch of this.chapters) {
+      ids.push(ch.id);
+      for (const sub of (ch.children || [])) {
+        ids.push(sub.id);
+      }
+    }
+    return ids;
+  }
+
+  deleteSingleChapter(chapterId: string): void {
+    if (!confirm('Supprimer ce chapitre et ses sous-chapitres ?')) return;
+    this.deletingChapters = true;
+    this.api.deleteChapter(chapterId).subscribe({
+      next: () => {
+        this.selectedChapters.delete(chapterId);
+        this.snackBar.open('Chapitre supprime', 'OK', { duration: 2000 });
+        this.deletingChapters = false;
+        this.loadAll();
+      },
+      error: () => {
+        this.snackBar.open('Erreur lors de la suppression', 'OK', { duration: 3000 });
+        this.deletingChapters = false;
+      },
+    });
+  }
+
+  deleteSelectedChapters(): void {
+    const count = this.selectedChapters.size;
+    if (!confirm(`Supprimer ${count} chapitre(s) selectionne(s) et leurs sous-chapitres ?`)) return;
+    this.deletingChapters = true;
+    // Only send root-level IDs (parents). If a parent is selected, its children
+    // are cascade-deleted, so we filter out children whose parent is also selected.
+    const rootIds = Array.from(this.selectedChapters).filter(id => {
+      // Check if this chapter's parent is also selected
+      for (const ch of this.chapters) {
+        if (ch.id === id) return true; // top-level chapter
+        for (const sub of (ch.children || [])) {
+          if (sub.id === id && !this.selectedChapters.has(ch.id)) return true;
+        }
+      }
+      return false;
+    });
+    this.api.bulkDeleteChapters(rootIds).subscribe({
+      next: (res) => {
+        this.selectedChapters.clear();
+        this.snackBar.open(`${res.deleted} chapitre(s) supprime(s)`, 'OK', { duration: 3000 });
+        this.deletingChapters = false;
+        this.loadAll();
+      },
+      error: () => {
+        this.snackBar.open('Erreur lors de la suppression', 'OK', { duration: 3000 });
+        this.deletingChapters = false;
+      },
+    });
+  }
+
+  deleteAllChapters(): void {
+    const total = this.getAllChapterIds().length;
+    if (!confirm(`Supprimer TOUS les ${total} chapitres ? Cette action est irreversible.`)) return;
+    this.deletingChapters = true;
+    // Only send root-level chapter IDs — children are cascade-deleted
+    const rootIds = this.chapters.map(ch => ch.id);
+    this.api.bulkDeleteChapters(rootIds).subscribe({
+      next: (res) => {
+        this.selectedChapters.clear();
+        this.snackBar.open(`${res.deleted} chapitre(s) supprime(s)`, 'OK', { duration: 3000 });
+        this.deletingChapters = false;
+        this.loadAll();
+      },
+      error: () => {
+        this.snackBar.open('Erreur lors de la suppression', 'OK', { duration: 3000 });
+        this.deletingChapters = false;
       },
     });
   }

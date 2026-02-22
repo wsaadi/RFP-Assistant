@@ -134,6 +134,10 @@ export class ApiService {
     return this.http.delete<void>(`${this.baseUrl}/chapters/${chapterId}`);
   }
 
+  bulkDeleteChapters(chapterIds: string[]): Observable<{ deleted: number }> {
+    return this.http.post<{ deleted: number }>(`${this.baseUrl}/chapters/bulk-delete`, { chapter_ids: chapterIds });
+  }
+
   addChapterNote(chapterId: string, content: string): Observable<any> {
     return this.http.post(`${this.baseUrl}/chapters/${chapterId}/note`, { content });
   }
