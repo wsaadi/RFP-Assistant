@@ -190,25 +190,41 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
             </mat-card>
 
+            <mat-card *ngIf="detectStatus && detectStatus.status === 'completed' && detectStatus.deliverables_count" class="gen-success-card detect-success-card">
+              <mat-icon>check_circle</mat-icon>
+              <div>
+                <strong>{{ detectStatus.deliverables_count }} livrables detectes</strong>
+                <span class="detect-success-hint">Selectionnez les documents a produire puis generez la structure.</span>
+              </div>
+            </mat-card>
+
             <!-- Deliverables list -->
             <mat-card *ngIf="responseDocuments.length > 0" class="deliverables-card">
               <div class="deliverables-header">
                 <mat-icon>description</mat-icon>
-                <h3>Documents attendus par l'AO ({{ selectedDocCount() }}/{{ responseDocuments.length }} selectionnes)</h3>
+                <h3>Documents attendus par l'AO</h3>
+                <span class="deliverables-count">{{ selectedDocCount() }}/{{ responseDocuments.length }} selectionnes</span>
               </div>
               <div class="deliverables-list">
-                <div *ngFor="let rd of responseDocuments" class="deliverable-item"
+                <div *ngFor="let rd of responseDocuments; let i = index" class="deliverable-item"
                   [class.deselected]="!rd.is_selected">
                   <mat-checkbox [checked]="rd.is_selected"
                     (change)="toggleDeliverable(rd, $event.checked)">
                   </mat-checkbox>
+                  <div class="deliverable-format-icon" [class]="'format-' + rd.expected_format">
+                    <mat-icon>{{ formatIcon(rd.expected_format) }}</mat-icon>
+                    <span class="format-label">{{ rd.expected_format | uppercase }}</span>
+                  </div>
                   <div class="deliverable-info">
                     <strong>{{ rd.title }}</strong>
                     <span class="deliverable-desc">{{ rd.description }}</span>
                     <div class="deliverable-meta">
-                      <mat-chip size="small">{{ rd.expected_format | uppercase }}</mat-chip>
-                      <span class="deliverable-source" *ngIf="rd.rfp_source">{{ rd.rfp_source }}</span>
-                      <span class="deliverable-chapters" *ngIf="rd.chapter_count > 0">{{ rd.chapter_count }} chapitres</span>
+                      <span class="deliverable-source" *ngIf="rd.rfp_source">
+                        <mat-icon class="meta-icon">source</mat-icon> {{ rd.rfp_source }}
+                      </span>
+                      <span class="deliverable-chapters" *ngIf="rd.chapter_count > 0">
+                        <mat-icon class="meta-icon">menu_book</mat-icon> {{ rd.chapter_count }} chapitres
+                      </span>
                     </div>
                   </div>
                 </div>
@@ -477,18 +493,35 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .detect-progress-card .spin-icon { color: #7b1fa2; }
     .detect-step { color: #7b1fa2 !important; }
     .deliverables-card { margin: 16px 0; padding: 20px; border-left: 4px solid #7b1fa2; }
-    .deliverables-header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .deliverables-header { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
     .deliverables-header mat-icon { color: #7b1fa2; }
     .deliverables-header h3 { margin: 0; color: #1B3A5C; font-size: 15px; }
-    .deliverables-list { display: flex; flex-direction: column; gap: 8px; }
-    .deliverable-item { display: flex; align-items: flex-start; gap: 8px; padding: 10px; border-radius: 6px; background: #fafafa; }
-    .deliverable-item.deselected { opacity: 0.5; }
+    .deliverables-count { margin-left: auto; font-size: 13px; color: #7b1fa2; font-weight: 500; }
+    .deliverables-list { display: flex; flex-direction: column; gap: 10px; }
+    .deliverable-item { display: flex; align-items: flex-start; gap: 12px; padding: 12px; border-radius: 8px; background: #fafafa; border: 1px solid #eee; transition: opacity 0.2s, border-color 0.2s; }
+    .deliverable-item:hover { border-color: #7b1fa2; }
+    .deliverable-item.deselected { opacity: 0.45; }
+    .deliverable-format-icon { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 48px; padding: 6px 0; border-radius: 6px; }
+    .deliverable-format-icon mat-icon { font-size: 28px; width: 28px; height: 28px; }
+    .format-label { font-size: 10px; font-weight: 600; text-transform: uppercase; }
+    .format-docx { background: #e3f2fd; color: #1565c0; }
+    .format-docx mat-icon { color: #1565c0; }
+    .format-xlsx { background: #e8f5e9; color: #2e7d32; }
+    .format-xlsx mat-icon { color: #2e7d32; }
+    .format-pdf { background: #fce4ec; color: #c62828; }
+    .format-pdf mat-icon { color: #c62828; }
+    .format-other { background: #f3e5f5; color: #6a1b9a; }
+    .format-other mat-icon { color: #6a1b9a; }
     .deliverable-info { flex: 1; }
-    .deliverable-info strong { display: block; color: #1B3A5C; }
-    .deliverable-desc { display: block; font-size: 13px; color: #666; margin: 2px 0; }
-    .deliverable-meta { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
-    .deliverable-source { font-size: 12px; color: #888; font-style: italic; }
-    .deliverable-chapters { font-size: 12px; color: #2C5F8A; font-weight: 500; }
+    .deliverable-info strong { display: block; color: #1B3A5C; font-size: 14px; }
+    .deliverable-desc { display: block; font-size: 13px; color: #666; margin: 4px 0; line-height: 1.4; }
+    .deliverable-meta { display: flex; gap: 12px; align-items: center; margin-top: 6px; }
+    .meta-icon { font-size: 14px; width: 14px; height: 14px; vertical-align: middle; margin-right: 2px; }
+    .deliverable-source { font-size: 12px; color: #888; display: flex; align-items: center; }
+    .deliverable-chapters { font-size: 12px; color: #2C5F8A; font-weight: 500; display: flex; align-items: center; }
+    .detect-success-card { border-left-color: #7b1fa2; }
+    .detect-success-card mat-icon { color: #7b1fa2; }
+    .detect-success-hint { display: block; font-size: 13px; color: #666; margin-top: 2px; }
     .doc-group-header { display: flex; align-items: center; gap: 8px; padding: 12px 0 6px 0; border-bottom: 2px solid #7b1fa2; margin-bottom: 8px; margin-top: 16px; }
     .doc-group-header mat-icon { color: #7b1fa2; }
     .doc-group-header strong { color: #1B3A5C; font-size: 15px; }
@@ -1087,5 +1120,15 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       not_started: '○', in_progress: '◐', completed: '●', needs_review: '◑', validated: '✓',
     };
     return icons[status] || '○';
+  }
+
+  formatIcon(format: string): string {
+    const icons: Record<string, string> = {
+      docx: 'article',
+      xlsx: 'table_chart',
+      pdf: 'picture_as_pdf',
+      other: 'insert_drive_file',
+    };
+    return icons[format] || 'insert_drive_file';
   }
 }

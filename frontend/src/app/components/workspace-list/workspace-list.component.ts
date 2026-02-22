@@ -5,10 +5,11 @@ import { RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
-import { MatDialogModule, MatDialog } from '@angular/material/dialog';
 import { MatInputModule } from '@angular/material/input';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { MatChipsModule } from '@angular/material/chips';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatMenuModule } from '@angular/material/menu';
 import { ApiService } from '../../services/api.service';
 import { Workspace } from '../../models/report.model';
 
@@ -18,6 +19,7 @@ import { Workspace } from '../../models/report.model';
   imports: [
     CommonModule, FormsModule, RouterLink,
     MatCardModule, MatButtonModule, MatIconModule, MatInputModule, MatProgressSpinnerModule, MatChipsModule,
+    MatSnackBarModule, MatMenuModule,
   ],
   template: `
     <div class="page-container">
@@ -49,26 +51,55 @@ import { Workspace } from '../../models/report.model';
       </div>
 
       <div class="workspace-grid" *ngIf="!loading">
-        <mat-card *ngFor="let ws of workspaces" class="workspace-card" [routerLink]="['/workspace', ws.id]">
-          <mat-card-header>
-            <mat-icon mat-card-avatar class="ws-icon">folder_shared</mat-icon>
-            <mat-card-title>{{ ws.name }}</mat-card-title>
-            <mat-card-subtitle>{{ ws.description || 'Aucune description' }}</mat-card-subtitle>
-          </mat-card-header>
-          <mat-card-content>
-            <div class="ws-stats">
-              <mat-chip-set>
-                <mat-chip>
-                  <mat-icon matChipAvatar>people</mat-icon>
-                  {{ ws.member_count }} membre{{ ws.member_count > 1 ? 's' : '' }}
-                </mat-chip>
-                <mat-chip>
-                  <mat-icon matChipAvatar>assignment</mat-icon>
-                  {{ ws.project_count }} projet{{ ws.project_count > 1 ? 's' : '' }}
-                </mat-chip>
-              </mat-chip-set>
+        <mat-card *ngFor="let ws of workspaces" class="workspace-card">
+          <!-- Edit form inline -->
+          <div *ngIf="editingWorkspace?.id === ws.id" class="edit-inline">
+            <mat-form-field appearance="outline" class="full-width">
+              <mat-label>Nom</mat-label>
+              <input matInput [(ngModel)]="editingWorkspace.name">
+            </mat-form-field>
+            <mat-form-field appearance="outline" class="full-width">
+              <mat-label>Description</mat-label>
+              <input matInput [(ngModel)]="editingWorkspace.description">
+            </mat-form-field>
+            <div class="form-actions">
+              <button mat-button (click)="editingWorkspace = null">Annuler</button>
+              <button mat-raised-button color="primary" (click)="saveWorkspace(ws)">Enregistrer</button>
             </div>
-          </mat-card-content>
+          </div>
+
+          <!-- Normal display -->
+          <div *ngIf="editingWorkspace?.id !== ws.id" [routerLink]="['/workspace', ws.id]" class="ws-clickable">
+            <mat-card-header>
+              <mat-icon mat-card-avatar class="ws-icon">folder_shared</mat-icon>
+              <mat-card-title>{{ ws.name }}</mat-card-title>
+              <mat-card-subtitle>{{ ws.description || 'Aucune description' }}</mat-card-subtitle>
+            </mat-card-header>
+            <mat-card-content>
+              <div class="ws-stats">
+                <mat-chip-set>
+                  <mat-chip>
+                    <mat-icon matChipAvatar>people</mat-icon>
+                    {{ ws.member_count }} membre{{ ws.member_count > 1 ? 's' : '' }}
+                  </mat-chip>
+                  <mat-chip>
+                    <mat-icon matChipAvatar>assignment</mat-icon>
+                    {{ ws.project_count }} projet{{ ws.project_count > 1 ? 's' : '' }}
+                  </mat-chip>
+                </mat-chip-set>
+              </div>
+            </mat-card-content>
+          </div>
+
+          <!-- Action buttons -->
+          <div class="ws-card-actions" *ngIf="editingWorkspace?.id !== ws.id">
+            <button mat-icon-button (click)="startEditWorkspace(ws, $event)" matTooltip="Modifier">
+              <mat-icon>edit</mat-icon>
+            </button>
+            <button mat-icon-button color="warn" (click)="deleteWorkspace(ws, $event)" matTooltip="Supprimer">
+              <mat-icon>delete</mat-icon>
+            </button>
+          </div>
         </mat-card>
 
         <mat-card *ngIf="workspaces.length === 0" class="empty-state">
@@ -87,10 +118,14 @@ import { Workspace } from '../../models/report.model';
     .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
     .workspace-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(350px, 1fr)); gap: 16px; }
-    .workspace-card { cursor: pointer; transition: transform 0.2s, box-shadow 0.2s; }
+    .workspace-card { position: relative; transition: transform 0.2s, box-shadow 0.2s; }
     .workspace-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+    .ws-clickable { cursor: pointer; }
     .ws-icon { font-size: 40px; width: 40px; height: 40px; color: #2C5F8A; }
     .ws-stats { margin-top: 12px; }
+    .ws-card-actions { position: absolute; top: 8px; right: 8px; display: flex; gap: 0; opacity: 0; transition: opacity 0.2s; }
+    .workspace-card:hover .ws-card-actions { opacity: 1; }
+    .edit-inline { padding: 16px; }
     .empty-state { text-align: center; padding: 48px; color: #888; }
     .empty-state mat-icon { font-size: 64px; width: 64px; height: 64px; color: #ccc; }
   `],
@@ -101,8 +136,9 @@ export class WorkspaceListComponent implements OnInit {
   showCreateForm = false;
   newName = '';
   newDescription = '';
+  editingWorkspace: { id: string; name: string; description: string } | null = null;
 
-  constructor(private api: ApiService) {}
+  constructor(private api: ApiService, private snackBar: MatSnackBar) {}
 
   ngOnInit(): void {
     this.loadWorkspaces();
@@ -125,6 +161,40 @@ export class WorkspaceListComponent implements OnInit {
         this.newDescription = '';
         this.loadWorkspaces();
       },
+    });
+  }
+
+  startEditWorkspace(ws: Workspace, event: Event): void {
+    event.stopPropagation();
+    event.preventDefault();
+    this.editingWorkspace = { id: ws.id, name: ws.name, description: ws.description || '' };
+  }
+
+  saveWorkspace(ws: Workspace): void {
+    if (!this.editingWorkspace) return;
+    this.api.updateWorkspace(ws.id, {
+      name: this.editingWorkspace.name,
+      description: this.editingWorkspace.description,
+    }).subscribe({
+      next: () => {
+        this.editingWorkspace = null;
+        this.snackBar.open('Workspace modifie', 'OK', { duration: 2000 });
+        this.loadWorkspaces();
+      },
+      error: () => this.snackBar.open('Erreur de modification', 'OK', { duration: 3000 }),
+    });
+  }
+
+  deleteWorkspace(ws: Workspace, event: Event): void {
+    event.stopPropagation();
+    event.preventDefault();
+    if (!confirm(`Supprimer le workspace "${ws.name}" et tous ses projets ? Cette action est irreversible.`)) return;
+    this.api.deleteWorkspace(ws.id).subscribe({
+      next: () => {
+        this.snackBar.open('Workspace supprime', 'OK', { duration: 2000 });
+        this.loadWorkspaces();
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur de suppression', 'OK', { duration: 3000 }),
     });
   }
 }
