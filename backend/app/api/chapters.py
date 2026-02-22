@@ -3,7 +3,7 @@ import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, delete as sa_delete
 
 from ..database import get_db
 from ..models.user import User
@@ -12,6 +12,7 @@ from ..models.chapter import Chapter, ChapterStatus
 from ..schemas.chapter import (
     ChapterCreate, ChapterUpdate, ChapterOut,
     ChapterContentRequest, AddNoteRequest, ReorderChaptersRequest,
+    BulkDeleteChaptersRequest,
 )
 from ..services.ai_service import MistralAIService
 from ..services.vector_service import VectorService
@@ -176,6 +177,29 @@ async def delete_chapter(
 
     await db.delete(chapter)
     await db.commit()
+
+
+@router.post("/bulk-delete")
+async def bulk_delete_chapters(
+    request: BulkDeleteChaptersRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete multiple chapters and their children.
+
+    Accepts a list of chapter IDs. Children are cascade-deleted automatically
+    by the DB foreign key constraint, so only root-level IDs need to be passed.
+    """
+    uuids = [uuid.UUID(cid) for cid in request.chapter_ids]
+    result = await db.execute(
+        select(Chapter).where(Chapter.id.in_(uuids))
+    )
+    chapters = result.scalars().all()
+    deleted = len(chapters)
+    for ch in chapters:
+        await db.delete(ch)
+    await db.commit()
+    return {"deleted": deleted}
 
 
 @router.post("/{chapter_id}/note")
