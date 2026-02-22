@@ -462,6 +462,147 @@ Valeurs de delta:
                      len(response2), response2[:500])
         return []
 
+    async def detect_deliverables(
+        self,
+        new_rfp_content: str,
+        old_response_content: str = "",
+        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    ) -> List[Dict]:
+        """Analyze the RFP to detect all expected deliverables/documents."""
+        system_prompt = """Tu es un expert senior en marchés publics et appels d'offres.
+
+Ta mission est d'analyser le contenu d'un appel d'offres pour identifier TOUS les documents
+et livrables que le candidat doit fournir dans sa réponse.
+
+## Ce que tu dois identifier:
+- Le mémoire technique (ou offre technique)
+- L'acte d'engagement (AE)
+- Le bordereau des prix unitaires (BPU)
+- Le détail quantitatif estimatif (DQE) ou DPGF
+- Les annexes spécifiques demandées (annexes techniques, financières, etc.)
+- Les formulaires obligatoires (DC1, DC2, ATTRI1, etc.)
+- Les attestations et certificats demandés
+- Le planning ou calendrier d'exécution
+- Les fiches de références / expériences similaires
+- Les CV des intervenants clés
+- Le mémoire environnemental / RSE si demandé
+- Tout autre document spécifiquement mentionné dans le RC, le CCTP ou le CCP
+
+## Règles:
+- Base-toi UNIQUEMENT sur ce que l'AO demande explicitement
+- Cite la source dans l'AO (article, page, section) quand possible
+- Indique le format attendu (docx, xlsx, pdf) si précisé dans l'AO
+- Classe les documents par ordre logique de présentation
+- Si une ancienne réponse est fournie, utilise-la pour confirmer/compléter la liste
+
+Réponds UNIQUEMENT au format JSON suivant (sans markdown):
+[
+  {
+    "title": "Titre du document (ex: Memoire Technique)",
+    "description": "Description du contenu attendu dans ce document",
+    "expected_format": "docx|xlsx|pdf|other",
+    "rfp_source": "Reference dans l'AO (ex: Article 5.2 du RC, page 12)",
+    "suggested": true
+  }
+]
+
+Valeurs de expected_format:
+- "docx": document texte (mémoire, notes, rapports)
+- "xlsx": tableur (BPU, DQE, DPGF, planning)
+- "pdf": formulaires administratifs pré-remplis
+- "other": autre format ou non précisé"""
+
+        parts = [f"CONTENU DE L'APPEL D'OFFRES:\n{new_rfp_content[:80000]}"]
+
+        if old_response_content:
+            parts.append(
+                f"ANCIENNE RÉPONSE (pour référence):\n{old_response_content[:30000]}"
+            )
+
+        user_prompt = "\n\n---\n\n".join(parts)
+        user_prompt += (
+            "\n\nAnalyse cet appel d'offres et identifie TOUS les documents "
+            "et livrables que le candidat doit fournir."
+        )
+
+        response = await self.generate_streaming(
+            system_prompt, user_prompt, temperature=0.2, max_tokens=8000,
+            timeout=600, on_progress=on_progress,
+        )
+        result = _parse_json_array(response)
+        if result:
+            return result
+
+        logger.warning("Deliverable detection: JSON parse failed. First 500: %s", response[:500])
+        return []
+
+    async def generate_response_structure_for_document(
+        self,
+        document_title: str,
+        document_description: str,
+        new_rfp_content: str,
+        old_rfp_content: str = "",
+        old_response_content: str = "",
+        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    ) -> List[Dict]:
+        """Generate chapter structure for a specific response document."""
+        system_prompt = f"""Tu es un expert senior en réponse aux appels d'offres.
+
+Tu dois créer la STRUCTURE DÉTAILLÉE (chapitrage) du document suivant:
+**{document_title}**
+
+Description: {document_description}
+
+## Règles:
+- Crée une structure adaptée spécifiquement à CE document (pas à l'ensemble de la réponse)
+- Les chapitres doivent couvrir tous les aspects attendus pour ce type de document
+- Utilise la structure de l'ancienne réponse comme référence si disponible
+- Les descriptions doivent être précises et indiquer clairement le contenu attendu
+- Le champ rfp_requirement doit citer l'exigence de l'AO concernée
+
+Réponds UNIQUEMENT au format JSON suivant (sans markdown):
+[
+  {{
+    "title": "Titre du chapitre",
+    "description": "Description détaillée du contenu attendu",
+    "chapter_type": "chapter",
+    "rfp_requirement": "Exigence de l'AO correspondante",
+    "children": [
+      {{
+        "title": "Sous-chapitre",
+        "description": "Description",
+        "chapter_type": "sub_chapter",
+        "rfp_requirement": "Exigence",
+        "children": []
+      }}
+    ]
+  }}
+]"""
+
+        parts = [f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:60000]}"]
+        if old_rfp_content:
+            parts.append(f"CONTENU DE L'ANCIEN AO:\n{old_rfp_content[:30000]}")
+        if old_response_content:
+            parts.append(f"ANCIENNE RÉPONSE:\n{old_response_content[:30000]}")
+
+        user_prompt = "\n\n---\n\n".join(parts)
+        user_prompt += (
+            f"\n\nGénère la structure complète du document '{document_title}' "
+            "en te basant sur les exigences de l'AO."
+        )
+
+        response = await self.generate_streaming(
+            system_prompt, user_prompt, temperature=0.2, max_tokens=8000,
+            timeout=600, on_progress=on_progress,
+        )
+        result = _parse_json_array(response)
+        if result:
+            return result
+
+        logger.warning("Doc structure gen failed for '%s'. First 500: %s",
+                       document_title, response[:500])
+        return []
+
     async def generate_chapter_content(
         self,
         chapter_title: str,

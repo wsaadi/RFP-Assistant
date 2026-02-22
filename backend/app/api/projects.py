@@ -13,12 +13,14 @@ from ..models.workspace import WorkspaceMember
 from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus
 from ..models.document import Document, DocumentChunk, DocumentCategory
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
+from ..models.response_document import ResponseDocument, DocumentFormat
 from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectOut,
     ImprovementAxisRequest, GapAnalysisRequest,
     GenerateStructureRequest, PrefillRequest, ComplianceAnalysisRequest,
 )
 from ..schemas.document import StatisticsOut, AnonymizationMappingOut, AnonymizationReportOut, AnonymizationEntityGroup
+from ..schemas.response_document import ResponseDocumentOut, ResponseDocumentUpdate, BulkUpdateSelectionRequest
 from ..services.ai_service import MistralAIService
 from ..services.vector_service import VectorService
 from ..services.anonymization_service import AnonymizationService
@@ -424,69 +426,157 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             _update("gap_analysis", 40,
                     f"Ecarts identifies: {gap_new} nouvelles, {gap_mod} modifiees, {gap_del} supprimees")
 
-        # ── Phase 3: Generate structure (streamed, real token progress) ──
-        _update("generating", 40, "Generation IA de la structure en cours...")
-        gen_cb = _make_stream_progress_callback(
-            pid, "generating", 40, 85, "Generation structure", max_tokens=12000,
-        )
-        structure = await ai_service.generate_response_structure(
-            new_rfp_content=anon_new_rfp,
-            old_rfp_content=anon_old_rfp,
-            old_response_content=anon_old_response,
-            gap_analysis=gap_analysis,
-            on_progress=gen_cb,
-        )
+        # ── Phase 3: Check for response documents ──
+        resp_docs = []
+        async with async_session() as db:
+            result = await db.execute(
+                select(ResponseDocument)
+                .where(ResponseDocument.project_id == project_id)
+                .where(ResponseDocument.is_selected == True)
+                .order_by(ResponseDocument.order)
+            )
+            resp_docs = [(str(rd.id), rd.title, rd.description) for rd in result.scalars().all()]
 
-        if not structure:
-            _generation_progress[pid] = {
-                "status": "error", "step": "error", "progress": 0,
-                "message": "L'IA n'a pas retourne de JSON valide apres 2 tentatives. "
-                           "Verifiez les logs serveur pour le diagnostic. Reessayez.",
-            }
-            return
-
-        _update("generating", 85,
-                f"Structure generee: {len(structure)} chapitres principaux")
-
-        # ── Phase 4: Save to DB (short-lived session) ──
-        _update("saving", 88, "Enregistrement des chapitres en base...")
+        # ── Phase 3: Generate structure ──
         order = 0
         created_count = 0
         delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
 
-        async with async_session() as db:
-            async def create_chapters_recursive(items, parent_id=None):
-                nonlocal order, created_count
-                for item in items:
-                    order += 1
-                    created_count += 1
-                    delta = item.get("delta", "unchanged")
-                    if delta in delta_stats:
-                        delta_stats[delta] += 1
+        if resp_docs:
+            # ── Per-document generation ──
+            total_docs = len(resp_docs)
+            all_doc_structures: list[tuple[str, list]] = []  # (doc_id, chapters)
 
-                    notes = []
-                    if delta and delta != "unchanged":
-                        notes.append({"type": "delta", "value": delta})
+            for doc_idx, (doc_id, doc_title, doc_desc) in enumerate(resp_docs):
+                doc_num = doc_idx + 1
+                start_pct = 40 + int(45 * doc_idx / total_docs)
+                end_pct = 40 + int(45 * doc_num / total_docs)
 
-                    chapter = Chapter(
-                        project_id=project_id,
-                        parent_id=parent_id,
-                        title=item.get("title", ""),
-                        description=item.get("description", ""),
-                        order=order,
-                        chapter_type=item.get("chapter_type", "chapter"),
-                        rfp_requirement=item.get("rfp_requirement", ""),
-                        notes=notes,
-                    )
-                    db.add(chapter)
-                    await db.flush()
+                _update("generating", start_pct,
+                        f"Document {doc_num}/{total_docs}: {doc_title}...")
 
-                    children = item.get("children", [])
-                    if children:
-                        await create_chapters_recursive(children, parent_id=chapter.id)
+                import time
+                t0_doc = time.monotonic()
 
-            await create_chapters_recursive(structure)
-            await db.commit()
+                async def _doc_progress(token_count: int, char_count: int, _start=start_pct, _end=end_pct, _t0=t0_doc):
+                    elapsed = int(time.monotonic() - _t0)
+                    ratio = min(token_count / 8000, 0.95)
+                    pct = _start + int((_end - _start) * ratio)
+                    _generation_progress[pid] = {
+                        "status": "running", "step": "generating", "progress": pct,
+                        "message": f"Document {doc_num}/{total_docs}: {doc_title} — {token_count} tokens — {elapsed}s",
+                    }
+
+                structure = await ai_service.generate_response_structure_for_document(
+                    document_title=doc_title,
+                    document_description=doc_desc,
+                    new_rfp_content=anon_new_rfp,
+                    old_rfp_content=anon_old_rfp,
+                    old_response_content=anon_old_response,
+                    on_progress=_doc_progress,
+                )
+                if structure:
+                    all_doc_structures.append((doc_id, structure))
+
+            if not all_doc_structures:
+                _generation_progress[pid] = {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "L'IA n'a genere aucune structure pour les documents selectionnes.",
+                }
+                return
+
+            _update("saving", 88, "Enregistrement des chapitres en base...")
+
+            async with async_session() as db:
+                for doc_id, structure in all_doc_structures:
+                    doc_uuid = uuid.UUID(doc_id)
+
+                    async def create_chapters_recursive(items, parent_id=None, resp_doc_id=None):
+                        nonlocal order, created_count
+                        for item in items:
+                            order += 1
+                            created_count += 1
+                            chapter = Chapter(
+                                project_id=project_id,
+                                parent_id=parent_id,
+                                response_document_id=resp_doc_id,
+                                title=item.get("title", ""),
+                                description=item.get("description", ""),
+                                order=order,
+                                chapter_type=item.get("chapter_type", "chapter"),
+                                rfp_requirement=item.get("rfp_requirement", ""),
+                            )
+                            db.add(chapter)
+                            await db.flush()
+
+                            children = item.get("children", [])
+                            if children:
+                                await create_chapters_recursive(children, parent_id=chapter.id, resp_doc_id=resp_doc_id)
+
+                    await create_chapters_recursive(structure, resp_doc_id=doc_uuid)
+
+                await db.commit()
+
+        else:
+            # ── Legacy: single-document generation ──
+            _update("generating", 40, "Generation IA de la structure en cours...")
+            gen_cb = _make_stream_progress_callback(
+                pid, "generating", 40, 85, "Generation structure", max_tokens=12000,
+            )
+            structure = await ai_service.generate_response_structure(
+                new_rfp_content=anon_new_rfp,
+                old_rfp_content=anon_old_rfp,
+                old_response_content=anon_old_response,
+                gap_analysis=gap_analysis,
+                on_progress=gen_cb,
+            )
+
+            if not structure:
+                _generation_progress[pid] = {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "L'IA n'a pas retourne de JSON valide apres 2 tentatives. "
+                               "Verifiez les logs serveur pour le diagnostic. Reessayez.",
+                }
+                return
+
+            _update("saving", 88, "Enregistrement des chapitres en base...")
+
+            async with async_session() as db:
+                async def create_chapters_recursive(items, parent_id=None):
+                    nonlocal order, created_count
+                    for item in items:
+                        order += 1
+                        created_count += 1
+                        delta = item.get("delta", "unchanged")
+                        if delta in delta_stats:
+                            delta_stats[delta] += 1
+
+                        notes = []
+                        if delta and delta != "unchanged":
+                            notes.append({"type": "delta", "value": delta})
+
+                        chapter = Chapter(
+                            project_id=project_id,
+                            parent_id=parent_id,
+                            title=item.get("title", ""),
+                            description=item.get("description", ""),
+                            order=order,
+                            chapter_type=item.get("chapter_type", "chapter"),
+                            rfp_requirement=item.get("rfp_requirement", ""),
+                            notes=notes,
+                        )
+                        db.add(chapter)
+                        await db.flush()
+
+                        children = item.get("children", [])
+                        if children:
+                            await create_chapters_recursive(children, parent_id=chapter.id)
+
+                await create_chapters_recursive(structure)
+                await db.commit()
+
+        _update("generating", 85,
+                f"Structure generee: {created_count} chapitres")
 
         _generation_progress[pid] = {
             "status": "completed",
@@ -495,7 +585,9 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             "chapters_created": created_count,
             "delta_stats": delta_stats,
             "has_gap_analysis": gap_analysis is not None,
-            "message": f"{created_count} chapitres crees ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifies, {delta_stats['unchanged']} inchanges)",
+            "message": f"{created_count} chapitres crees"
+                       + (f" pour {len(resp_docs)} document(s)" if resp_docs else
+                          f" ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifies, {delta_stats['unchanged']} inchanges)"),
         }
 
     except Exception as e:
@@ -674,6 +766,268 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
             "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
         }
+
+
+# ── Response Documents (Deliverables) ──
+
+_detect_progress: Dict[str, dict] = {}
+
+
+@router.post("/{project_id}/detect-deliverables")
+async def detect_deliverables(
+    project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Detect expected deliverables from the RFP (background task)."""
+    result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    doc_count = (await db.execute(
+        select(func.count()).select_from(Document)
+        .where(Document.project_id == project_id)
+        .where(Document.category == DocumentCategory.NEW_RFP)
+    )).scalar() or 0
+    if doc_count == 0:
+        raise HTTPException(status_code=400, detail="Aucun document de nouvel AO indexe")
+
+    pid = str(project_id)
+    existing = _detect_progress.get(pid)
+    if existing and existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Detection deja en cours")
+
+    _detect_progress[pid] = {
+        "status": "running", "step": "starting", "progress": 0,
+        "message": "Demarrage de la detection des livrables...",
+    }
+
+    background_tasks.add_task(_run_detect_deliverables, project_id, project.workspace_id)
+    return {"success": True, "message": "Detection lancee en arriere-plan"}
+
+
+@router.get("/{project_id}/detect-deliverables-status")
+async def get_detect_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of deliverable detection."""
+    pid = str(project_id)
+    return _detect_progress.get(pid, {
+        "status": "idle", "step": "idle", "progress": 0, "message": "",
+    })
+
+
+async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID):
+    """Background task: analyze RFP to detect expected deliverables."""
+    from ..database import async_session
+    pid = str(project_id)
+
+    def _update(step: str, progress: int, message: str):
+        _detect_progress[pid] = {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+        }
+
+    try:
+        async with async_session() as db:
+            ai_service = await _get_ai_service(workspace_id, db)
+
+            _update("loading", 10, "Chargement du contenu de l'AO...")
+            anon_new_rfp = await _get_all_chunks_anonymized_by_category(
+                db, project_id, DocumentCategory.NEW_RFP
+            )
+            if not anon_new_rfp:
+                _detect_progress[pid] = {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "Aucun document de nouvel AO indexe",
+                }
+                return
+
+            anon_old_response = await _get_all_chunks_anonymized_by_category(
+                db, project_id, DocumentCategory.OLD_RESPONSE
+            )
+
+            _update("analyzing", 20, "Analyse IA des livrables attendus...")
+            detect_cb = _make_stream_progress_callback(
+                pid, "analyzing", 20, 80, "Detection des livrables", max_tokens=8000,
+            )
+            # Reuse the same progress dict (not _generation_progress) — update reference
+            # We need the callback to update _detect_progress, not _generation_progress
+            import time
+            t0 = time.monotonic()
+
+            async def _on_detect_progress(token_count: int, char_count: int):
+                elapsed = int(time.monotonic() - t0)
+                ratio = min(token_count / 8000, 0.95)
+                pct = 20 + int(60 * ratio)
+                _detect_progress[pid] = {
+                    "status": "running", "step": "analyzing", "progress": pct,
+                    "message": f"Analyse IA — {token_count} tokens ({char_count:,} car.) — {elapsed}s",
+                }
+
+            deliverables = await ai_service.detect_deliverables(
+                new_rfp_content=anon_new_rfp,
+                old_response_content=anon_old_response,
+                on_progress=_on_detect_progress,
+            )
+
+            if not deliverables:
+                _detect_progress[pid] = {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "L'IA n'a pas detecte de livrables. Reessayez.",
+                }
+                return
+
+            _update("saving", 85, f"{len(deliverables)} livrable(s) detecte(s), enregistrement...")
+
+            # Remove old response documents (re-detection replaces previous)
+            old_docs = await db.execute(
+                select(ResponseDocument).where(ResponseDocument.project_id == project_id)
+            )
+            for old_doc in old_docs.scalars().all():
+                await db.delete(old_doc)
+
+            # Create new response documents
+            for idx, d in enumerate(deliverables):
+                fmt = d.get("expected_format", "docx")
+                try:
+                    doc_format = DocumentFormat(fmt)
+                except ValueError:
+                    doc_format = DocumentFormat.OTHER
+
+                rd = ResponseDocument(
+                    project_id=project_id,
+                    title=d.get("title", f"Document {idx + 1}"),
+                    description=d.get("description", ""),
+                    expected_format=doc_format,
+                    is_selected=d.get("suggested", True),
+                    order=idx + 1,
+                    rfp_source=d.get("rfp_source", ""),
+                )
+                db.add(rd)
+
+            await db.commit()
+
+        _detect_progress[pid] = {
+            "status": "completed", "step": "done", "progress": 100,
+            "deliverables_count": len(deliverables),
+            "message": f"{len(deliverables)} livrable(s) detecte(s) dans l'AO",
+        }
+
+    except Exception as e:
+        logger.exception("Deliverable detection failed for project %s", project_id)
+        _detect_progress[pid] = {
+            "status": "error", "step": "error", "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        }
+
+
+@router.get("/{project_id}/response-documents", response_model=list[ResponseDocumentOut])
+async def list_response_documents(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all detected response documents for a project."""
+    result = await db.execute(
+        select(ResponseDocument)
+        .where(ResponseDocument.project_id == project_id)
+        .order_by(ResponseDocument.order)
+    )
+    docs = result.scalars().all()
+
+    out = []
+    for d in docs:
+        ch_count = (await db.execute(
+            select(func.count()).select_from(Chapter)
+            .where(Chapter.response_document_id == d.id)
+        )).scalar() or 0
+        out.append(ResponseDocumentOut(
+            id=str(d.id),
+            project_id=str(d.project_id),
+            title=d.title,
+            description=d.description,
+            expected_format=d.expected_format.value,
+            is_selected=d.is_selected,
+            order=d.order,
+            rfp_source=d.rfp_source,
+            created_at=d.created_at,
+            updated_at=d.updated_at,
+            chapter_count=ch_count,
+        ))
+    return out
+
+
+@router.put("/{project_id}/response-documents/{doc_id}", response_model=ResponseDocumentOut)
+async def update_response_document(
+    project_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    request: ResponseDocumentUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a response document (toggle selection, rename, etc.)."""
+    result = await db.execute(
+        select(ResponseDocument)
+        .where(ResponseDocument.id == doc_id, ResponseDocument.project_id == project_id)
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document non trouvé")
+
+    for field in ["title", "description", "expected_format", "is_selected", "order"]:
+        value = getattr(request, field, None)
+        if value is not None:
+            setattr(doc, field, value)
+
+    await db.commit()
+    await db.refresh(doc)
+
+    ch_count = (await db.execute(
+        select(func.count()).select_from(Chapter)
+        .where(Chapter.response_document_id == doc.id)
+    )).scalar() or 0
+
+    return ResponseDocumentOut(
+        id=str(doc.id), project_id=str(doc.project_id),
+        title=doc.title, description=doc.description,
+        expected_format=doc.expected_format.value,
+        is_selected=doc.is_selected, order=doc.order,
+        rfp_source=doc.rfp_source,
+        created_at=doc.created_at, updated_at=doc.updated_at,
+        chapter_count=ch_count,
+    )
+
+
+@router.post("/{project_id}/response-documents/confirm-selection")
+async def confirm_document_selection(
+    project_id: uuid.UUID,
+    request: BulkUpdateSelectionRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Bulk-update which response documents are selected."""
+    for item in request.selections:
+        doc_id = uuid.UUID(item["id"])
+        result = await db.execute(
+            select(ResponseDocument)
+            .where(ResponseDocument.id == doc_id, ResponseDocument.project_id == project_id)
+        )
+        doc = result.scalar_one_or_none()
+        if doc:
+            doc.is_selected = item.get("is_selected", True)
+
+    await db.commit()
+    selected_count = (await db.execute(
+        select(func.count()).select_from(ResponseDocument)
+        .where(ResponseDocument.project_id == project_id)
+        .where(ResponseDocument.is_selected == True)
+    )).scalar() or 0
+
+    return {"success": True, "selected_count": selected_count}
 
 
 @router.post("/{project_id}/compliance-analysis")

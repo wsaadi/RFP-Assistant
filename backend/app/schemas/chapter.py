@@ -28,6 +28,7 @@ class ChapterOut(BaseModel):
     id: str
     project_id: str
     parent_id: Optional[str]
+    response_document_id: Optional[str] = None
     title: str
     description: str
     order: int

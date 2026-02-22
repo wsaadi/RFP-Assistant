@@ -70,6 +70,10 @@ class RFPProject(Base):
     anonymization_mappings = relationship(
         "AnonymizationMapping", back_populates="project", cascade="all, delete-orphan"
     )
+    response_documents = relationship(
+        "ResponseDocument", back_populates="project", cascade="all, delete-orphan",
+        order_by="ResponseDocument.order",
+    )
 
 
 class AnonymizationMapping(Base):
