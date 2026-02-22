@@ -56,11 +56,11 @@ import { Workspace } from '../../models/report.model';
           <div *ngIf="editingWorkspace?.id === ws.id" class="edit-inline">
             <mat-form-field appearance="outline" class="full-width">
               <mat-label>Nom</mat-label>
-              <input matInput [(ngModel)]="editingWorkspace.name">
+              <input matInput [(ngModel)]="editingWorkspace!.name">
             </mat-form-field>
             <mat-form-field appearance="outline" class="full-width">
               <mat-label>Description</mat-label>
-              <input matInput [(ngModel)]="editingWorkspace.description">
+              <input matInput [(ngModel)]="editingWorkspace!.description">
             </mat-form-field>
             <div class="form-actions">
               <button mat-button (click)="editingWorkspace = null">Annuler</button>
