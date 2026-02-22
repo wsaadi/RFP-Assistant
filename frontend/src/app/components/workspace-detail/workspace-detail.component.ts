@@ -109,24 +109,24 @@ import { Workspace, RFPProject, WorkspaceMember } from '../../models/report.mode
                   <div class="form-grid">
                     <mat-form-field appearance="outline">
                       <mat-label>Nom</mat-label>
-                      <input matInput [(ngModel)]="editingProject.name">
+                      <input matInput [(ngModel)]="editingProject!.name">
                     </mat-form-field>
                     <mat-form-field appearance="outline">
                       <mat-label>Client</mat-label>
-                      <input matInput [(ngModel)]="editingProject.client_name">
+                      <input matInput [(ngModel)]="editingProject!.client_name">
                     </mat-form-field>
                     <mat-form-field appearance="outline">
                       <mat-label>Reference AO</mat-label>
-                      <input matInput [(ngModel)]="editingProject.rfp_reference">
+                      <input matInput [(ngModel)]="editingProject!.rfp_reference">
                     </mat-form-field>
                     <mat-form-field appearance="outline">
                       <mat-label>Date limite</mat-label>
-                      <input matInput [(ngModel)]="editingProject.deadline" type="date">
+                      <input matInput [(ngModel)]="editingProject!.deadline" type="date">
                     </mat-form-field>
                   </div>
                   <mat-form-field appearance="outline" class="full-width">
                     <mat-label>Description</mat-label>
-                    <textarea matInput [(ngModel)]="editingProject.description" rows="2"></textarea>
+                    <textarea matInput [(ngModel)]="editingProject!.description" rows="2"></textarea>
                   </mat-form-field>
                   <div class="form-actions">
                     <button mat-button (click)="editingProject = null">Annuler</button>
