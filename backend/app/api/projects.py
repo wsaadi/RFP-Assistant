@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 # In-memory progress tracking for long-running generation tasks
 _generation_progress: Dict[str, dict] = {}
+_prefill_progress: Dict[str, dict] = {}
 
 
 async def _get_ai_service(workspace_id: uuid.UUID, db: AsyncSession) -> MistralAIService:
@@ -511,66 +512,168 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
 async def prefill_chapters(
     project_id: uuid.UUID,
     request: PrefillRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Pre-fill chapters with content from old response where relevant."""
+    """Launch chapter pre-filling as a background task (returns immediately)."""
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    ai_service = await _get_ai_service(project.workspace_id, db)
+    pid = str(project_id)
 
-    # Get chapters to prefill
-    query = select(Chapter).where(Chapter.project_id == project_id)
-    if request.chapter_ids:
-        chapter_uuids = [uuid.UUID(cid) for cid in request.chapter_ids]
-        query = query.where(Chapter.id.in_(chapter_uuids))
-    result = await db.execute(query.order_by(Chapter.order))
-    chapters = result.scalars().all()
+    # Check if already running
+    existing = _prefill_progress.get(pid)
+    if existing and existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Pre-remplissage deja en cours")
 
-    prefilled = 0
-    tasks = []
+    # Verify old response documents exist
+    old_resp_count = (await db.execute(
+        select(func.count()).select_from(Document)
+        .where(Document.project_id == project_id)
+        .where(Document.category == DocumentCategory.OLD_RESPONSE)
+    )).scalar() or 0
+    if old_resp_count == 0:
+        raise HTTPException(status_code=400, detail="Aucun document d'ancienne reponse indexe")
 
-    for chapter in chapters:
-        if chapter.content:
-            continue
+    workspace_id = project.workspace_id
+    chapter_ids = request.chapter_ids or []
 
-        # Search old response for relevant content
-        search_query = f"{chapter.title} {chapter.description}"
-        old_response_chunks = VectorService.search(
-            str(project_id), search_query, top_k=5, category_filter="old_response"
-        )
-
-        if old_response_chunks:
-            old_content = "\n\n".join([c["content"] for c in old_response_chunks])
-            anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
-
-            content = await ai_service.generate_chapter_content(
-                chapter_title=chapter.title,
-                chapter_description=chapter.description,
-                rfp_requirement=chapter.rfp_requirement,
-                old_response_content=anon_content,
-            )
-
-            # Deanonymize
-            chapter.content = await AnonymizationService.deanonymize_text(content, project_id, db)
-            chapter.is_prefilled = True
-            chapter.status = ChapterStatus.IN_PROGRESS
-            chapter.source_references = [
-                {"document": c["document_name"], "page": c["page_number"], "score": c["score"]}
-                for c in old_response_chunks[:3]
-            ]
-            prefilled += 1
-
-    await db.commit()
-
-    return {
-        "success": True,
-        "prefilled_count": prefilled,
-        "message": f"{prefilled} chapitres pré-remplis",
+    _prefill_progress[pid] = {
+        "status": "running",
+        "step": "starting",
+        "progress": 0,
+        "message": "Demarrage du pre-remplissage...",
     }
+
+    background_tasks.add_task(_run_prefill, project_id, workspace_id, chapter_ids)
+
+    return {"success": True, "message": "Pre-remplissage lance en arriere-plan"}
+
+
+@router.get("/{project_id}/prefill-status")
+async def get_prefill_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of the chapter pre-filling task."""
+    pid = str(project_id)
+    return _prefill_progress.get(pid, {
+        "status": "idle",
+        "step": "idle",
+        "progress": 0,
+        "message": "",
+    })
+
+
+async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_ids: list[str]):
+    """Background task for pre-filling chapters from old response."""
+    from ..database import async_session
+    pid = str(project_id)
+
+    def _update(step: str, progress: int, message: str):
+        _prefill_progress[pid] = {
+            "status": "running",
+            "step": step,
+            "progress": progress,
+            "message": message,
+        }
+
+    try:
+        async with async_session() as db:
+            ai_service = await _get_ai_service(workspace_id, db)
+
+            _update("loading", 5, "Chargement des chapitres...")
+
+            # Get chapters to prefill
+            query = select(Chapter).where(Chapter.project_id == project_id)
+            if chapter_ids:
+                chapter_uuids = [uuid.UUID(cid) for cid in chapter_ids]
+                query = query.where(Chapter.id.in_(chapter_uuids))
+            result = await db.execute(query.order_by(Chapter.order))
+            chapters = result.scalars().all()
+
+            # Filter to chapters without content
+            to_prefill = [ch for ch in chapters if not ch.content]
+            total = len(to_prefill)
+
+            if total == 0:
+                _prefill_progress[pid] = {
+                    "status": "completed",
+                    "step": "done",
+                    "progress": 100,
+                    "prefilled_count": 0,
+                    "message": "Aucun chapitre vide a pre-remplir",
+                }
+                return
+
+            _update("loading", 10,
+                    f"{total} chapitre(s) vide(s) a pre-remplir sur {len(chapters)} total")
+
+            prefilled = 0
+            skipped = 0
+
+            for idx, chapter in enumerate(to_prefill):
+                chapter_num = idx + 1
+                pct = 10 + int(85 * idx / total)
+                _update("prefilling", pct,
+                        f"Chapitre {chapter_num}/{total}: {chapter.title[:60]}...")
+
+                # Search old response for relevant content
+                search_query = f"{chapter.title} {chapter.description}"
+                old_response_chunks = VectorService.search(
+                    str(project_id), search_query, top_k=5, category_filter="old_response"
+                )
+
+                if not old_response_chunks:
+                    skipped += 1
+                    continue
+
+                old_content = "\n\n".join([c["content"] for c in old_response_chunks])
+                anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
+
+                content = await ai_service.generate_chapter_content(
+                    chapter_title=chapter.title,
+                    chapter_description=chapter.description,
+                    rfp_requirement=chapter.rfp_requirement,
+                    old_response_content=anon_content,
+                )
+
+                # Deanonymize
+                chapter.content = await AnonymizationService.deanonymize_text(content, project_id, db)
+                chapter.is_prefilled = True
+                chapter.status = ChapterStatus.IN_PROGRESS
+                chapter.source_references = [
+                    {"document": c["document_name"], "page": c["page_number"], "score": c["score"]}
+                    for c in old_response_chunks[:3]
+                ]
+                prefilled += 1
+
+                _update("prefilling", 10 + int(85 * chapter_num / total),
+                        f"Chapitre {chapter_num}/{total} termine — {prefilled} pre-rempli(s)")
+
+            _update("saving", 95, "Enregistrement en base...")
+            await db.commit()
+
+        _prefill_progress[pid] = {
+            "status": "completed",
+            "step": "done",
+            "progress": 100,
+            "prefilled_count": prefilled,
+            "message": f"{prefilled} chapitre(s) pre-rempli(s)"
+                       + (f" ({skipped} sans contenu pertinent)" if skipped else ""),
+        }
+
+    except Exception as e:
+        logger.exception("Prefill failed for project %s", project_id)
+        _prefill_progress[pid] = {
+            "status": "error",
+            "step": "error",
+            "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        }
 
 
 @router.post("/{project_id}/compliance-analysis")

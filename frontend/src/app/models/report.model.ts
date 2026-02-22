@@ -178,6 +178,15 @@ export interface GenerationStatus {
   has_gap_analysis?: boolean;
 }
 
+// ── Prefill Progress ──
+export interface PrefillStatus {
+  status: 'idle' | 'running' | 'completed' | 'error';
+  step: string;
+  progress: number;
+  message: string;
+  prefilled_count?: number;
+}
+
 // ── Statistics ──
 export interface ProjectStatistics {
   total_pages: number;

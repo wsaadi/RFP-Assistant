@@ -7,7 +7,7 @@ import {
   DocumentInfo, DocumentImage, DocumentProgress,
   Chapter,
   GapAnalysis, ComplianceAnalysis,
-  ProjectStatistics, AnonymizationMapping, AnonymizationReport, GenerationStatus,
+  ProjectStatistics, AnonymizationMapping, AnonymizationReport, GenerationStatus, PrefillStatus,
   SearchResult, DocumentPreview,
   AIConfig, AIConfigUpdate,
   UserInfo, UserCreate, UserUpdate,
@@ -166,8 +166,12 @@ export class ApiService {
     return this.http.get<GenerationStatus>(`${this.baseUrl}/projects/${projectId}/generation-status`);
   }
 
-  prefillChapters(projectId: string, chapterIds: string[] = []): Observable<{ prefilled_count: number }> {
-    return this.http.post<{ prefilled_count: number }>(`${this.baseUrl}/projects/${projectId}/prefill`, { chapter_ids: chapterIds });
+  prefillChapters(projectId: string, chapterIds: string[] = []): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/prefill`, { chapter_ids: chapterIds });
+  }
+
+  getPrefillStatus(projectId: string): Observable<PrefillStatus> {
+    return this.http.get<PrefillStatus>(`${this.baseUrl}/projects/${projectId}/prefill-status`);
   }
 
   analyzeCompliance(projectId: string): Observable<{ analysis: ComplianceAnalysis }> {
