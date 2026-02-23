@@ -271,6 +271,15 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       </button>
                       <mat-chip *ngIf="rd.fill_status === 'completed'" class="fill-done" size="small">Contenu genere</mat-chip>
                       <mat-chip *ngIf="rd.fill_status === 'generating'" class="fill-running" size="small">En cours...</mat-chip>
+                      <button mat-raised-button class="fill-excel-btn"
+                        *ngIf="rd.expected_format === 'xlsx' || rd.expected_format === 'xls'"
+                        [disabled]="rd._fillingExcel"
+                        (click)="fillAndDownloadExcel(rd)"
+                        matTooltip="Remplir l'Excel avec les tarifs de l'ancienne reponse et telecharger">
+                        <mat-spinner *ngIf="rd._fillingExcel" diameter="16"></mat-spinner>
+                        <mat-icon *ngIf="!rd._fillingExcel">download</mat-icon>
+                        {{ rd._fillingExcel ? 'Generation en cours...' : 'Telecharger Excel rempli' }}
+                      </button>
                       <span class="deliverable-source" *ngIf="rd.rfp_source">
                         <mat-icon class="meta-icon">source</mat-icon> {{ rd.rfp_source }}
                       </span>
@@ -816,6 +825,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .type-toggle-btn { font-size: 11px !important; color: #888 !important; min-width: auto !important; padding: 0 6px !important; line-height: 24px !important; height: 24px !important; }
     .type-toggle-btn mat-icon { font-size: 14px; width: 14px; height: 14px; margin-right: 2px; }
     .type-toggle-btn:hover { color: #1976d2 !important; background: #e3f2fd !important; }
+    .fill-excel-btn { font-size: 11px !important; background: #1b5e20 !important; color: white !important; padding: 0 10px !important; line-height: 28px !important; height: 28px !important; border-radius: 4px !important; }
+    .fill-excel-btn:disabled { opacity: 0.7; }
+    .fill-excel-btn mat-icon { font-size: 16px; width: 16px; height: 16px; margin-right: 4px; }
     .fill-content-panel { margin-top: 10px; box-shadow: none !important; border: 1px solid #e0e0e0; }
     .fill-content-preview { font-size: 13px; line-height: 1.7; color: #333; max-height: 500px; overflow-y: auto; padding: 8px 0; }
     ::ng-deep .fill-content-preview h2, ::ng-deep .fill-content-preview h3 { font-size: 15px; font-weight: 700; color: #1B3A5C; margin: 16px 0 8px 0; }
@@ -1522,6 +1534,33 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       error: () => {
         rd.content_type = oldType; // revert on error
         this.snackBar.open('Erreur mise a jour', 'OK', { duration: 3000 });
+      },
+    });
+  }
+
+  fillAndDownloadExcel(rd: any): void {
+    rd._fillingExcel = true;
+    this.snackBar.open('Generation de l\'Excel en cours (tarifs de l\'ancienne reponse)...', '', { duration: 60000 });
+    this.api.fillExcelDocument(this.projectId, rd.id).subscribe({
+      next: (blob: Blob) => {
+        rd._fillingExcel = false;
+        this.snackBar.dismiss();
+        // Trigger browser download
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${rd.title.replace(/[^a-zA-Z0-9_-]/g, '_')}_rempli.xlsx`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        this.snackBar.open('Excel rempli telecharge avec succes !', 'OK', { duration: 5000 });
+      },
+      error: (err) => {
+        rd._fillingExcel = false;
+        this.snackBar.dismiss();
+        const detail = err.error?.detail || 'Erreur lors de la generation de l\'Excel';
+        this.snackBar.open(detail, 'OK', { duration: 8000 });
       },
     });
   }
