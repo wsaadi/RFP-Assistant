@@ -455,6 +455,22 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         created_count = 0
         delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
 
+        # If deliverables were detected but all are completion-type, no chapters to generate
+        has_deliverables = (len(resp_docs) + completion_docs_count) > 0
+        if has_deliverables and not resp_docs:
+            _generation_progress[pid] = {
+                "status": "completed",
+                "step": "done",
+                "progress": 100,
+                "chapters_created": 0,
+                "delta_stats": delta_stats,
+                "has_gap_analysis": gap_analysis is not None,
+                "completion_docs_count": completion_docs_count,
+                "message": f"Aucun document a rediger detecte — {completion_docs_count} document(s) "
+                           f"a completer (Excel/PDF) a traiter dans l'onglet Livrables",
+            }
+            return
+
         if resp_docs:
             import time
 

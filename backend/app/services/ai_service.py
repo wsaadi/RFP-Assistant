@@ -358,11 +358,24 @@ Ta mission est de créer la STRUCTURE IDÉALE et COMPLÈTE de la réponse au nou
 3. CAPITALISATION sur l'ancienne réponse: reprends la structure qui fonctionnait et adapte-la
 4. CONSTRUCTION du chapitrage idéal: crée une structure qui couvre 100% des exigences du nouvel AO
 
+## IMPORTANT — Documents EXCLUS de la structure:
+NE GÉNÈRE PAS de chapitres pour les documents suivants car ils sont FOURNIS par l'acheteur et doivent
+simplement être COMPLÉTÉS/REMPLIS (pas rédigés). Ils sont traités séparément:
+- BPU (Bordereau des Prix Unitaires) — tableur Excel à compléter
+- DQE (Détail Quantitatif Estimatif) — tableur Excel à compléter
+- DPGF (Décomposition du Prix Global Forfaitaire) — tableur Excel à compléter
+- Formulaires administratifs pré-formatés: DC1, DC2, DC3, DC4, ATTRI1, NOTI1, NOTI2
+- Acte d'Engagement (AE) pré-formaté fourni par l'acheteur
+- Cadres de réponse imposés à remplir (quand l'acheteur fournit un document à compléter)
+- Tout document décrit comme "à compléter", "à remplir", "fourni en annexe à remplir"
+
+Génère la structure UNIQUEMENT pour les documents à RÉDIGER: mémoire technique, notes méthodologiques,
+planning détaillé rédigé, mémoire environnemental/RSE, fiches références/CV rédigées, etc.
+
 ## Règles pour la structure:
-- Chaque exigence du nouvel AO DOIT être couverte par au moins un chapitre/sous-chapitre
+- Chaque exigence RÉDACTIONNELLE du nouvel AO DOIT être couverte par au moins un chapitre/sous-chapitre
 - Les chapitres suivent l'ordre logique attendu par l'acheteur (souvent celui du RC/CCTP)
 - Inclure les chapitres administratifs (présentation société, références, moyens, etc.)
-- Inclure les annexes et documents à fournir mentionnés dans l'AO
 - Les descriptions doivent être précises et indiquer clairement le contenu attendu
 - Le champ rfp_requirement doit citer EXACTEMENT l'exigence de l'AO concernée
 - Le champ delta indique si c'est une exigence nouvelle, modifiée, ou inchangée par rapport à l'ancien AO
@@ -604,20 +617,24 @@ Format: texte structuré avec des titres markdown. Pas de JSON."""
         rfp_summary: str = "",
         on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
     ) -> List[Dict]:
-        """Generate chapter structure for a specific response document."""
+        """Generate chapter structure for a specific response document (redaction type only)."""
         system_prompt = f"""Tu es un expert senior en réponse aux appels d'offres.
 
-Tu dois créer la STRUCTURE DÉTAILLÉE (chapitrage) du document suivant:
+Tu dois créer la STRUCTURE DÉTAILLÉE (chapitrage) du document suivant, qui est un document À RÉDIGER:
 **{document_title}**
 
 Description: {document_description}
 
+Ce document nécessite une RÉDACTION complète (texte, argumentation, démonstration).
+Ce n'est PAS un formulaire à remplir ni un tableur à compléter.
+
 ## Règles:
-- Crée une structure adaptée spécifiquement à CE document (pas à l'ensemble de la réponse)
-- Les chapitres doivent couvrir tous les aspects attendus pour ce type de document
+- Crée une structure adaptée spécifiquement à CE document à rédiger (pas à l'ensemble de la réponse)
+- Les chapitres doivent couvrir tous les aspects rédactionnels attendus pour ce type de document
 - Utilise la structure de l'ancienne réponse comme référence si disponible
-- Les descriptions doivent être précises et indiquer clairement le contenu attendu
+- Les descriptions doivent être précises et indiquer clairement le contenu à rédiger
 - Le champ rfp_requirement doit citer l'exigence de l'AO concernée
+- N'inclus PAS de chapitres pour des documents annexes à compléter (BPU, DQE, formulaires) — ils sont traités séparément
 
 Réponds UNIQUEMENT au format JSON suivant (sans markdown):
 [
