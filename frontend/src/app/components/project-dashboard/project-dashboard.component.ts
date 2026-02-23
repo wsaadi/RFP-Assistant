@@ -543,29 +543,29 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
       margin-top: 12px; padding: 16px 20px; background: #fafafa; border: 1px solid #e0e0e0;
       border-radius: 8px; font-size: 13.5px; line-height: 1.7; color: #333; max-height: 400px; overflow-y: auto;
     }
-    .ch-content-preview h2, .ch-content-preview h3 {
+    ::ng-deep .ch-content-preview h2, ::ng-deep .ch-content-preview h3 {
       font-size: 15px; font-weight: 700; color: #1B3A5C; margin: 20px 0 8px 0;
       padding-bottom: 4px; border-bottom: 1px solid #e0e0e0;
     }
-    .ch-content-preview h2:first-child, .ch-content-preview h3:first-child { margin-top: 0; }
-    .ch-content-preview h4 { font-size: 14px; font-weight: 600; color: #2C5F8A; margin: 16px 0 6px 0; }
-    .ch-content-preview h5 { font-size: 13.5px; font-weight: 600; color: #37474f; margin: 12px 0 4px 0; }
-    .ch-content-preview p { margin: 0 0 10px 0; }
-    .ch-content-preview ul, .ch-content-preview ol { margin: 6px 0 10px 0; padding-left: 24px; }
-    .ch-content-preview ul { list-style-type: disc; }
-    .ch-content-preview ul ul { list-style-type: circle; margin: 2px 0 2px 0; }
-    .ch-content-preview ol { list-style-type: decimal; }
-    .ch-content-preview li { margin-bottom: 4px; }
-    .ch-content-preview li li { margin-bottom: 2px; }
-    .ch-content-preview strong { color: #1B3A5C; }
-    .ch-content-preview em { color: #555; }
-    .ch-content-preview code { background: #e8eaf6; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
-    .ch-content-preview hr { border: none; border-top: 1px solid #ccc; margin: 16px 0; }
-    .ch-content-preview .table-wrap { overflow-x: auto; margin: 12px 0; }
-    .ch-content-preview table { border-collapse: collapse; width: 100%; font-size: 13px; }
-    .ch-content-preview th, .ch-content-preview td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
-    .ch-content-preview th { background: #e3f2fd; color: #1B3A5C; font-weight: 600; }
-    .ch-content-preview tr:nth-child(even) td { background: #fafafa; }
+    ::ng-deep .ch-content-preview h2:first-child, ::ng-deep .ch-content-preview h3:first-child { margin-top: 0; }
+    ::ng-deep .ch-content-preview h4 { font-size: 14px; font-weight: 600; color: #2C5F8A; margin: 16px 0 6px 0; }
+    ::ng-deep .ch-content-preview h5 { font-size: 13.5px; font-weight: 600; color: #37474f; margin: 12px 0 4px 0; }
+    ::ng-deep .ch-content-preview p { margin: 0 0 10px 0; }
+    ::ng-deep .ch-content-preview ul, ::ng-deep .ch-content-preview ol { margin: 6px 0 10px 0; padding-left: 24px; }
+    ::ng-deep .ch-content-preview ul { list-style-type: disc; }
+    ::ng-deep .ch-content-preview ul ul { list-style-type: circle; margin: 2px 0 2px 0; }
+    ::ng-deep .ch-content-preview ol { list-style-type: decimal; }
+    ::ng-deep .ch-content-preview li { margin-bottom: 4px; }
+    ::ng-deep .ch-content-preview li li { margin-bottom: 2px; }
+    ::ng-deep .ch-content-preview strong { color: #1B3A5C; }
+    ::ng-deep .ch-content-preview em { color: #555; }
+    ::ng-deep .ch-content-preview code { background: #e8eaf6; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+    ::ng-deep .ch-content-preview hr { border: none; border-top: 1px solid #ccc; margin: 16px 0; }
+    ::ng-deep .ch-content-preview .table-wrap { overflow-x: auto; margin: 12px 0; }
+    ::ng-deep .ch-content-preview table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    ::ng-deep .ch-content-preview th, ::ng-deep .ch-content-preview td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
+    ::ng-deep .ch-content-preview th { background: #e3f2fd; color: #1B3A5C; font-weight: 600; }
+    ::ng-deep .ch-content-preview tr:nth-child(even) td { background: #fafafa; }
     .sub-content-preview { max-height: 250px; margin-top: 8px; font-size: 13px; }
     .sub-chapters { margin-top: 12px; padding-left: 24px; }
     .sub-chapter-block { border-bottom: 1px solid #eee; }
