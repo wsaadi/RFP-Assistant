@@ -403,6 +403,18 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
             </mat-card>
 
+            <!-- Info card when generation completed but no chapters created (e.g. only completion docs selected) -->
+            <mat-card *ngIf="genStatus && genStatus.status === 'completed' && !genStatus.chapters_created" class="gen-info-card">
+              <mat-icon>info</mat-icon>
+              <div>
+                <strong>{{ genStatus.message || 'Aucun chapitre genere' }}</strong>
+                <p *ngIf="genStatus.completion_docs_count">
+                  Les documents a completer (Excel, PDF, formulaires) ne generent pas de chapitres.
+                  Utilisez le bouton <strong>"Auto-completer les Excel/PDF"</strong> dans l'onglet <strong>Livrables</strong> pour generer leur contenu.
+                </p>
+              </div>
+            </mat-card>
+
             <!-- Prefill progress panel -->
             <mat-card *ngIf="prefillStatus && prefillStatus.status === 'running'" class="gen-progress-card prefill-progress-card">
               <div class="gen-progress-header">
@@ -744,6 +756,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .gen-error-card p { margin: 4px 0 0 0; color: #666; font-size: 13px; }
     .gen-success-card { margin: 16px 0; padding: 20px; border-left: 4px solid #4caf50; display: flex; align-items: center; gap: 12px; }
     .gen-success-card mat-icon { color: #4caf50; font-size: 28px; width: 28px; height: 28px; }
+    .gen-info-card { margin: 16px 0; padding: 20px; border-left: 4px solid #ff9800; display: flex; align-items: flex-start; gap: 12px; background: #fff8e1; }
+    .gen-info-card mat-icon { color: #ff9800; font-size: 28px; width: 28px; height: 28px; }
+    .gen-info-card strong { color: #e65100; }
+    .gen-info-card p { margin: 6px 0 0 0; color: #555; font-size: 13px; line-height: 1.5; }
     .detect-progress-card { border-left-color: #7b1fa2; }
     .detect-progress-card .gen-progress-header h3 { color: #7b1fa2; }
     .detect-progress-card .spin-icon { color: #7b1fa2; }
