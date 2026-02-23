@@ -387,18 +387,19 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            _update("loading", 5, "Chargement des documents du nouvel AO...")
-            anon_new_rfp = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP)
+            _update("loading", 5, "Chargement des documents (AO, ancien AO, ancienne reponse)...")
+            # Load all 3 categories in parallel for speed
+            anon_new_rfp, anon_old_rfp, anon_old_response = await asyncio.gather(
+                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RFP),
+                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+            )
             if not anon_new_rfp:
                 _generation_progress[pid] = {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "Aucun document de nouvel appel d'offres indexe",
                 }
                 return
-
-            _update("loading", 10, "Chargement de l'ancien AO et ancienne reponse...")
-            anon_old_rfp = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RFP)
-            anon_old_response = await _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE)
 
         # DB session released — all data is now in memory
 
@@ -454,40 +455,66 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
 
         if resp_docs:
-            # ── Per-document generation ──
+            import time
+
+            # ── Phase 3a: Summarize RFP once (saves re-sending 60K per doc) ──
             total_docs = len(resp_docs)
-            all_doc_structures: list[tuple[str, list]] = []  # (doc_id, chapters)
+            rfp_summary = ""
+            if total_docs > 1:
+                _update("summarizing", 40, "Resume de l'AO pour generation parallele...")
+                sum_cb = _make_stream_progress_callback(
+                    pid, "summarizing", 40, 50, "Resume AO", max_tokens=6000,
+                )
+                rfp_summary = await ai_service.summarize_rfp_for_structure(
+                    anon_new_rfp, on_progress=sum_cb,
+                )
+                logger.info("RFP summary: %d chars (vs %d full)", len(rfp_summary), len(anon_new_rfp))
 
-            for doc_idx, (doc_id, doc_title, doc_desc) in enumerate(resp_docs):
-                doc_num = doc_idx + 1
-                start_pct = 40 + int(45 * doc_idx / total_docs)
-                end_pct = 40 + int(45 * doc_num / total_docs)
+            # ── Phase 3b: Generate structure for all docs IN PARALLEL ──
+            all_doc_structures: list[tuple[str, list]] = []
+            _doc_done_count = 0
 
-                _update("generating", start_pct,
-                        f"Document {doc_num}/{total_docs}: {doc_title}...")
+            sem = asyncio.Semaphore(3)  # Limit concurrent Mistral calls
 
-                import time
+            async def _gen_one_doc(doc_idx, doc_id, doc_title, doc_desc):
+                nonlocal _doc_done_count
                 t0_doc = time.monotonic()
 
-                async def _doc_progress(token_count: int, char_count: int, _start=start_pct, _end=end_pct, _t0=t0_doc):
+                async def _doc_progress(token_count: int, char_count: int,
+                                        _idx=doc_idx, _title=doc_title, _t0=t0_doc):
                     elapsed = int(time.monotonic() - _t0)
                     ratio = min(token_count / 8000, 0.95)
-                    pct = _start + int((_end - _start) * ratio)
+                    # Progress between 50-88% for parallel generation
+                    base = 50 if rfp_summary else 40
+                    pct = base + int(38 * (_doc_done_count + ratio) / total_docs)
                     _generation_progress[pid] = {
                         "status": "running", "step": "generating", "progress": pct,
-                        "message": f"Document {doc_num}/{total_docs}: {doc_title} — {token_count} tokens — {elapsed}s",
+                        "message": f"Documents en parallele ({_doc_done_count + 1}/{total_docs}): "
+                                   f"{_title} — {token_count} tokens — {elapsed}s",
                     }
 
-                structure = await ai_service.generate_response_structure_for_document(
-                    document_title=doc_title,
-                    document_description=doc_desc,
-                    new_rfp_content=anon_new_rfp,
-                    old_rfp_content=anon_old_rfp,
-                    old_response_content=anon_old_response,
-                    on_progress=_doc_progress,
-                )
-                if structure:
-                    all_doc_structures.append((doc_id, structure))
+                async with sem:
+                    structure = await ai_service.generate_response_structure_for_document(
+                        document_title=doc_title,
+                        document_description=doc_desc,
+                        new_rfp_content=anon_new_rfp,
+                        old_rfp_content=anon_old_rfp,
+                        old_response_content=anon_old_response,
+                        rfp_summary=rfp_summary,
+                        on_progress=_doc_progress,
+                    )
+                    _doc_done_count += 1
+                    return (doc_id, structure)
+
+            _update("generating", 50 if rfp_summary else 40,
+                    f"Generation parallele de {total_docs} document(s)...")
+
+            results = await asyncio.gather(*[
+                _gen_one_doc(idx, doc_id, doc_title, doc_desc)
+                for idx, (doc_id, doc_title, doc_desc) in enumerate(resp_docs)
+            ])
+
+            all_doc_structures = [(did, struct) for did, struct in results if struct]
 
             if not all_doc_structures:
                 _generation_progress[pid] = {
@@ -496,39 +523,43 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 }
                 return
 
+            # ── Phase 3c: Batch insert chapters (single commit) ──
             _update("saving", 88, "Enregistrement des chapitres en base...")
 
             async with async_session() as db:
+                valid_types = {t.value for t in ChapterType}
+
+                def _build_chapters_flat(items, parent_id, resp_doc_id):
+                    """Build Chapter objects with pre-assigned UUIDs (no flush needed)."""
+                    nonlocal order, created_count
+                    chapters = []
+                    for item in items:
+                        order += 1
+                        created_count += 1
+                        ch_id = uuid.uuid4()
+                        raw_type = item.get("chapter_type", "chapter")
+                        ch_type = raw_type if raw_type in valid_types else ("sub_chapter" if parent_id else "chapter")
+                        chapters.append(Chapter(
+                            id=ch_id,
+                            project_id=project_id,
+                            parent_id=parent_id,
+                            response_document_id=resp_doc_id,
+                            title=item.get("title", ""),
+                            description=item.get("description", ""),
+                            order=order,
+                            chapter_type=ch_type,
+                            rfp_requirement=item.get("rfp_requirement", ""),
+                        ))
+                        children = item.get("children", [])
+                        if children:
+                            chapters.extend(_build_chapters_flat(children, ch_id, resp_doc_id))
+                    return chapters
+
+                all_chapters = []
                 for doc_id, structure in all_doc_structures:
-                    doc_uuid = uuid.UUID(doc_id)
+                    all_chapters.extend(_build_chapters_flat(structure, None, uuid.UUID(doc_id)))
 
-                    async def create_chapters_recursive(items, parent_id=None, resp_doc_id=None):
-                        nonlocal order, created_count
-                        for item in items:
-                            order += 1
-                            created_count += 1
-                            raw_type = item.get("chapter_type", "chapter")
-                            valid_types = {t.value for t in ChapterType}
-                            ch_type = raw_type if raw_type in valid_types else ("sub_chapter" if parent_id else "chapter")
-                            chapter = Chapter(
-                                project_id=project_id,
-                                parent_id=parent_id,
-                                response_document_id=resp_doc_id,
-                                title=item.get("title", ""),
-                                description=item.get("description", ""),
-                                order=order,
-                                chapter_type=ch_type,
-                                rfp_requirement=item.get("rfp_requirement", ""),
-                            )
-                            db.add(chapter)
-                            await db.flush()
-
-                            children = item.get("children", [])
-                            if children:
-                                await create_chapters_recursive(children, parent_id=chapter.id, resp_doc_id=resp_doc_id)
-
-                    await create_chapters_recursive(structure, resp_doc_id=doc_uuid)
-
+                db.add_all(all_chapters)
                 await db.commit()
 
         else:
@@ -556,24 +587,26 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             _update("saving", 88, "Enregistrement des chapitres en base...")
 
             async with async_session() as db:
-                async def create_chapters_recursive(items, parent_id=None):
+                valid_types = {t.value for t in ChapterType}
+
+                def _build_legacy_chapters(items, parent_id=None):
+                    """Build Chapter objects with pre-assigned UUIDs (batch insert)."""
                     nonlocal order, created_count
+                    chapters = []
                     for item in items:
                         order += 1
                         created_count += 1
+                        ch_id = uuid.uuid4()
                         delta = item.get("delta", "unchanged")
                         if delta in delta_stats:
                             delta_stats[delta] += 1
-
                         notes = []
                         if delta and delta != "unchanged":
                             notes.append({"type": "delta", "value": delta})
-
                         raw_type = item.get("chapter_type", "chapter")
-                        valid_types = {t.value for t in ChapterType}
                         ch_type = raw_type if raw_type in valid_types else ("sub_chapter" if parent_id else "chapter")
-
-                        chapter = Chapter(
+                        chapters.append(Chapter(
+                            id=ch_id,
                             project_id=project_id,
                             parent_id=parent_id,
                             title=item.get("title", ""),
@@ -582,15 +615,14 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                             chapter_type=ch_type,
                             rfp_requirement=item.get("rfp_requirement", ""),
                             notes=notes,
-                        )
-                        db.add(chapter)
-                        await db.flush()
-
+                        ))
                         children = item.get("children", [])
                         if children:
-                            await create_chapters_recursive(children, parent_id=chapter.id)
+                            chapters.extend(_build_legacy_chapters(children, parent_id=ch_id))
+                    return chapters
 
-                await create_chapters_recursive(structure)
+                all_chapters = _build_legacy_chapters(structure)
+                db.add_all(all_chapters)
                 await db.commit()
 
         _update("generating", 85,
@@ -1188,12 +1220,10 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
 
             _update("loading", 10, f"{total} document(s) à compléter...")
 
-            # Load RFP and old response content
-            anon_new_rfp = await _get_all_chunks_anonymized_by_category(
-                db, project_id, DocumentCategory.NEW_RFP
-            )
-            anon_old_response = await _get_all_chunks_anonymized_by_category(
-                db, project_id, DocumentCategory.OLD_RESPONSE
+            # Load RFP and old response content in parallel
+            anon_new_rfp, anon_old_response = await asyncio.gather(
+                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
             )
 
             # Also gather any already-generated chapter content for context
