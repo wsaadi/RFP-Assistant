@@ -622,8 +622,12 @@ Règles:
 - Répondre précisément aux exigences de l'appel d'offres
 - Mettre en valeur les compétences et l'expérience
 - Être factuel et concret
-- Ne pas utiliser de formatage Markdown
-- Écrire en texte brut structuré en paragraphes"""
+
+Formatage:
+- Utilise des sous-titres avec ## pour les sections
+- Utilise **gras** pour les termes importants
+- Utilise des listes à puces avec - pour les énumérations
+- Structure en paragraphes clairs et aérés"""
 
         parts = [f"Chapitre: {chapter_title}"]
         if chapter_description:
@@ -660,8 +664,12 @@ Règles:
 - Ajouter des détails, exemples et arguments supplémentaires
 - Améliorer le style et la clarté
 - Rendre le contenu plus convaincant
-- Ne pas utiliser de formatage Markdown
-- Retourner uniquement le texte enrichi"""
+- Retourner uniquement le texte enrichi
+
+Formatage:
+- Utilise des sous-titres avec ## pour les sections
+- Utilise **gras** pour les termes importants
+- Utilise des listes à puces avec - pour les énumérations"""
 
         user_prompt = f"""Chapitre: {chapter_title}
 Exigence AO: {rfp_requirement}
@@ -735,7 +743,12 @@ Décris cette image et suggère des tags et chapitres pertinents."""
         """Execute a custom user prompt on content."""
         system_prompt = """Tu es un assistant expert en rédaction de réponses aux appels d'offres.
 Applique exactement l'instruction de l'utilisateur au contenu fourni.
-N'utilise pas de formatage Markdown. Retourne uniquement le texte modifié."""
+Retourne uniquement le texte modifié.
+
+Formatage:
+- Utilise des sous-titres avec ## pour les sections
+- Utilise **gras** pour les termes importants
+- Utilise des listes à puces avec - pour les énumérations"""
 
         user_prompt = f"""Contexte: {context}
 
