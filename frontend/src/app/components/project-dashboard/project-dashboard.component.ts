@@ -20,6 +20,7 @@ import { MatDialogModule } from '@angular/material/dialog';
 import { Subscription, interval, timer, forkJoin } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
+import { renderMarkdown } from '../../services/markdown.service';
 import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus, DetectDeliverablesStatus, ResponseDocument } from '../../models/report.model';
 
 @Component({
@@ -560,6 +561,11 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .ch-content-preview em { color: #555; }
     .ch-content-preview code { background: #e8eaf6; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
     .ch-content-preview hr { border: none; border-top: 1px solid #ccc; margin: 16px 0; }
+    .ch-content-preview .table-wrap { overflow-x: auto; margin: 12px 0; }
+    .ch-content-preview table { border-collapse: collapse; width: 100%; font-size: 13px; }
+    .ch-content-preview th, .ch-content-preview td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
+    .ch-content-preview th { background: #e3f2fd; color: #1B3A5C; font-weight: 600; }
+    .ch-content-preview tr:nth-child(even) td { background: #fafafa; }
     .sub-content-preview { max-height: 250px; margin-top: 8px; font-size: 13px; }
     .sub-chapters { margin-top: 12px; padding-left: 24px; }
     .sub-chapter-block { border-bottom: 1px solid #eee; }
@@ -985,107 +991,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   // ── Markdown rendering ──
 
-  renderMarkdown(text: string): string {
-    if (!text) return '';
-    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const inlineFormat = (s: string) => {
-      return esc(s)
-        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.+?)\*/g, '<em>$1</em>')
-        .replace(/`(.+?)`/g, '<code>$1</code>');
-    };
-
-    const lines = text.split('\n');
-    const out: string[] = [];
-    let inParagraph = false;
-    const listStack: string[] = []; // track 'ul' or 'ol' nesting
-
-    const closeAllLists = () => {
-      while (listStack.length > 0) {
-        out.push('</' + listStack.pop() + '>');
-      }
-    };
-    const closeParagraph = () => {
-      if (inParagraph) { out.push('</p>'); inParagraph = false; }
-    };
-
-    for (let i = 0; i < lines.length; i++) {
-      const raw = lines[i];
-      const trimmed = raw.trimEnd();
-
-      // Horizontal rule: --- or ***
-      if (/^-{3,}$|^\*{3,}$/.test(trimmed.trim())) {
-        closeParagraph();
-        closeAllLists();
-        out.push('<hr>');
-        continue;
-      }
-
-      // Headers: # to ####  (strip bold ** inside header text)
-      const headerMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
-      if (headerMatch) {
-        closeParagraph();
-        closeAllLists();
-        const level = Math.min(headerMatch[1].length + 1, 5); // ## → h3, ### → h4, #### → h5
-        const headerText = headerMatch[2].replace(/\*\*/g, '');
-        out.push(`<h${level}>${esc(headerText)}</h${level}>`);
-        continue;
-      }
-
-      // List items: detect indent level and bullet type
-      const listMatch = trimmed.match(/^(\s*)([-*]|\d+[.)]) (.+)$/);
-      if (listMatch) {
-        closeParagraph();
-        const indent = listMatch[1].length;
-        const isOrdered = /^\d+[.)]/.test(listMatch[2]);
-        const listType = isOrdered ? 'ol' : 'ul';
-        const targetDepth = Math.floor(indent / 2) + 1;
-
-        // Close deeper lists
-        while (listStack.length > targetDepth) {
-          out.push('</' + listStack.pop() + '>');
-        }
-        // Open new list if needed
-        if (listStack.length < targetDepth) {
-          out.push('<' + listType + '>');
-          listStack.push(listType);
-        }
-        // If same depth but different type, switch
-        if (listStack.length === targetDepth && listStack[listStack.length - 1] !== listType) {
-          out.push('</' + listStack.pop() + '>');
-          out.push('<' + listType + '>');
-          listStack.push(listType);
-        }
-
-        out.push('<li>' + inlineFormat(listMatch[3]) + '</li>');
-        continue;
-      }
-
-      // Non-list line: close all open lists
-      if (listStack.length > 0) {
-        closeAllLists();
-      }
-
-      // Empty line
-      if (trimmed.trim() === '') {
-        closeParagraph();
-        continue;
-      }
-
-      // Regular text line
-      if (!inParagraph) {
-        out.push('<p>');
-        inParagraph = true;
-      } else {
-        out.push('<br>');
-      }
-      out.push(inlineFormat(trimmed));
-    }
-
-    closeParagraph();
-    closeAllLists();
-    return out.join('');
-  }
+  renderMarkdown = renderMarkdown;
 
   // ── Per-chapter AI actions ──
 

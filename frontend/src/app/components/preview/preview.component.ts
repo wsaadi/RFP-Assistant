@@ -6,6 +6,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { ApiService } from '../../services/api.service';
+import { renderMarkdown } from '../../services/markdown.service';
 import { DocumentPreview, PreviewChapter } from '../../models/report.model';
 
 @Component({
@@ -94,6 +95,11 @@ import { DocumentPreview, PreviewChapter } from '../../models/report.model';
     .chapter-content strong { color: #1B3A5C; }
     .chapter-content hr { border: none; border-top: 1px solid #ccc; margin: 20px 0; }
     .chapter-content code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+    .chapter-content .table-wrap { overflow-x: auto; margin: 16px 0; }
+    .chapter-content table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    .chapter-content th, .chapter-content td { border: 1px solid #ccc; padding: 10px 12px; text-align: left; }
+    .chapter-content th { background: #e3f2fd; color: #1B3A5C; font-weight: 600; }
+    .chapter-content tr:nth-child(even) td { background: #fafafa; }
     .empty-content { color: #999; font-style: italic; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
     @media print { .no-print { display: none !important; } .page { border: none; page-break-after: always; } }
@@ -118,53 +124,5 @@ export class PreviewComponent implements OnInit {
     window.print();
   }
 
-  renderMarkdown(text: string): string {
-    if (!text) return '';
-    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const inlineFormat = (s: string) => {
-      return esc(s)
-        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\*(.+?)\*/g, '<em>$1</em>')
-        .replace(/`(.+?)`/g, '<code>$1</code>');
-    };
-    const lines = text.split('\n');
-    const out: string[] = [];
-    let inParagraph = false;
-    const listStack: string[] = [];
-    const closeAllLists = () => { while (listStack.length > 0) { out.push('</' + listStack.pop() + '>'); } };
-    const closeParagraph = () => { if (inParagraph) { out.push('</p>'); inParagraph = false; } };
-
-    for (const raw of lines) {
-      const trimmed = raw.trimEnd();
-      if (/^-{3,}$|^\*{3,}$/.test(trimmed.trim())) { closeParagraph(); closeAllLists(); out.push('<hr>'); continue; }
-      const headerMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
-      if (headerMatch) {
-        closeParagraph(); closeAllLists();
-        const level = Math.min(headerMatch[1].length + 1, 5);
-        out.push(`<h${level}>${esc(headerMatch[2].replace(/\*\*/g, ''))}</h${level}>`);
-        continue;
-      }
-      const listMatch = trimmed.match(/^(\s*)([-*]|\d+[.)]) (.+)$/);
-      if (listMatch) {
-        closeParagraph();
-        const indent = listMatch[1].length;
-        const isOrdered = /^\d+[.)]/.test(listMatch[2]);
-        const listType = isOrdered ? 'ol' : 'ul';
-        const targetDepth = Math.floor(indent / 2) + 1;
-        while (listStack.length > targetDepth) { out.push('</' + listStack.pop() + '>'); }
-        if (listStack.length < targetDepth) { out.push('<' + listType + '>'); listStack.push(listType); }
-        if (listStack.length === targetDepth && listStack[listStack.length - 1] !== listType) {
-          out.push('</' + listStack.pop() + '>'); out.push('<' + listType + '>'); listStack.push(listType);
-        }
-        out.push('<li>' + inlineFormat(listMatch[3]) + '</li>');
-        continue;
-      }
-      if (listStack.length > 0) { closeAllLists(); }
-      if (trimmed.trim() === '') { closeParagraph(); continue; }
-      if (!inParagraph) { out.push('<p>'); inParagraph = true; } else { out.push('<br>'); }
-      out.push(inlineFormat(trimmed));
-    }
-    closeParagraph(); closeAllLists();
-    return out.join('');
-  }
+  renderMarkdown = renderMarkdown;
 }
