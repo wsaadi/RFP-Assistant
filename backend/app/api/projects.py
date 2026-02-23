@@ -496,6 +496,9 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                         for item in items:
                             order += 1
                             created_count += 1
+                            raw_type = item.get("chapter_type", "chapter")
+                            valid_types = {t.value for t in ChapterType}
+                            ch_type = raw_type if raw_type in valid_types else ("sub_chapter" if parent_id else "chapter")
                             chapter = Chapter(
                                 project_id=project_id,
                                 parent_id=parent_id,
@@ -503,7 +506,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                                 title=item.get("title", ""),
                                 description=item.get("description", ""),
                                 order=order,
-                                chapter_type=item.get("chapter_type", "chapter"),
+                                chapter_type=ch_type,
                                 rfp_requirement=item.get("rfp_requirement", ""),
                             )
                             db.add(chapter)
@@ -555,13 +558,17 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                         if delta and delta != "unchanged":
                             notes.append({"type": "delta", "value": delta})
 
+                        raw_type = item.get("chapter_type", "chapter")
+                        valid_types = {t.value for t in ChapterType}
+                        ch_type = raw_type if raw_type in valid_types else ("sub_chapter" if parent_id else "chapter")
+
                         chapter = Chapter(
                             project_id=project_id,
                             parent_id=parent_id,
                             title=item.get("title", ""),
                             description=item.get("description", ""),
                             order=order,
-                            chapter_type=item.get("chapter_type", "chapter"),
+                            chapter_type=ch_type,
                             rfp_requirement=item.get("rfp_requirement", ""),
                             notes=notes,
                         )

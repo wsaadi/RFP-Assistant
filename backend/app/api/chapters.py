@@ -8,7 +8,7 @@ from sqlalchemy import select, delete as sa_delete
 from ..database import get_db
 from ..models.user import User
 from ..models.project import RFPProject, AIConfig
-from ..models.chapter import Chapter, ChapterStatus
+from ..models.chapter import Chapter, ChapterType, ChapterStatus
 from ..schemas.chapter import (
     ChapterCreate, ChapterUpdate, ChapterOut,
     ChapterContentRequest, AddNoteRequest, ReorderChaptersRequest,
@@ -89,13 +89,15 @@ async def create_chapter(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new chapter."""
+    valid_types = {t.value for t in ChapterType}
+    ch_type = request.chapter_type if request.chapter_type in valid_types else "chapter"
     chapter = Chapter(
         project_id=project_id,
         parent_id=uuid.UUID(request.parent_id) if request.parent_id else None,
         title=request.title,
         description=request.description,
         order=request.order,
-        chapter_type=request.chapter_type,
+        chapter_type=ch_type,
         rfp_requirement=request.rfp_requirement,
     )
     db.add(chapter)
