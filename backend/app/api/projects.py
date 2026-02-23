@@ -1856,14 +1856,21 @@ async def fill_excel_document(
 
 # ── Fill PDF endpoint ──────────────────────────────────────────────
 
+def _is_filler(text: str) -> bool:
+    """Check if a text span is purely filler (dots, underscores, dashes used as blanks)."""
+    stripped = text.strip()
+    if not stripped:
+        return True
+    # Pure dots, underscores, dashes, or spaces
+    filler_chars = set("…._·- \t")
+    return all(c in filler_chars for c in stripped) and len(stripped) >= 2
+
+
 def _extract_pdf_zones(file_path: str) -> dict:
     """Extract PDF layout and identify fillable zones with real coordinates.
 
-    Returns a dict with:
-      - "has_form_fields": bool
-      - "form_fields": list of form field dicts (for form PDFs)
-      - "zones": list of fillable zone dicts (for non-form PDFs)
-      - "text_for_ai": formatted text describing zones for AI consumption
+    Uses PyMuPDF's get_text("dict") for precise span-level bounding boxes.
+    Identifies zones where the candidate should fill in values.
     """
     import fitz
     doc = fitz.open(file_path)
@@ -1882,14 +1889,12 @@ def _extract_pdf_zones(file_path: str) -> dict:
             })
 
     if result["has_form_fields"]:
-        # For form PDFs, we just list the fields for the AI
         parts = ["=== CHAMPS DE FORMULAIRE PDF ==="]
         for f in result["form_fields"]:
             parts.append(
                 f"  Page {f['page']}: Champ '{f['field_name']}' "
                 f"(type={f['field_type']}, valeur actuelle='{f['field_value']}')"
             )
-        # Also add text context per page
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text("text")
@@ -1900,10 +1905,11 @@ def _extract_pdf_zones(file_path: str) -> dict:
         doc.close()
         return result
 
-    # ── 2. For non-form PDFs: extract layout with zone detection ──
+    # ── 2. For non-form PDFs: smart zone detection ──
     zones = []
     ai_parts = []
     zone_id = 0
+    RIGHT_MARGIN = 40  # points from right edge to stop
 
     for page_num in range(len(doc)):
         page = doc[page_num]
@@ -1912,7 +1918,7 @@ def _extract_pdf_zones(file_path: str) -> dict:
         page_zones = []
 
         for block in text_dict.get("blocks", []):
-            if block.get("type") != 0:  # text blocks only
+            if block.get("type") != 0:
                 continue
 
             for line in block.get("lines", []):
@@ -1920,83 +1926,94 @@ def _extract_pdf_zones(file_path: str) -> dict:
                 if not spans:
                     continue
 
+                # Separate label spans from filler spans
+                label_spans = []
+                filler_start_idx = None
+                for i, s in enumerate(spans):
+                    if _is_filler(s["text"]):
+                        if filler_start_idx is None:
+                            filler_start_idx = i
+                    else:
+                        label_spans.append(s)
+                        filler_start_idx = None  # reset if non-filler follows
+
                 line_text = "".join(s["text"] for s in spans).strip()
                 if not line_text:
                     continue
 
-                line_bbox = line["bbox"]  # [x0, y0, x1, y1]
-                last_span = spans[-1]
-                last_span_bbox = last_span["bbox"]
-                font_size = last_span.get("size", 10)
+                # Get label-only text (without filler)
+                label_text = "".join(s["text"] for s in label_spans).strip()
+                if not label_text:
+                    continue
 
-                # ── Zone type A: label ending with ":" or ":" with space after ──
-                if line_text.rstrip().endswith(":") or line_text.rstrip().endswith(": "):
-                    space_after = page_width - last_span_bbox[2]
-                    if space_after > 40:  # enough room to fill after the colon
+                # Detect the font size from the label part
+                label_font_size = label_spans[-1].get("size", 10) if label_spans else 10
+                # Use origin for precise baseline positioning
+                label_origin_y = label_spans[-1].get("origin", [0, label_spans[-1]["bbox"][3]])[1] if label_spans else spans[-1]["bbox"][3]
+
+                # ── Case 1: Line has filler (dots/underscores) after label text ──
+                # e.g. "Nom commercial : ………………………"
+                has_trailing_filler = filler_start_idx is not None and filler_start_idx > 0
+                # Also detect "Label :" patterns where colon is in last label span
+                colon_end = label_text.rstrip().endswith(":")
+
+                if has_trailing_filler:
+                    # Place text where the filler begins
+                    filler_span = spans[filler_start_idx]
+                    fill_x = filler_span["bbox"][0]
+                    fill_end_x = spans[-1]["bbox"][2]
+                    available_width = fill_end_x - fill_x
+
+                    if available_width > 30:
                         z = {
                             "id": f"z{zone_id}",
                             "page": page_num + 1,
-                            "type": "after_label",
-                            "label": line_text,
-                            "x": last_span_bbox[2] + 4,
-                            "y": last_span_bbox[3] - 2,  # baseline aligned
-                            "max_width": space_after - 10,
-                            "font_size": min(font_size, 10),
+                            "type": "replace_filler",
+                            "label": label_text[:100],
+                            "x": fill_x + 2,
+                            "y": label_origin_y,
+                            "font_size": min(label_font_size, 9),
+                            "max_width": available_width - 4,
+                            # Store filler bbox for white-out
+                            "clear_rect": [fill_x, filler_span["bbox"][1] - 1,
+                                           fill_end_x, spans[-1]["bbox"][3] + 1],
                         }
                         zones.append(z)
                         page_zones.append(z)
                         zone_id += 1
 
-                # ── Zone type B: line with dots/underscores (fill-in line) ──
-                elif ("…" in line_text or "..." in line_text or "___" in line_text
-                      or ". . ." in line_text):
-                    # Find the start of the dots/underscores
-                    first_span = spans[0]
-                    z = {
-                        "id": f"z{zone_id}",
-                        "page": page_num + 1,
-                        "type": "fill_line",
-                        "label": line_text[:80],
-                        "x": first_span["bbox"][0],
-                        "y": last_span_bbox[3] - 2,
-                        "max_width": last_span_bbox[2] - first_span["bbox"][0],
-                        "font_size": min(font_size, 10),
-                    }
-                    zones.append(z)
-                    page_zones.append(z)
-                    zone_id += 1
+                elif colon_end:
+                    # ── Case 2: Label ends with ":" but no filler follows ──
+                    # Place text after the colon
+                    last_label_span = label_spans[-1]
+                    fill_x = last_label_span["bbox"][2] + 4
+                    available_width = page_width - fill_x - RIGHT_MARGIN
 
-                # ── Zone type C: line ending with empty space (> 50% of page) ──
-                elif last_span_bbox[2] < page_width * 0.5 and len(line_text) < 40:
-                    # Short label with lots of space → likely a field
-                    space_after = page_width - last_span_bbox[2]
-                    if space_after > 150:
+                    if available_width > 40:
                         z = {
                             "id": f"z{zone_id}",
                             "page": page_num + 1,
-                            "type": "after_short_label",
-                            "label": line_text,
-                            "x": last_span_bbox[2] + 8,
-                            "y": last_span_bbox[3] - 2,
-                            "max_width": space_after - 15,
-                            "font_size": min(font_size, 10),
+                            "type": "after_colon",
+                            "label": label_text[:100],
+                            "x": fill_x,
+                            "y": label_origin_y,
+                            "font_size": min(label_font_size, 9),
+                            "max_width": available_width,
+                            "clear_rect": None,
                         }
                         zones.append(z)
                         page_zones.append(z)
                         zone_id += 1
 
-        # Build AI-friendly text for this page
+        # Build AI description for this page
         if page_zones:
-            ai_parts.append(f"\n=== PAGE {page_num + 1} — ZONES REMPLISSABLES ===")
-            # Also include full page text for context
+            ai_parts.append(f"\n=== PAGE {page_num + 1} — {len(page_zones)} ZONES REMPLISSABLES ===")
             page_text = page.get_text("text")
             if page_text.strip():
-                ai_parts.append(f"[Contenu de la page pour contexte:]\n{page_text[:3000]}")
-            ai_parts.append("")
+                ai_parts.append(f"[Contexte page:]\n{page_text[:3000]}\n")
             for z in page_zones:
-                ai_parts.append(f'  {z["id"]}: ({z["type"]}) Label: "{z["label"]}"')
+                ai_parts.append(f'  {z["id"]}: Label="{z["label"]}"')
         else:
-            # Include page text even without zones for context
             page_text = page.get_text("text")
             if page_text.strip():
                 ai_parts.append(f"\n=== PAGE {page_num + 1} (pas de zones détectées) ===")
@@ -2011,8 +2028,8 @@ def _extract_pdf_zones(file_path: str) -> dict:
 def _fill_pdf_with_zones(file_path: str, fill_data: list, zone_map: dict) -> bytes:
     """Fill a PDF using pre-computed zone coordinates.
 
-    fill_data: [{"zone_id": "z0", "value": "text"}, ...] or [{"field": ..., "value": ...}, ...]
-    zone_map: dict mapping zone_id → zone dict with x, y, page, font_size, max_width
+    For each zone, optionally clears the filler area (white rectangle) then
+    inserts the new text at the precise position.
     """
     import fitz
     doc = fitz.open(file_path)
@@ -2042,7 +2059,6 @@ def _fill_pdf_with_zones(file_path: str, fill_data: list, zone_map: dict) -> byt
         if not value or value == "[A COMPLÉTER]":
             continue
         if zone_id not in zone_map:
-            logger.warning("fill-pdf: zone_id '%s' not found in zone_map, skipping", zone_id)
             continue
 
         zone = zone_map[zone_id]
@@ -2056,19 +2072,29 @@ def _fill_pdf_with_zones(file_path: str, fill_data: list, zone_map: dict) -> byt
         font_size = float(zone.get("font_size", 9))
         max_width = float(zone.get("max_width", 300))
 
-        # Truncate value if it would overflow the available width
-        # Approximate: 1 char ≈ font_size * 0.5 points wide
-        max_chars = int(max_width / (font_size * 0.5))
+        # Truncate value to fit available width
+        # Approximate: 1 char ≈ font_size * 0.45 points wide (for Helvetica)
+        char_width = font_size * 0.45
+        max_chars = int(max_width / char_width) if char_width > 0 else 50
         if len(value) > max_chars:
             value = value[:max_chars - 1] + "…"
 
+        # White-out the filler area (dots/underscores) if applicable
+        clear_rect = zone.get("clear_rect")
+        if clear_rect:
+            rect = fitz.Rect(clear_rect[0], clear_rect[1], clear_rect[2], clear_rect[3])
+            # Draw a white rectangle to cover the filler text
+            page.draw_rect(rect, color=None, fill=(1, 1, 1))
+
+        # Insert the new text at the precise baseline position
         point = fitz.Point(x, y)
         try:
             page.insert_text(
                 point,
                 value,
                 fontsize=font_size,
-                color=(0, 0, 0.4),  # Dark blue to distinguish filled text
+                fontname="helv",
+                color=(0.0, 0.0, 0.5),  # Dark blue
             )
             filled_count += 1
         except Exception as exc:
