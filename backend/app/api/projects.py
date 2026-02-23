@@ -440,14 +440,38 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 .order_by(ResponseDocument.order)
             )
             all_docs = result.scalars().all()
+
+            # Safety net: skip docs that are clearly completion-type even if
+            # content_type was set to REDACTION (e.g. xlsx BPU misclassified)
+            _completion_kw = [
+                "bpu", "bordereau", "dqe", "dpgf",
+                "dc1", "dc2", "dc3", "dc4",
+                "attri", "noti", "acte d'engagement",
+                "formulaire", "cerfa",
+                "a completer", "à compléter",
+                "a remplir", "à remplir",
+            ]
+
+            def _is_truly_redaction(rd) -> bool:
+                """Return True only if the document really needs chapter generation."""
+                title_lower = (rd.title or "").lower()
+                if rd.expected_format == DocumentFormat.XLSX:
+                    return False
+                if any(kw in title_lower for kw in _completion_kw):
+                    return False
+                return (
+                    rd.content_type == ContentType.REDACTION
+                    or rd.content_type in ("redaction", "REDACTION")
+                )
+
             resp_docs = [
                 (str(rd.id), rd.title, rd.description)
                 for rd in all_docs
-                if rd.content_type == ContentType.REDACTION or rd.content_type in ("redaction", "REDACTION")
+                if _is_truly_redaction(rd)
             ]
             completion_docs_count = sum(
                 1 for rd in all_docs
-                if rd.content_type == ContentType.COMPLETION or rd.content_type in ("completion", "COMPLETION")
+                if not _is_truly_redaction(rd)
             )
 
         # ── Phase 3: Generate structure ──
@@ -986,26 +1010,40 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
 
                 # Determine content_type from AI response or infer from format
                 raw_content_type = d.get("content_type", "")
-                if raw_content_type == "completion":
+                title_lower = d.get("title", "").lower()
+
+                # Keywords that ALWAYS indicate a completion document,
+                # regardless of what the AI classified
+                completion_keywords = [
+                    "bpu", "bordereau", "dqe", "dpgf",
+                    "dc1", "dc2", "dc3", "dc4",
+                    "attri", "noti", "acte d'engagement",
+                    "formulaire", "cerfa",
+                    "a completer", "à compléter",
+                    "a remplir", "à remplir",
+                    "cadre de réponse", "cadre de reponse",
+                ]
+                is_clearly_completion = (
+                    doc_format == DocumentFormat.XLSX
+                    or any(kw in title_lower for kw in completion_keywords)
+                )
+
+                if is_clearly_completion:
+                    # Force COMPLETION for xlsx or docs with completion keywords,
+                    # even if AI said "redaction" (common misclassification)
+                    ct = ContentType.COMPLETION
+                    if raw_content_type == "redaction":
+                        logger.warning(
+                            "AI classified '%s' (format=%s) as redaction but "
+                            "heuristic overrides to COMPLETION",
+                            d.get("title"), doc_format,
+                        )
+                elif raw_content_type == "completion":
                     ct = ContentType.COMPLETION
                 elif raw_content_type == "redaction":
                     ct = ContentType.REDACTION
                 else:
-                    # Infer: xlsx is almost always completion, pdf forms too
-                    if doc_format == DocumentFormat.XLSX:
-                        ct = ContentType.COMPLETION
-                    elif doc_format == DocumentFormat.PDF:
-                        # PDF could be either; default to completion for forms
-                        title_lower = d.get("title", "").lower()
-                        form_keywords = ["dc1", "dc2", "dc3", "dc4", "attri", "noti",
-                                         "acte d'engagement", "formulaire", "cerfa",
-                                         "a completer", "à compléter", "a remplir", "à remplir"]
-                        if any(kw in title_lower for kw in form_keywords):
-                            ct = ContentType.COMPLETION
-                        else:
-                            ct = ContentType.REDACTION
-                    else:
-                        ct = ContentType.REDACTION
+                    ct = ContentType.REDACTION
 
                 rd = ResponseDocument(
                     project_id=project_id,
