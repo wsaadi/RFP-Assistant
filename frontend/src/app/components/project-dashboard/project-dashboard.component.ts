@@ -230,6 +230,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <span class="deliverable-desc">{{ rd.description }}</span>
                     <div class="deliverable-meta">
                       <mat-chip class="type-redaction" size="small">Redaction</mat-chip>
+                      <button mat-button class="type-toggle-btn" (click)="toggleContentType(rd, 'completion')"
+                        matTooltip="Basculer en document a completer (Excel/PDF)">
+                        <mat-icon>swap_horiz</mat-icon> Changer en "A completer"
+                      </button>
                       <span class="deliverable-source" *ngIf="rd.rfp_source">
                         <mat-icon class="meta-icon">source</mat-icon> {{ rd.rfp_source }}
                       </span>
@@ -261,6 +265,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <span class="deliverable-desc">{{ rd.description }}</span>
                     <div class="deliverable-meta">
                       <mat-chip class="type-completion" size="small">A completer</mat-chip>
+                      <button mat-button class="type-toggle-btn" (click)="toggleContentType(rd, 'redaction')"
+                        matTooltip="Basculer en document a rediger (chapitres)">
+                        <mat-icon>swap_horiz</mat-icon> Changer en "Redaction"
+                      </button>
                       <mat-chip *ngIf="rd.fill_status === 'completed'" class="fill-done" size="small">Contenu genere</mat-chip>
                       <mat-chip *ngIf="rd.fill_status === 'generating'" class="fill-running" size="small">En cours...</mat-chip>
                       <span class="deliverable-source" *ngIf="rd.rfp_source">
@@ -805,6 +813,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .type-redaction { background: #e3f2fd !important; color: #1565c0 !important; font-weight: 500; }
     .type-completion { background: #fff3e0 !important; color: #e65100 !important; font-weight: 500; }
     .completion-item { border-left: 3px solid #e65100; }
+    .type-toggle-btn { font-size: 11px !important; color: #888 !important; min-width: auto !important; padding: 0 6px !important; line-height: 24px !important; height: 24px !important; }
+    .type-toggle-btn mat-icon { font-size: 14px; width: 14px; height: 14px; margin-right: 2px; }
+    .type-toggle-btn:hover { color: #1976d2 !important; background: #e3f2fd !important; }
     .fill-content-panel { margin-top: 10px; box-shadow: none !important; border: 1px solid #e0e0e0; }
     .fill-content-preview { font-size: 13px; line-height: 1.7; color: #333; max-height: 500px; overflow-y: auto; padding: 8px 0; }
     ::ng-deep .fill-content-preview h2, ::ng-deep .fill-content-preview h3 { font-size: 15px; font-weight: 700; color: #1B3A5C; margin: 16px 0 8px 0; }
@@ -1487,6 +1498,29 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.api.updateResponseDocument(this.projectId, rd.id, { is_selected: checked }).subscribe({
       error: () => {
         rd.is_selected = !checked; // revert on error
+        this.snackBar.open('Erreur mise a jour', 'OK', { duration: 3000 });
+      },
+    });
+  }
+
+  toggleContentType(rd: ResponseDocument, newType: 'redaction' | 'completion'): void {
+    const oldType = rd.content_type;
+    rd.content_type = newType;
+    this.api.updateResponseDocument(this.projectId, rd.id, { content_type: newType }).subscribe({
+      next: () => {
+        // Re-sort into the correct lists
+        this.redactionDocs = this.responseDocuments.filter(d => d.content_type === 'redaction');
+        this.completionDocs = this.responseDocuments.filter(d => d.content_type === 'completion');
+        this._refreshGroupedChapters();
+        this.snackBar.open(
+          newType === 'completion'
+            ? `"${rd.title}" deplace dans Documents a completer`
+            : `"${rd.title}" deplace dans Documents a rediger`,
+          'OK', { duration: 3000 }
+        );
+      },
+      error: () => {
+        rd.content_type = oldType; // revert on error
         this.snackBar.open('Erreur mise a jour', 'OK', { duration: 3000 });
       },
     });
