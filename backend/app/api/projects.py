@@ -1852,3 +1852,248 @@ async def fill_excel_document(
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{output_filename}"'},
     )
+
+
+# ── Fill PDF endpoint ──────────────────────────────────────────────
+
+def _read_pdf_structure(file_path: str) -> str:
+    """Read a PDF file and return a textual representation of its structure.
+    Includes page-by-page text, form field names, and table-like layouts."""
+    import fitz
+    doc = fitz.open(file_path)
+    parts = []
+
+    # Extract form fields if any
+    form_fields = []
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        widgets = page.widgets()
+        if widgets:
+            for w in widgets:
+                field_name = w.field_name or ""
+                field_type = w.field_type_string or ""
+                field_value = w.field_value or ""
+                form_fields.append(
+                    f"  Page {page_num + 1}: Champ '{field_name}' (type={field_type}, valeur actuelle='{field_value}')"
+                )
+
+    if form_fields:
+        parts.append("=== CHAMPS DE FORMULAIRE PDF ===")
+        parts.extend(form_fields)
+        parts.append("")
+
+    # Extract text content page by page
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        text = page.get_text("text")
+        if text.strip():
+            parts.append(f"=== PAGE {page_num + 1} ===")
+            # Limit per page to avoid excessive context
+            parts.append(text[:5000])
+
+    doc.close()
+    return "\n".join(parts)
+
+
+def _fill_pdf_with_data(file_path: str, fill_data: list) -> bytes:
+    """Open a PDF file, fill it with AI-generated data, return modified bytes.
+
+    fill_data entries can be:
+    - Form field fills: {"field": "field_name", "value": "some value"}
+    - Text annotations: {"page": 1, "x": 100, "y": 200, "value": "text to add", "font_size": 10}
+    """
+    import fitz
+    doc = fitz.open(file_path)
+
+    # Separate form field fills from text annotations
+    field_fills = [e for e in fill_data if e.get("field")]
+    text_annotations = [e for e in fill_data if e.get("page") is not None and not e.get("field")]
+
+    # Fill form fields
+    if field_fills:
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            for widget in page.widgets():
+                field_name = widget.field_name or ""
+                for entry in field_fills:
+                    if entry["field"].strip().lower() == field_name.strip().lower():
+                        value = entry.get("value")
+                        if value is not None and str(value).strip() != "[A COMPLÉTER]":
+                            widget.field_value = str(value)
+                            widget.update()
+                        break
+
+    # Add text annotations (for non-form PDFs)
+    if text_annotations:
+        for entry in text_annotations:
+            page_idx = int(entry["page"]) - 1  # 1-based to 0-based
+            if page_idx < 0 or page_idx >= len(doc):
+                continue
+            page = doc[page_idx]
+            x = float(entry.get("x", 72))
+            y = float(entry.get("y", 72))
+            value = entry.get("value", "")
+            font_size = float(entry.get("font_size", 10))
+
+            if not value or str(value).strip() == "[A COMPLÉTER]":
+                continue
+
+            point = fitz.Point(x, y)
+            page.insert_text(
+                point,
+                str(value),
+                fontsize=font_size,
+                color=(0, 0, 0.6),  # Dark blue to distinguish from original
+            )
+
+    output = doc.tobytes()
+    doc.close()
+    return output
+
+
+@router.post("/{project_id}/fill-pdf/{doc_id}")
+async def fill_pdf_document(
+    project_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a filled PDF file for a completion-type document
+    by using data from the old response and the original PDF template from the DCE."""
+
+    # 1. Get the response document
+    result = await db.execute(
+        select(ResponseDocument)
+        .where(ResponseDocument.id == doc_id, ResponseDocument.project_id == project_id)
+    )
+    resp_doc = result.scalar_one_or_none()
+    if not resp_doc:
+        raise HTTPException(status_code=404, detail="Document livrable non trouvé")
+
+    # 2. Find the source PDF file in uploaded DCE documents
+    doc_title_lower = (resp_doc.title or "").lower()
+    rfp_source_lower = (resp_doc.rfp_source or "").lower()
+
+    docs_result = await db.execute(
+        select(Document)
+        .where(Document.project_id == project_id)
+        .where(Document.category == DocumentCategory.NEW_RFP)
+    )
+    all_dce_docs = docs_result.scalars().all()
+
+    # Find the best matching PDF file
+    pdf_doc = None
+    for doc in all_dce_docs:
+        if doc.file_type.value != "pdf":
+            continue
+        fname_lower = (doc.original_filename or "").lower()
+        # Match by rfp_source reference
+        if rfp_source_lower and rfp_source_lower in fname_lower:
+            pdf_doc = doc
+            break
+        if fname_lower and fname_lower in rfp_source_lower:
+            pdf_doc = doc
+            break
+        # Match by title keywords
+        title_words = [w for w in doc_title_lower.split() if len(w) > 3]
+        matches = sum(1 for w in title_words if w in fname_lower)
+        if matches >= 2:
+            pdf_doc = doc
+            break
+
+    # Fallback: pick first PDF with relevant keywords
+    if not pdf_doc:
+        for doc in all_dce_docs:
+            if doc.file_type.value != "pdf":
+                continue
+            fname_lower = (doc.original_filename or "").lower()
+            for kw in ["formulaire", "acte", "dc1", "dc2", "dc3", "dc4", "attrib", "engagement",
+                        "candidature", "marche", "contrat", "annexe"]:
+                if kw in doc_title_lower and kw in fname_lower:
+                    pdf_doc = doc
+                    break
+            if pdf_doc:
+                break
+
+    # Last fallback: pick any matching PDF by title words
+    if not pdf_doc:
+        for doc in all_dce_docs:
+            if doc.file_type.value != "pdf":
+                continue
+            fname_lower = (doc.original_filename or "").lower()
+            # Check if any word from title appears in filename
+            for w in doc_title_lower.split():
+                if len(w) > 4 and w in fname_lower:
+                    pdf_doc = doc
+                    break
+            if pdf_doc:
+                break
+
+    if not pdf_doc or not os.path.isfile(pdf_doc.file_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Aucun fichier PDF source trouvé dans le DCE. "
+                   "Assurez-vous d'avoir uploadé le PDF correspondant dans les documents du nouvel AO.",
+        )
+
+    # 3. Read PDF structure
+    pdf_structure = _read_pdf_structure(pdf_doc.file_path)
+
+    # 4. Get project for workspace_id
+    proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = proj_result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    # 5. Load context: new RFP + old response
+    anon_new_rfp, anon_old_response = await asyncio.gather(
+        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+    )
+
+    # Targeted vector search for relevant content
+    search_query = f"{resp_doc.title} formulaire informations candidat société entreprise"
+    relevant_chunks = VectorService.search(
+        str(project_id),
+        search_query,
+        top_k=15,
+        category_filter="old_response",
+    )
+    relevant_context = "\n\n".join([
+        f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
+        for c in relevant_chunks
+    ])
+
+    old_response_with_context = anon_old_response
+    if relevant_context:
+        old_response_with_context = (
+            f"=== EXTRAITS PERTINENTS DE L'ANCIENNE RÉPONSE ===\n{relevant_context}\n\n"
+            f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
+        )
+
+    # 6. Call AI to generate structured fill data
+    logger.info(
+        "fill-pdf %s: pdf_structure=%d chars, old_response=%d chars, relevant_chunks=%d, new_rfp=%d chars",
+        resp_doc.title, len(pdf_structure), len(old_response_with_context),
+        len(relevant_chunks), len(anon_new_rfp),
+    )
+    ai_service = await _get_ai_service(project.workspace_id, db)
+    fill_data = await ai_service.generate_pdf_fill_data(
+        document_title=resp_doc.title,
+        pdf_structure=pdf_structure,
+        new_rfp_content=anon_new_rfp,
+        old_response_content=old_response_with_context,
+    )
+    logger.info("fill-pdf %s: AI returned %d fill entries", resp_doc.title, len(fill_data))
+
+    # 7. Fill the PDF and return as download
+    filled_bytes = _fill_pdf_with_data(pdf_doc.file_path, fill_data)
+
+    base_name = os.path.splitext(pdf_doc.original_filename)[0]
+    output_filename = f"{base_name}_rempli.pdf"
+
+    return StreamingResponse(
+        io.BytesIO(filled_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{output_filename}"'},
+    )

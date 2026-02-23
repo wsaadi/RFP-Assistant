@@ -197,6 +197,7 @@ export interface ResponseDocument {
   updated_at: string;
   chapter_count: number;
   _fillingExcel?: boolean;
+  _fillingPdf?: boolean;
 }
 
 export interface DetectDeliverablesStatus {
