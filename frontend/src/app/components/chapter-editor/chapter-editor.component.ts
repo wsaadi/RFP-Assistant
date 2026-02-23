@@ -1,7 +1,8 @@
-import { Component, OnInit, ViewEncapsulation } from '@angular/core';
+import { Component, OnInit, OnDestroy, ViewEncapsulation } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
+import { Subscription } from 'rxjs';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -35,7 +36,7 @@ import { Chapter } from '../../models/report.model';
           <button mat-icon-button [routerLink]="['/project', projectId]"><mat-icon>arrow_back</mat-icon></button>
           <div>
             <h2>{{ chapter.title }}</h2>
-            <span class="chapter-meta">{{ chapter.chapter_type }} - {{ chapter.numbering }}</span>
+            <span class="chapter-meta">{{ chapterTypeLabel(chapter.chapter_type) }}{{ chapter.numbering ? ' - ' + chapter.numbering : '' }}</span>
           </div>
         </div>
         <div class="header-actions">
@@ -260,7 +261,7 @@ import { Chapter } from '../../models/report.model';
     @media (max-width: 960px) { .editor-layout { grid-template-columns: 1fr; } }
   `],
 })
-export class ChapterEditorComponent implements OnInit {
+export class ChapterEditorComponent implements OnInit, OnDestroy {
   projectId = '';
   chapterId = '';
   chapter: Chapter | null = null;
@@ -273,6 +274,7 @@ export class ChapterEditorComponent implements OnInit {
   editorMode: 'edit' | 'preview' = 'preview';
   Math = Math;
   renderMarkdown = renderMarkdown;
+  private paramSub?: Subscription;
 
   constructor(
     private route: ActivatedRoute,
@@ -281,9 +283,22 @@ export class ChapterEditorComponent implements OnInit {
   ) {}
 
   ngOnInit(): void {
-    this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
-    this.chapterId = this.route.snapshot.paramMap.get('chapterId') || '';
-    this.loadChapter();
+    // Subscribe to route param changes so navigation to sub-chapters reloads the editor
+    this.paramSub = this.route.paramMap.subscribe(params => {
+      this.projectId = params.get('projectId') || '';
+      const newChapterId = params.get('chapterId') || '';
+      if (newChapterId !== this.chapterId) {
+        this.chapterId = newChapterId;
+        this.loadChapter();
+      } else if (!this.chapterId) {
+        this.chapterId = newChapterId;
+        this.loadChapter();
+      }
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.paramSub?.unsubscribe();
   }
 
   loadChapter(): void {
@@ -349,6 +364,16 @@ export class ChapterEditorComponent implements OnInit {
       needs_review: 'À relire', validated: 'Validé',
     };
     return labels[status] || status;
+  }
+
+  chapterTypeLabel(type: string): string {
+    const labels: Record<string, string> = {
+      chapter: 'Chapitre',
+      sub_chapter: 'Sous-chapitre',
+      annexe: 'Annexe',
+      document_to_provide: 'Document à fournir',
+    };
+    return labels[type] || type;
   }
 
   statusIcon(status: string): string {
