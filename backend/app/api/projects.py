@@ -225,12 +225,11 @@ async def analyze_gap(
 
     ai_service = await _get_ai_service(project.workspace_id, db)
 
-    # Get old RFP chunks
+    # Get old + new RFP chunks (sync vector search, fast)
     old_rfp_chunks = VectorService.search(str(project_id), "exigences appel d'offres", top_k=20, category_filter="old_rfp")
-    old_rfp_content = "\n\n".join([c["content"] for c in old_rfp_chunks])
-
-    # Get new RFP chunks
     new_rfp_chunks = VectorService.search(str(project_id), "exigences appel d'offres", top_k=20, category_filter="new_rfp")
+
+    old_rfp_content = "\n\n".join([c["content"] for c in old_rfp_chunks])
     new_rfp_content = "\n\n".join([c["content"] for c in new_rfp_chunks])
 
     if not old_rfp_content or not new_rfp_content:
@@ -239,9 +238,11 @@ async def analyze_gap(
             detail="Documents d'ancien et/ou de nouvel appel d'offres manquants ou non indexés",
         )
 
-    # Anonymize before sending to AI
-    anon_old = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
-    anon_new = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
+    # Anonymize both in parallel
+    anon_old, anon_new = await asyncio.gather(
+        AnonymizationService.anonymize_text(old_rfp_content, project_id, db),
+        AnonymizationService.anonymize_text(new_rfp_content, project_id, db),
+    )
 
     analysis = await ai_service.analyze_gap(anon_old, anon_new)
 
@@ -762,45 +763,58 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
 
             prefilled = 0
             skipped = 0
+            sem = asyncio.Semaphore(3)  # Limit concurrent AI calls
+            _done_count = 0
 
-            for idx, chapter in enumerate(to_prefill):
-                chapter_num = idx + 1
-                pct = 10 + int(85 * idx / total)
-                _update("prefilling", pct,
-                        f"Chapitre {chapter_num}/{total}: {chapter.title[:60]}...")
+            async def _prefill_one(idx, chapter):
+                nonlocal _done_count
 
-                # Search old response for relevant content
+                # Search old response for relevant content (sync, fast)
                 search_query = f"{chapter.title} {chapter.description}"
                 old_response_chunks = VectorService.search(
                     str(project_id), search_query, top_k=5, category_filter="old_response"
                 )
 
                 if not old_response_chunks:
-                    skipped += 1
-                    continue
+                    return (chapter, None, None)  # skipped
 
                 old_content = "\n\n".join([c["content"] for c in old_response_chunks])
-                anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
 
-                content = await ai_service.generate_chapter_content(
-                    chapter_title=chapter.title,
-                    chapter_description=chapter.description,
-                    rfp_requirement=chapter.rfp_requirement,
-                    old_response_content=anon_content,
-                )
+                async with sem:
+                    _done_count += 1
+                    _update("prefilling", 10 + int(85 * _done_count / total),
+                            f"Chapitres en parallele ({_done_count}/{total}): {chapter.title[:60]}...")
 
-                # Deanonymize
-                chapter.content = await AnonymizationService.deanonymize_text(content, project_id, db)
-                chapter.is_prefilled = True
-                chapter.status = ChapterStatus.IN_PROGRESS
-                chapter.source_references = [
-                    {"document": c["document_name"], "page": c["page_number"], "score": c["score"]}
-                    for c in old_response_chunks[:3]
-                ]
-                prefilled += 1
+                    anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
 
-                _update("prefilling", 10 + int(85 * chapter_num / total),
-                        f"Chapitre {chapter_num}/{total} termine — {prefilled} pre-rempli(s)")
+                    content = await ai_service.generate_chapter_content(
+                        chapter_title=chapter.title,
+                        chapter_description=chapter.description,
+                        rfp_requirement=chapter.rfp_requirement,
+                        old_response_content=anon_content,
+                    )
+
+                    deanonn = await AnonymizationService.deanonymize_text(content, project_id, db)
+                    refs = [
+                        {"document": c["document_name"], "page": c["page_number"], "score": c["score"]}
+                        for c in old_response_chunks[:3]
+                    ]
+                    return (chapter, deanonn, refs)
+
+            results = await asyncio.gather(*[
+                _prefill_one(idx, ch) for idx, ch in enumerate(to_prefill)
+            ])
+
+            # Apply results to chapter objects
+            for chapter, content, refs in results:
+                if content is None:
+                    skipped += 1
+                else:
+                    chapter.content = content
+                    chapter.is_prefilled = True
+                    chapter.status = ChapterStatus.IN_PROGRESS
+                    chapter.source_references = refs
+                    prefilled += 1
 
             _update("saving", 95, "Enregistrement en base...")
             await db.commit()
@@ -1239,55 +1253,57 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 for ch in existing_chapters[:10]
             ])
 
+            import time
             filled_count = 0
 
-            for idx, doc in enumerate(comp_docs):
-                doc_num = idx + 1
-                start_pct = 10 + int(85 * idx / total)
-                end_pct = 10 + int(85 * doc_num / total)
+            # Pre-compute shared context once (instead of per-doc)
+            combined_context = anon_old_response
+            if chapter_context:
+                combined_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
 
-                _update("filling", start_pct,
-                        f"Document {doc_num}/{total}: {doc.title}...")
+            sem = asyncio.Semaphore(3)
+            _fill_done = 0
 
-                doc.fill_status = "generating"
-
-                import time
+            async def _fill_one_doc(idx, doc):
+                nonlocal _fill_done
                 t0_doc = time.monotonic()
 
                 async def _on_fill_progress(token_count: int, char_count: int,
-                                            _start=start_pct, _end=end_pct,
-                                            _t0=t0_doc, _doc_num=doc_num, _title=doc.title):
+                                            _t0=t0_doc, _title=doc.title):
                     elapsed = int(time.monotonic() - _t0)
                     ratio = min(token_count / 8000, 0.95)
-                    pct = _start + int((_end - _start) * ratio)
+                    pct = 10 + int(85 * (_fill_done + ratio) / total)
                     _fill_progress[pid] = {
                         "status": "running", "step": "filling", "progress": pct,
-                        "message": f"Document {_doc_num}/{total}: {_title} — {token_count} tokens — {elapsed}s",
+                        "message": f"Documents en parallele ({_fill_done + 1}/{total}): "
+                                   f"{_title} — {token_count} tokens — {elapsed}s",
                     }
 
-                # Combine old response + chapter context for fuller context
-                combined_context = anon_old_response
-                if chapter_context:
-                    combined_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
+                async with sem:
+                    fill_content = await ai_service.generate_fill_content(
+                        document_title=doc.title,
+                        document_description=doc.description,
+                        expected_format=doc.expected_format.value,
+                        new_rfp_content=anon_new_rfp,
+                        old_response_content=combined_context,
+                        on_progress=_on_fill_progress,
+                    )
+                    deanon = await AnonymizationService.deanonymize_text(
+                        fill_content, project_id, db
+                    )
+                    _fill_done += 1
+                    return (doc, deanon)
 
-                fill_content = await ai_service.generate_fill_content(
-                    document_title=doc.title,
-                    document_description=doc.description,
-                    expected_format=doc.expected_format.value,
-                    new_rfp_content=anon_new_rfp,
-                    old_response_content=combined_context,
-                    on_progress=_on_fill_progress,
-                )
+            _update("filling", 10, f"Remplissage parallele de {total} document(s)...")
 
-                # Deanonymize the fill content
-                doc.fill_content = await AnonymizationService.deanonymize_text(
-                    fill_content, project_id, db
-                )
+            results = await asyncio.gather(*[
+                _fill_one_doc(idx, doc) for idx, doc in enumerate(comp_docs)
+            ])
+
+            for doc, content in results:
+                doc.fill_content = content
                 doc.fill_status = "completed"
                 filled_count += 1
-
-                _update("filling", end_pct,
-                        f"Document {doc_num}/{total} terminé — {filled_count} complété(s)")
 
             _update("saving", 96, "Enregistrement...")
             await db.commit()
@@ -1338,9 +1354,11 @@ async def analyze_compliance(
     if not rfp_requirements:
         raise HTTPException(status_code=400, detail="Aucun document d'appel d'offres indexé")
 
-    # Anonymize
-    anon_response = await AnonymizationService.anonymize_text(response_content, project_id, db)
-    anon_rfp = await AnonymizationService.anonymize_text(rfp_requirements, project_id, db)
+    # Anonymize both in parallel
+    anon_response, anon_rfp = await asyncio.gather(
+        AnonymizationService.anonymize_text(response_content, project_id, db),
+        AnonymizationService.anonymize_text(rfp_requirements, project_id, db),
+    )
 
     analysis = await ai_service.analyze_compliance(anon_response, anon_rfp)
 
