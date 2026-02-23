@@ -209,6 +209,12 @@ export class ApiService {
     return this.http.get<FillDeliverablesStatus>(`${this.baseUrl}/projects/${projectId}/fill-deliverables-status`);
   }
 
+  resetFillContent(projectId: string, docId: string): Observable<ResponseDocument> {
+    return this.http.post<ResponseDocument>(
+      `${this.baseUrl}/projects/${projectId}/response-documents/${docId}/reset-fill`, {}
+    );
+  }
+
   fillExcelDocument(projectId: string, docId: string): Observable<Blob> {
     return this.http.post(
       `${this.baseUrl}/projects/${projectId}/fill-excel/${docId}`, {},

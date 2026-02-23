@@ -931,20 +931,24 @@ Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
 
 Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie."""
 
-        parts = [f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure}"]
-        parts.append(f"CONTENU DE L'APPEL D'OFFRES:\n{new_rfp_content[:30000]}")
+        # Put pricing context FIRST so it's most prominent, then Excel structure, then RFP
+        parts = []
         if old_response_content:
             parts.append(
-                f"ANCIENNE RÉPONSE (CONTIENT LES TARIFS À REPRENDRE):\n{old_response_content[:40000]}"
+                f"⚠️ ANCIENNE RÉPONSE (CONTIENT LES TARIFS/PRIX À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
             )
+        parts.append(f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure[:40000]}")
+        parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:20000]}")
 
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += (
-            f"\n\nGénère le JSON de remplissage pour le document '{document_title}'. "
-            "Reprends les tarifs de l'ancienne réponse. Retourne UNIQUEMENT le JSON."
+            f"\n\n⚠️ RAPPEL IMPORTANT: Génère le JSON de remplissage pour le document '{document_title}'. "
+            "Tu DOIS reprendre TOUS les tarifs/prix de l'ancienne réponse ci-dessus. "
+            "Chaque cellule de prix vide doit être remplie avec le tarif correspondant de l'ancienne réponse. "
+            "Retourne UNIQUEMENT le JSON."
         )
 
-        raw = await self.generate(system_prompt, user_prompt, temperature=0.1, max_tokens=16000)
+        raw = await self.generate(system_prompt, user_prompt, temperature=0.1, max_tokens=32000)
 
         # Parse the JSON response
         cleaned = _clean_json_response(raw)
