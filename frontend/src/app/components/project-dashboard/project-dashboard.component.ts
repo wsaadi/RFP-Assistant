@@ -332,33 +332,86 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <button mat-raised-button color="primary" [routerLink]="['/project', projectId, 'chapter', ch.id]">
                       <mat-icon>edit</mat-icon> Editer
                     </button>
-                    <button mat-raised-button color="accent" (click)="prefillChapter(ch.id)"
-                      [disabled]="prefilling" matTooltip="Pre-remplir ce chapitre avec l'IA">
-                      <mat-icon>auto_awesome</mat-icon> Pre-remplir
+                    <button mat-raised-button color="accent" (click)="aiGenerate(ch.id)"
+                      [disabled]="aiProcessing[ch.id]"
+                      matTooltip="Generer le contenu a partir de l'AO et de l'ancienne reponse">
+                      <mat-spinner *ngIf="aiProcessing[ch.id]" diameter="16"></mat-spinner>
+                      <mat-icon *ngIf="!aiProcessing[ch.id]">auto_awesome</mat-icon>
+                      {{ ch.content ? 'Regenerer' : 'Remplir avec l\'IA' }}
+                    </button>
+                    <button mat-icon-button (click)="toggleAiPrompt(ch.id)" matTooltip="Instruction personnalisee a l'IA">
+                      <mat-icon>psychology</mat-icon>
                     </button>
                     <button mat-icon-button color="warn" (click)="deleteSingleChapter(ch.id)" matTooltip="Supprimer ce chapitre">
                       <mat-icon>delete</mat-icon>
                     </button>
                   </div>
 
+                  <!-- AI custom prompt -->
+                  <div *ngIf="aiPromptVisible[ch.id]" class="ai-prompt-section">
+                    <mat-form-field appearance="outline" class="full-width">
+                      <mat-label>Instruction pour l'IA</mat-label>
+                      <textarea matInput [(ngModel)]="aiPromptText[ch.id]" rows="2"
+                        placeholder="Ex: Ajoute plus de details sur la methodologie, insiste sur notre experience en cybersecurite..."></textarea>
+                    </mat-form-field>
+                    <div class="ai-prompt-actions">
+                      <button mat-raised-button color="accent" (click)="aiCustomPrompt(ch.id)"
+                        [disabled]="aiProcessing[ch.id] || !aiPromptText[ch.id]">
+                        <mat-spinner *ngIf="aiProcessing[ch.id]" diameter="16"></mat-spinner>
+                        <mat-icon *ngIf="!aiProcessing[ch.id]">send</mat-icon>
+                        Envoyer
+                      </button>
+                      <button mat-button (click)="toggleAiPrompt(ch.id)">Annuler</button>
+                    </div>
+                  </div>
+
                   <!-- Sub-chapters -->
                   <div *ngIf="ch.children?.length" class="sub-chapters">
-                    <div *ngFor="let sub of ch.children; let j = index" class="sub-chapter-item">
-                      <mat-checkbox class="sub-checkbox"
-                        [checked]="selectedChapters.has(sub.id)"
-                        (change)="toggleSubChapterSelection(sub.id, $event.checked)"
-                        (click)="$event.stopPropagation()">
-                      </mat-checkbox>
-                      <mat-chip [class]="'status-' + sub.status" size="small">{{ statusIcon(sub.status) }}</mat-chip>
-                      <span class="ch-numbering">{{ i + 1 }}.{{ j + 1 }}</span>
-                      <span>{{ sub.title }}</span>
-                      <span class="sub-meta">{{ sub.content ? (sub.content.split(' ').length + ' mots') : 'Vide' }}</span>
-                      <button mat-icon-button [routerLink]="['/project', projectId, 'chapter', sub.id]">
-                        <mat-icon>edit</mat-icon>
-                      </button>
-                      <button mat-icon-button color="warn" (click)="deleteSingleChapter(sub.id)" matTooltip="Supprimer">
-                        <mat-icon>delete_outline</mat-icon>
-                      </button>
+                    <div *ngFor="let sub of ch.children; let j = index" class="sub-chapter-block">
+                      <div class="sub-chapter-item">
+                        <mat-checkbox class="sub-checkbox"
+                          [checked]="selectedChapters.has(sub.id)"
+                          (change)="toggleSubChapterSelection(sub.id, $event.checked)"
+                          (click)="$event.stopPropagation()">
+                        </mat-checkbox>
+                        <mat-chip [class]="'status-' + sub.status" size="small">{{ statusIcon(sub.status) }}</mat-chip>
+                        <span class="ch-numbering">{{ i + 1 }}.{{ j + 1 }}</span>
+                        <span>{{ sub.title }}</span>
+                        <span class="sub-meta">{{ sub.content ? (sub.content.split(' ').length + ' mots') : 'Vide' }}</span>
+                        <button mat-icon-button [routerLink]="['/project', projectId, 'chapter', sub.id]"
+                          matTooltip="Editer">
+                          <mat-icon>edit</mat-icon>
+                        </button>
+                        <button mat-icon-button color="accent" (click)="aiGenerate(sub.id)"
+                          [disabled]="aiProcessing[sub.id]"
+                          [matTooltip]="sub.content ? 'Regenerer avec IA' : 'Remplir avec IA'">
+                          <mat-spinner *ngIf="aiProcessing[sub.id]" diameter="16"></mat-spinner>
+                          <mat-icon *ngIf="!aiProcessing[sub.id]">auto_awesome</mat-icon>
+                        </button>
+                        <button mat-icon-button (click)="toggleAiPrompt(sub.id)" matTooltip="Instruction personnalisee">
+                          <mat-icon>psychology</mat-icon>
+                        </button>
+                        <button mat-icon-button color="warn" (click)="deleteSingleChapter(sub.id)" matTooltip="Supprimer">
+                          <mat-icon>delete_outline</mat-icon>
+                        </button>
+                      </div>
+                      <!-- AI custom prompt for sub-chapter -->
+                      <div *ngIf="aiPromptVisible[sub.id]" class="ai-prompt-section sub-ai-prompt">
+                        <mat-form-field appearance="outline" class="full-width">
+                          <mat-label>Instruction pour l'IA</mat-label>
+                          <textarea matInput [(ngModel)]="aiPromptText[sub.id]" rows="2"
+                            placeholder="Ex: Detaille la methodologie, ajoute des references techniques..."></textarea>
+                        </mat-form-field>
+                        <div class="ai-prompt-actions">
+                          <button mat-raised-button color="accent" (click)="aiCustomPrompt(sub.id)"
+                            [disabled]="aiProcessing[sub.id] || !aiPromptText[sub.id]">
+                            <mat-spinner *ngIf="aiProcessing[sub.id]" diameter="16"></mat-spinner>
+                            <mat-icon *ngIf="!aiProcessing[sub.id]">send</mat-icon>
+                            Envoyer
+                          </button>
+                          <button mat-button (click)="toggleAiPrompt(sub.id)">Annuler</button>
+                        </div>
+                      </div>
                     </div>
                   </div>
                 </mat-expansion-panel>
@@ -457,9 +510,14 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .ch-numbering { font-weight: bold; color: #2C5F8A; margin-right: 4px; }
     .ch-desc { color: #666; font-size: 13px; }
     .ch-req { font-size: 13px; background: #f5f5f5; padding: 8px; border-radius: 4px; }
-    .ch-actions { display: flex; gap: 8px; margin-top: 8px; }
+    .ch-actions { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+    .ai-prompt-section { margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 8px; }
+    .ai-prompt-section .full-width { width: 100%; }
+    .ai-prompt-actions { display: flex; gap: 8px; align-items: center; }
+    .sub-ai-prompt { margin-left: 0; }
     .sub-chapters { margin-top: 12px; padding-left: 24px; }
-    .sub-chapter-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #eee; }
+    .sub-chapter-block { border-bottom: 1px solid #eee; }
+    .sub-chapter-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
     .sub-meta { color: #888; font-size: 12px; margin-left: auto; }
     .select-all-bar { padding: 8px 0; margin-bottom: 4px; }
     .ch-checkbox { margin-right: 8px; }
@@ -571,6 +629,11 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   // Cached computed data to avoid method calls in template (prevents change detection loops)
   groupedChapters: { document: ResponseDocument | null; chapters: Chapter[] }[] = [];
   docsByCategory: Record<string, DocumentInfo[]> = {};
+
+  // Per-chapter AI state
+  aiProcessing: Record<string, boolean> = {};
+  aiPromptVisible: Record<string, boolean> = {};
+  aiPromptText: Record<string, string> = {};
 
   categories = [
     { value: 'old_rfp', label: 'Ancien AO', desc: 'Documents de l\'ancien appel d\'offres', icon: 'history', color: '#1976d2' },
@@ -872,6 +935,46 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       done: 'Termine',
     };
     return labels[step] || step;
+  }
+
+  // ── Per-chapter AI actions ──
+
+  toggleAiPrompt(chapterId: string): void {
+    this.aiPromptVisible[chapterId] = !this.aiPromptVisible[chapterId];
+  }
+
+  aiGenerate(chapterId: string): void {
+    this.aiProcessing[chapterId] = true;
+    this.api.generateChapterContent(chapterId, 'generate').subscribe({
+      next: () => {
+        this.aiProcessing[chapterId] = false;
+        this.snackBar.open('Contenu genere', 'OK', { duration: 3000 });
+        this.loadAll();
+      },
+      error: (err) => {
+        this.aiProcessing[chapterId] = false;
+        this.snackBar.open(err.error?.detail || 'Erreur generation', 'OK', { duration: 5000 });
+      },
+    });
+  }
+
+  aiCustomPrompt(chapterId: string): void {
+    const prompt = this.aiPromptText[chapterId];
+    if (!prompt) return;
+    this.aiProcessing[chapterId] = true;
+    this.api.generateChapterContent(chapterId, 'custom', prompt).subscribe({
+      next: () => {
+        this.aiProcessing[chapterId] = false;
+        this.aiPromptVisible[chapterId] = false;
+        this.aiPromptText[chapterId] = '';
+        this.snackBar.open('Contenu mis a jour', 'OK', { duration: 3000 });
+        this.loadAll();
+      },
+      error: (err) => {
+        this.aiProcessing[chapterId] = false;
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
+      },
+    });
   }
 
   // ── Chapter selection & deletion ──
