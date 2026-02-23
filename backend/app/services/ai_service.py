@@ -559,6 +559,41 @@ Valeurs de expected_format:
         logger.warning("Deliverable detection: JSON parse failed. First 500: %s", response[:500])
         return []
 
+    async def summarize_rfp_for_structure(
+        self,
+        rfp_content: str,
+        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    ) -> str:
+        """Create a focused summary of the RFP for per-document structure generation.
+
+        This allows per-document AI calls to use a compact ~4K summary instead of
+        the full 60-80K RFP content, drastically reducing prompt size and latency.
+        """
+        system_prompt = """Tu es un expert en analyse d'appels d'offres.
+
+Tu dois créer un RÉSUMÉ STRUCTURÉ et COMPLET de cet appel d'offres, en extrayant:
+1. L'objet du marché et contexte général
+2. TOUTES les exigences techniques (CCTP, spécifications)
+3. TOUTES les exigences administratives et réglementaires
+4. Les critères de jugement des offres et leur pondération
+5. Les lots et allotissement
+6. Les contraintes de délais, planning, pénalités
+7. Les compétences et moyens demandés
+8. Les annexes et documents à fournir
+
+Sois EXHAUSTIF sur les exigences. Chaque exigence doit être clairement identifiée avec sa source (article, section, page).
+Le résumé doit permettre de créer la structure complète d'une réponse sans avoir à relire l'AO original.
+
+Format: texte structuré avec des titres markdown. Pas de JSON."""
+
+        user_prompt = f"CONTENU COMPLET DE L'APPEL D'OFFRES:\n{rfp_content[:80000]}\n\n"
+        user_prompt += "Crée un résumé structuré et exhaustif de cet AO."
+
+        return await self.generate_streaming(
+            system_prompt, user_prompt, temperature=0.1, max_tokens=6000,
+            timeout=300, on_progress=on_progress,
+        )
+
     async def generate_response_structure_for_document(
         self,
         document_title: str,
@@ -566,6 +601,7 @@ Valeurs de expected_format:
         new_rfp_content: str,
         old_rfp_content: str = "",
         old_response_content: str = "",
+        rfp_summary: str = "",
         on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
     ) -> List[Dict]:
         """Generate chapter structure for a specific response document."""
@@ -602,7 +638,13 @@ Réponds UNIQUEMENT au format JSON suivant (sans markdown):
   }}
 ]"""
 
-        parts = [f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:60000]}"]
+        # Use the pre-computed summary if available (much smaller prompt),
+        # otherwise fall back to truncated full content.
+        parts = []
+        if rfp_summary:
+            parts.append(f"RÉSUMÉ STRUCTURÉ DE L'APPEL D'OFFRES:\n{rfp_summary}")
+        else:
+            parts.append(f"CONTENU DU NOUVEL APPEL D'OFFRES:\n{new_rfp_content[:60000]}")
         if old_rfp_content:
             parts.append(f"CONTENU DE L'ANCIEN AO:\n{old_rfp_content[:30000]}")
         if old_response_content:
