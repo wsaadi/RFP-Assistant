@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, ViewEncapsulation } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
@@ -8,11 +8,14 @@ import { MatIconModule } from '@angular/material/icon';
 import { MatInputModule } from '@angular/material/input';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatSelectModule } from '@angular/material/select';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatDividerModule } from '@angular/material/divider';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
 import { ApiService } from '../../services/api.service';
+import { renderMarkdown } from '../../services/markdown.service';
 import { Chapter } from '../../models/report.model';
 
 @Component({
@@ -21,8 +24,10 @@ import { Chapter } from '../../models/report.model';
   imports: [
     CommonModule, FormsModule, RouterLink,
     MatCardModule, MatButtonModule, MatIconModule, MatInputModule, MatChipsModule,
-    MatProgressSpinnerModule, MatSelectModule, MatSnackBarModule, MatDividerModule, MatTooltipModule,
+    MatProgressSpinnerModule, MatProgressBarModule, MatSelectModule, MatSnackBarModule,
+    MatDividerModule, MatTooltipModule, MatButtonToggleModule,
   ],
+  encapsulation: ViewEncapsulation.None,
   template: `
     <div class="editor-container" *ngIf="chapter">
       <div class="editor-header">
@@ -88,18 +93,42 @@ import { Chapter } from '../../models/report.model';
             </button>
           </mat-card>
 
-          <!-- Content editor -->
+          <!-- AI progress bar -->
+          <div *ngIf="generating" class="ai-gen-progress">
+            <div class="ai-gen-progress-header">
+              <mat-spinner diameter="18"></mat-spinner>
+              <span>Generation IA en cours...</span>
+            </div>
+            <mat-progress-bar mode="indeterminate" color="accent"></mat-progress-bar>
+          </div>
+
+          <!-- Content editor / preview -->
           <mat-card class="content-card">
             <div class="content-header">
               <h3>Contenu</h3>
-              <span class="word-count" *ngIf="chapter.content">
-                {{ chapter.content.split(' ').length }} mots - ~{{ Math.ceil(chapter.content.split(' ').length / 300) }} page(s)
-              </span>
+              <div class="content-header-right">
+                <span class="word-count" *ngIf="chapter.content">
+                  {{ chapter.content.split(' ').length }} mots - ~{{ Math.ceil(chapter.content.split(' ').length / 300) }} page(s)
+                </span>
+                <mat-button-toggle-group [(value)]="editorMode" class="editor-mode-toggle">
+                  <mat-button-toggle value="edit"><mat-icon>edit</mat-icon> Editer</mat-button-toggle>
+                  <mat-button-toggle value="preview"><mat-icon>visibility</mat-icon> Apercu</mat-button-toggle>
+                </mat-button-toggle-group>
+              </div>
             </div>
-            <mat-form-field appearance="outline" class="full-width">
+
+            <!-- Edit mode -->
+            <mat-form-field *ngIf="editorMode === 'edit'" appearance="outline" class="full-width">
               <textarea matInput [(ngModel)]="chapter.content" rows="25"
                 placeholder="Rédigez le contenu de ce chapitre..."></textarea>
             </mat-form-field>
+
+            <!-- Preview mode -->
+            <div *ngIf="editorMode === 'preview' && chapter.content"
+              class="rendered-content" [innerHTML]="renderMarkdown(chapter.content)"></div>
+            <p *ngIf="editorMode === 'preview' && !chapter.content" class="empty-preview">
+              Aucun contenu. Utilisez le mode Editer ou les outils IA pour generer du contenu.
+            </p>
           </mat-card>
 
           <!-- Source references -->
@@ -179,7 +208,33 @@ import { Chapter } from '../../models/report.model';
     .content-card { padding: 16px; }
     .content-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
     .content-header h3 { margin: 0; }
+    .content-header-right { display: flex; align-items: center; gap: 16px; }
     .word-count { color: #888; font-size: 13px; }
+    .editor-mode-toggle .mat-button-toggle-label-content { display: flex; align-items: center; gap: 4px; font-size: 13px; }
+    .editor-mode-toggle mat-icon { font-size: 18px; width: 18px; height: 18px; }
+    .ai-gen-progress { margin-bottom: 12px; padding: 12px 16px; background: #f3e5f5; border-radius: 8px; }
+    .ai-gen-progress-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #7b1fa2; font-weight: 500; }
+    .rendered-content { padding: 20px; min-height: 300px; line-height: 1.7; font-size: 14px; color: #333; }
+    .rendered-content h2, .rendered-content h3 { font-size: 17px; font-weight: 700; color: #1B3A5C; margin: 24px 0 10px 0; padding-bottom: 4px; border-bottom: 1px solid #e0e0e0; }
+    .rendered-content h2:first-child, .rendered-content h3:first-child { margin-top: 0; }
+    .rendered-content h4 { font-size: 15px; font-weight: 600; color: #2C5F8A; margin: 18px 0 8px 0; }
+    .rendered-content h5 { font-size: 14px; font-weight: 600; color: #37474f; margin: 14px 0 6px 0; }
+    .rendered-content p { margin: 0 0 12px 0; text-align: justify; }
+    .rendered-content ul, .rendered-content ol { margin: 6px 0 12px 0; padding-left: 28px; }
+    .rendered-content ul { list-style-type: disc; }
+    .rendered-content ul ul { list-style-type: circle; margin: 2px 0; }
+    .rendered-content ol { list-style-type: decimal; }
+    .rendered-content li { margin-bottom: 4px; line-height: 1.6; }
+    .rendered-content strong { color: #1B3A5C; }
+    .rendered-content em { color: #555; }
+    .rendered-content hr { border: none; border-top: 1px solid #ccc; margin: 20px 0; }
+    .rendered-content code { background: #e8eaf6; padding: 1px 5px; border-radius: 3px; font-size: 13px; }
+    .rendered-content .table-wrap { overflow-x: auto; margin: 16px 0; }
+    .rendered-content table { border-collapse: collapse; width: 100%; font-size: 14px; }
+    .rendered-content th, .rendered-content td { border: 1px solid #ccc; padding: 10px 12px; text-align: left; }
+    .rendered-content th { background: #e3f2fd; color: #1B3A5C; font-weight: 600; }
+    .rendered-content tr:nth-child(even) td { background: #fafafa; }
+    .empty-preview { color: #aaa; font-style: italic; padding: 20px; }
     .full-width { width: 100%; }
     .refs-card { padding: 16px; margin-top: 12px; }
     .refs-card h4 { display: flex; align-items: center; gap: 6px; margin: 0 0 8px; }
@@ -215,7 +270,9 @@ export class ChapterEditorComponent implements OnInit {
   showCustomPrompt = false;
   customPrompt = '';
   newNote = '';
+  editorMode: 'edit' | 'preview' = 'preview';
   Math = Math;
+  renderMarkdown = renderMarkdown;
 
   constructor(
     private route: ActivatedRoute,
