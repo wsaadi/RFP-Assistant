@@ -335,8 +335,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <button mat-raised-button color="accent" (click)="aiGenerate(ch.id)"
                       [disabled]="aiProcessing[ch.id]"
                       matTooltip="Generer le contenu a partir de l'AO et de l'ancienne reponse">
-                      <mat-spinner *ngIf="aiProcessing[ch.id]" diameter="16"></mat-spinner>
-                      <mat-icon *ngIf="!aiProcessing[ch.id]">auto_awesome</mat-icon>
+                      <mat-icon>auto_awesome</mat-icon>
                       {{ ch.content ? 'Regenerer' : 'Remplir avec l\'IA' }}
                     </button>
                     <button mat-icon-button (click)="toggleAiPrompt(ch.id)" matTooltip="Instruction personnalisee a l'IA">
@@ -345,6 +344,15 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <button mat-icon-button color="warn" (click)="deleteSingleChapter(ch.id)" matTooltip="Supprimer ce chapitre">
                       <mat-icon>delete</mat-icon>
                     </button>
+                  </div>
+
+                  <!-- AI progress bar -->
+                  <div *ngIf="aiProcessing[ch.id]" class="ai-progress-section">
+                    <div class="ai-progress-header">
+                      <mat-spinner diameter="16"></mat-spinner>
+                      <span>Generation IA en cours...</span>
+                    </div>
+                    <mat-progress-bar mode="indeterminate" color="accent"></mat-progress-bar>
                   </div>
 
                   <!-- AI custom prompt -->
@@ -364,6 +372,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       <button mat-button (click)="toggleAiPrompt(ch.id)">Annuler</button>
                     </div>
                   </div>
+
+                  <!-- Content preview -->
+                  <div *ngIf="ch.content" class="ch-content-preview" [innerHTML]="renderMarkdown(ch.content)"></div>
 
                   <!-- Sub-chapters -->
                   <div *ngIf="ch.children?.length" class="sub-chapters">
@@ -395,6 +406,14 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                           <mat-icon>delete_outline</mat-icon>
                         </button>
                       </div>
+                      <!-- AI progress bar for sub-chapter -->
+                      <div *ngIf="aiProcessing[sub.id]" class="ai-progress-section">
+                        <div class="ai-progress-header">
+                          <mat-spinner diameter="16"></mat-spinner>
+                          <span>Generation IA en cours...</span>
+                        </div>
+                        <mat-progress-bar mode="indeterminate" color="accent"></mat-progress-bar>
+                      </div>
                       <!-- AI custom prompt for sub-chapter -->
                       <div *ngIf="aiPromptVisible[sub.id]" class="ai-prompt-section sub-ai-prompt">
                         <mat-form-field appearance="outline" class="full-width">
@@ -412,6 +431,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                           <button mat-button (click)="toggleAiPrompt(sub.id)">Annuler</button>
                         </div>
                       </div>
+                      <!-- Sub-chapter content preview -->
+                      <div *ngIf="sub.content" class="ch-content-preview sub-content-preview" [innerHTML]="renderMarkdown(sub.content)"></div>
                     </div>
                   </div>
                 </mat-expansion-panel>
@@ -511,10 +532,24 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .ch-desc { color: #666; font-size: 13px; }
     .ch-req { font-size: 13px; background: #f5f5f5; padding: 8px; border-radius: 4px; }
     .ch-actions { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
+    .ai-progress-section { margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 8px; }
+    .ai-progress-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #7b1fa2; font-weight: 500; }
     .ai-prompt-section { margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 8px; }
     .ai-prompt-section .full-width { width: 100%; }
     .ai-prompt-actions { display: flex; gap: 8px; align-items: center; }
     .sub-ai-prompt { margin-left: 0; }
+    .ch-content-preview {
+      margin-top: 12px; padding: 16px 20px; background: #fafafa; border: 1px solid #e0e0e0;
+      border-radius: 8px; font-size: 14px; line-height: 1.7; color: #333; max-height: 300px; overflow-y: auto;
+    }
+    .ch-content-preview h3 { font-size: 15px; font-weight: 600; color: #1B3A5C; margin: 16px 0 6px 0; }
+    .ch-content-preview h3:first-child { margin-top: 0; }
+    .ch-content-preview h4 { font-size: 14px; font-weight: 600; color: #2C5F8A; margin: 12px 0 4px 0; }
+    .ch-content-preview p { margin: 0 0 8px 0; }
+    .ch-content-preview ul { margin: 4px 0 8px 0; padding-left: 20px; }
+    .ch-content-preview li { margin-bottom: 4px; }
+    .ch-content-preview strong { color: #1B3A5C; }
+    .sub-content-preview { max-height: 200px; margin-top: 8px; font-size: 13px; }
     .sub-chapters { margin-top: 12px; padding-left: 24px; }
     .sub-chapter-block { border-bottom: 1px solid #eee; }
     .sub-chapter-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
@@ -935,6 +970,52 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       done: 'Termine',
     };
     return labels[step] || step;
+  }
+
+  // ── Markdown rendering ──
+
+  renderMarkdown(text: string): string {
+    if (!text) return '';
+    // Escape HTML to prevent XSS
+    let html = text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    // Headers: ### or ## or # at start of line
+    html = html.replace(/^###\s+(.+)$/gm, '<h4>$1</h4>');
+    html = html.replace(/^##\s+(.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^#\s+(.+)$/gm, '<h3>$1</h3>');
+
+    // Bold: **text**
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    // Italic: *text*
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+    // Bullet lists: lines starting with - or *
+    html = html.replace(/^[\-\*]\s+(.+)$/gm, '<li>$1</li>');
+    // Wrap consecutive <li> in <ul>
+    html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
+
+    // Paragraphs: double newlines
+    html = html.replace(/\n\n+/g, '</p><p>');
+    // Single newlines (not inside tags) to <br>
+    html = html.replace(/([^>])\n([^<])/g, '$1<br>$2');
+
+    // Wrap in <p> if not starting with a block element
+    if (!html.match(/^\s*<[hup]/)) {
+      html = '<p>' + html + '</p>';
+    }
+
+    // Clean up empty paragraphs
+    html = html.replace(/<p>\s*<\/p>/g, '');
+    // Fix <p> wrapping block elements
+    html = html.replace(/<p>\s*(<h[34]>)/g, '$1');
+    html = html.replace(/(<\/h[34]>)\s*<\/p>/g, '$1');
+    html = html.replace(/<p>\s*(<ul>)/g, '$1');
+    html = html.replace(/(<\/ul>)\s*<\/p>/g, '$1');
+
+    return html;
   }
 
   // ── Per-chapter AI actions ──
