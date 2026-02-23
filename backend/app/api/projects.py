@@ -441,11 +441,11 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             resp_docs = [
                 (str(rd.id), rd.title, rd.description)
                 for rd in all_docs
-                if rd.content_type == ContentType.REDACTION or rd.content_type == "redaction"
+                if rd.content_type == ContentType.REDACTION or rd.content_type in ("redaction", "REDACTION")
             ]
             completion_docs_count = sum(
                 1 for rd in all_docs
-                if rd.content_type == ContentType.COMPLETION or rd.content_type == "completion"
+                if rd.content_type == ContentType.COMPLETION or rd.content_type in ("completion", "COMPLETION")
             )
 
         # ── Phase 3: Generate structure ──
@@ -999,7 +999,7 @@ async def list_response_documents(
             title=d.title,
             description=d.description,
             expected_format=d.expected_format.value,
-            content_type=d.content_type.value if hasattr(d.content_type, 'value') else (d.content_type or "redaction"),
+            content_type=d.content_type.value if hasattr(d.content_type, 'value') else (d.content_type or "REDACTION").lower(),
             is_selected=d.is_selected,
             order=d.order,
             rfp_source=d.rfp_source,
@@ -1032,6 +1032,17 @@ async def update_response_document(
     for field in ["title", "description", "expected_format", "content_type", "is_selected", "order"]:
         value = getattr(request, field, None)
         if value is not None:
+            # Convert string values to proper enums for SQLAlchemy
+            if field == "content_type" and isinstance(value, str):
+                try:
+                    value = ContentType(value)
+                except ValueError:
+                    value = ContentType.REDACTION
+            elif field == "expected_format" and isinstance(value, str):
+                try:
+                    value = DocumentFormat(value)
+                except ValueError:
+                    value = DocumentFormat.OTHER
             setattr(doc, field, value)
 
     await db.commit()
@@ -1046,7 +1057,7 @@ async def update_response_document(
         id=str(doc.id), project_id=str(doc.project_id),
         title=doc.title, description=doc.description,
         expected_format=doc.expected_format.value,
-        content_type=doc.content_type.value if hasattr(doc.content_type, 'value') else (doc.content_type or "redaction"),
+        content_type=doc.content_type.value if hasattr(doc.content_type, 'value') else (doc.content_type or "REDACTION").lower(),
         is_selected=doc.is_selected, order=doc.order,
         rfp_source=doc.rfp_source,
         fill_content=doc.fill_content or "",
