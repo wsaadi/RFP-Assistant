@@ -1856,64 +1856,173 @@ async def fill_excel_document(
 
 # ── Fill PDF endpoint ──────────────────────────────────────────────
 
-def _read_pdf_structure(file_path: str) -> str:
-    """Read a PDF file and return a textual representation of its structure.
-    Includes page-by-page text, form field names, and table-like layouts."""
+def _extract_pdf_zones(file_path: str) -> dict:
+    """Extract PDF layout and identify fillable zones with real coordinates.
+
+    Returns a dict with:
+      - "has_form_fields": bool
+      - "form_fields": list of form field dicts (for form PDFs)
+      - "zones": list of fillable zone dicts (for non-form PDFs)
+      - "text_for_ai": formatted text describing zones for AI consumption
+    """
     import fitz
     doc = fitz.open(file_path)
-    parts = []
+    result = {"has_form_fields": False, "form_fields": [], "zones": [], "text_for_ai": ""}
 
-    # Extract form fields if any
-    form_fields = []
+    # ── 1. Check for interactive form fields ──
     for page_num in range(len(doc)):
         page = doc[page_num]
-        widgets = page.widgets()
-        if widgets:
-            for w in widgets:
-                field_name = w.field_name or ""
-                field_type = w.field_type_string or ""
-                field_value = w.field_value or ""
-                form_fields.append(
-                    f"  Page {page_num + 1}: Champ '{field_name}' (type={field_type}, valeur actuelle='{field_value}')"
-                )
+        for w in page.widgets() or []:
+            result["has_form_fields"] = True
+            result["form_fields"].append({
+                "page": page_num + 1,
+                "field_name": w.field_name or "",
+                "field_type": w.field_type_string or "",
+                "field_value": w.field_value or "",
+            })
 
-    if form_fields:
-        parts.append("=== CHAMPS DE FORMULAIRE PDF ===")
-        parts.extend(form_fields)
-        parts.append("")
+    if result["has_form_fields"]:
+        # For form PDFs, we just list the fields for the AI
+        parts = ["=== CHAMPS DE FORMULAIRE PDF ==="]
+        for f in result["form_fields"]:
+            parts.append(
+                f"  Page {f['page']}: Champ '{f['field_name']}' "
+                f"(type={f['field_type']}, valeur actuelle='{f['field_value']}')"
+            )
+        # Also add text context per page
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            text = page.get_text("text")
+            if text.strip():
+                parts.append(f"\n=== TEXTE PAGE {page_num + 1} ===")
+                parts.append(text[:5000])
+        result["text_for_ai"] = "\n".join(parts)
+        doc.close()
+        return result
 
-    # Extract text content page by page
+    # ── 2. For non-form PDFs: extract layout with zone detection ──
+    zones = []
+    ai_parts = []
+    zone_id = 0
+
     for page_num in range(len(doc)):
         page = doc[page_num]
-        text = page.get_text("text")
-        if text.strip():
-            parts.append(f"=== PAGE {page_num + 1} ===")
-            # Limit per page to avoid excessive context
-            parts.append(text[:5000])
+        page_width = page.rect.width
+        text_dict = page.get_text("dict")
+        page_zones = []
 
+        for block in text_dict.get("blocks", []):
+            if block.get("type") != 0:  # text blocks only
+                continue
+
+            for line in block.get("lines", []):
+                spans = line.get("spans", [])
+                if not spans:
+                    continue
+
+                line_text = "".join(s["text"] for s in spans).strip()
+                if not line_text:
+                    continue
+
+                line_bbox = line["bbox"]  # [x0, y0, x1, y1]
+                last_span = spans[-1]
+                last_span_bbox = last_span["bbox"]
+                font_size = last_span.get("size", 10)
+
+                # ── Zone type A: label ending with ":" or ":" with space after ──
+                if line_text.rstrip().endswith(":") or line_text.rstrip().endswith(": "):
+                    space_after = page_width - last_span_bbox[2]
+                    if space_after > 40:  # enough room to fill after the colon
+                        z = {
+                            "id": f"z{zone_id}",
+                            "page": page_num + 1,
+                            "type": "after_label",
+                            "label": line_text,
+                            "x": last_span_bbox[2] + 4,
+                            "y": last_span_bbox[3] - 2,  # baseline aligned
+                            "max_width": space_after - 10,
+                            "font_size": min(font_size, 10),
+                        }
+                        zones.append(z)
+                        page_zones.append(z)
+                        zone_id += 1
+
+                # ── Zone type B: line with dots/underscores (fill-in line) ──
+                elif ("…" in line_text or "..." in line_text or "___" in line_text
+                      or ". . ." in line_text):
+                    # Find the start of the dots/underscores
+                    first_span = spans[0]
+                    z = {
+                        "id": f"z{zone_id}",
+                        "page": page_num + 1,
+                        "type": "fill_line",
+                        "label": line_text[:80],
+                        "x": first_span["bbox"][0],
+                        "y": last_span_bbox[3] - 2,
+                        "max_width": last_span_bbox[2] - first_span["bbox"][0],
+                        "font_size": min(font_size, 10),
+                    }
+                    zones.append(z)
+                    page_zones.append(z)
+                    zone_id += 1
+
+                # ── Zone type C: line ending with empty space (> 50% of page) ──
+                elif last_span_bbox[2] < page_width * 0.5 and len(line_text) < 40:
+                    # Short label with lots of space → likely a field
+                    space_after = page_width - last_span_bbox[2]
+                    if space_after > 150:
+                        z = {
+                            "id": f"z{zone_id}",
+                            "page": page_num + 1,
+                            "type": "after_short_label",
+                            "label": line_text,
+                            "x": last_span_bbox[2] + 8,
+                            "y": last_span_bbox[3] - 2,
+                            "max_width": space_after - 15,
+                            "font_size": min(font_size, 10),
+                        }
+                        zones.append(z)
+                        page_zones.append(z)
+                        zone_id += 1
+
+        # Build AI-friendly text for this page
+        if page_zones:
+            ai_parts.append(f"\n=== PAGE {page_num + 1} — ZONES REMPLISSABLES ===")
+            # Also include full page text for context
+            page_text = page.get_text("text")
+            if page_text.strip():
+                ai_parts.append(f"[Contenu de la page pour contexte:]\n{page_text[:3000]}")
+            ai_parts.append("")
+            for z in page_zones:
+                ai_parts.append(f'  {z["id"]}: ({z["type"]}) Label: "{z["label"]}"')
+        else:
+            # Include page text even without zones for context
+            page_text = page.get_text("text")
+            if page_text.strip():
+                ai_parts.append(f"\n=== PAGE {page_num + 1} (pas de zones détectées) ===")
+                ai_parts.append(page_text[:3000])
+
+    result["zones"] = zones
+    result["text_for_ai"] = "\n".join(ai_parts)
     doc.close()
-    return "\n".join(parts)
+    return result
 
 
-def _fill_pdf_with_data(file_path: str, fill_data: list) -> bytes:
-    """Open a PDF file, fill it with AI-generated data, return modified bytes.
+def _fill_pdf_with_zones(file_path: str, fill_data: list, zone_map: dict) -> bytes:
+    """Fill a PDF using pre-computed zone coordinates.
 
-    fill_data entries can be:
-    - Form field fills: {"field": "field_name", "value": "some value"}
-    - Text annotations: {"page": 1, "x": 100, "y": 200, "value": "text to add", "font_size": 10}
+    fill_data: [{"zone_id": "z0", "value": "text"}, ...] or [{"field": ..., "value": ...}, ...]
+    zone_map: dict mapping zone_id → zone dict with x, y, page, font_size, max_width
     """
     import fitz
     doc = fitz.open(file_path)
 
-    # Separate form field fills from text annotations
+    # ── Handle form field fills ──
     field_fills = [e for e in fill_data if e.get("field")]
-    text_annotations = [e for e in fill_data if e.get("page") is not None and not e.get("field")]
-
-    # Fill form fields
     if field_fills:
         for page_num in range(len(doc)):
             page = doc[page_num]
-            for widget in page.widgets():
+            for widget in page.widgets() or []:
                 field_name = widget.field_name or ""
                 for entry in field_fills:
                     if entry["field"].strip().lower() == field_name.strip().lower():
@@ -1923,29 +2032,49 @@ def _fill_pdf_with_data(file_path: str, fill_data: list) -> bytes:
                             widget.update()
                         break
 
-    # Add text annotations (for non-form PDFs)
-    if text_annotations:
-        for entry in text_annotations:
-            page_idx = int(entry["page"]) - 1  # 1-based to 0-based
-            if page_idx < 0 or page_idx >= len(doc):
-                continue
-            page = doc[page_idx]
-            x = float(entry.get("x", 72))
-            y = float(entry.get("y", 72))
-            value = entry.get("value", "")
-            font_size = float(entry.get("font_size", 10))
+    # ── Handle zone-based fills ──
+    zone_fills = [e for e in fill_data if e.get("zone_id")]
+    filled_count = 0
+    for entry in zone_fills:
+        zone_id = entry.get("zone_id", "")
+        value = str(entry.get("value", "")).strip()
 
-            if not value or str(value).strip() == "[A COMPLÉTER]":
-                continue
+        if not value or value == "[A COMPLÉTER]":
+            continue
+        if zone_id not in zone_map:
+            logger.warning("fill-pdf: zone_id '%s' not found in zone_map, skipping", zone_id)
+            continue
 
-            point = fitz.Point(x, y)
+        zone = zone_map[zone_id]
+        page_idx = int(zone["page"]) - 1
+        if page_idx < 0 or page_idx >= len(doc):
+            continue
+
+        page = doc[page_idx]
+        x = float(zone["x"])
+        y = float(zone["y"])
+        font_size = float(zone.get("font_size", 9))
+        max_width = float(zone.get("max_width", 300))
+
+        # Truncate value if it would overflow the available width
+        # Approximate: 1 char ≈ font_size * 0.5 points wide
+        max_chars = int(max_width / (font_size * 0.5))
+        if len(value) > max_chars:
+            value = value[:max_chars - 1] + "…"
+
+        point = fitz.Point(x, y)
+        try:
             page.insert_text(
                 point,
-                str(value),
+                value,
                 fontsize=font_size,
-                color=(0, 0, 0.6),  # Dark blue to distinguish from original
+                color=(0, 0, 0.4),  # Dark blue to distinguish filled text
             )
+            filled_count += 1
+        except Exception as exc:
+            logger.warning("fill-pdf: failed to insert text at zone '%s': %s", zone_id, exc)
 
+    logger.info("fill-pdf: filled %d zones out of %d entries", filled_count, len(zone_fills))
     output = doc.tobytes()
     doc.close()
     return output
@@ -2049,8 +2178,13 @@ async def fill_pdf_document(
         )
     logger.info("fill-pdf: matched PDF source '%s' for deliverable '%s'", pdf_doc.original_filename, resp_doc.title)
 
-    # 3. Read PDF structure
-    pdf_structure = _read_pdf_structure(pdf_doc.file_path)
+    # 3. Extract PDF zones (layout analysis with real coordinates)
+    pdf_zones = _extract_pdf_zones(pdf_doc.file_path)
+    logger.info(
+        "fill-pdf '%s': has_form_fields=%s, detected %d zones, text_for_ai=%d chars",
+        resp_doc.title, pdf_zones["has_form_fields"],
+        len(pdf_zones["zones"]), len(pdf_zones["text_for_ai"]),
+    )
 
     # 4. Get project for workspace_id
     proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
@@ -2086,21 +2220,23 @@ async def fill_pdf_document(
 
     # 6. Call AI to generate structured fill data
     logger.info(
-        "fill-pdf %s: pdf_structure=%d chars, old_response=%d chars, relevant_chunks=%d, new_rfp=%d chars",
-        resp_doc.title, len(pdf_structure), len(old_response_with_context),
+        "fill-pdf %s: old_response=%d chars, relevant_chunks=%d, new_rfp=%d chars",
+        resp_doc.title, len(old_response_with_context),
         len(relevant_chunks), len(anon_new_rfp),
     )
     ai_service = await _get_ai_service(project.workspace_id, db)
     fill_data = await ai_service.generate_pdf_fill_data(
         document_title=resp_doc.title,
-        pdf_structure=pdf_structure,
+        pdf_structure=pdf_zones["text_for_ai"],
         new_rfp_content=anon_new_rfp,
         old_response_content=old_response_with_context,
+        has_form_fields=pdf_zones["has_form_fields"],
     )
     logger.info("fill-pdf %s: AI returned %d fill entries", resp_doc.title, len(fill_data))
 
     # 7. Fill the PDF and return as download
-    filled_bytes = _fill_pdf_with_data(pdf_doc.file_path, fill_data)
+    zone_map = {z["id"]: z for z in pdf_zones["zones"]}
+    filled_bytes = _fill_pdf_with_zones(pdf_doc.file_path, fill_data, zone_map)
 
     base_name = os.path.splitext(pdf_doc.original_filename)[0]
     output_filename = f"{base_name}_rempli.pdf"
