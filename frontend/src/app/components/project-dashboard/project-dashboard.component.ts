@@ -428,7 +428,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       <span class="ch-numbering">{{ i + 1 }}.</span> {{ ch.title }}
                     </mat-panel-title>
                     <mat-panel-description>
-                      {{ ch.chapter_type }} - {{ ch.content ? (ch.content.split(' ').length + ' mots') : 'Vide' }}
+                      {{ chapterTypeLabel(ch.chapter_type) }} - {{ ch.content ? (ch.content.split(' ').length + ' mots') : 'Vide' }}
                     </mat-panel-description>
                   </mat-expansion-panel-header>
 
@@ -443,7 +443,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       [disabled]="aiProcessing[ch.id]"
                       matTooltip="Generer le contenu a partir de l'AO et de l'ancienne reponse">
                       <mat-icon>auto_awesome</mat-icon>
-                      {{ ch.content ? 'Regenerer' : 'Remplir avec l\'IA' }}
+                      {{ ch.content ? 'Regenerer' : 'Remplir avec IA' }}
                     </button>
                     <button mat-icon-button (click)="toggleAiPrompt(ch.id)" matTooltip="Instruction personnalisee a l'IA">
                       <mat-icon>psychology</mat-icon>
@@ -1528,6 +1528,16 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       not_started: '○', in_progress: '◐', completed: '●', needs_review: '◑', validated: '✓',
     };
     return icons[status] || '○';
+  }
+
+  chapterTypeLabel(type: string): string {
+    const labels: Record<string, string> = {
+      chapter: 'Chapitre',
+      sub_chapter: 'Sous-chapitre',
+      annexe: 'Annexe',
+      document_to_provide: 'Document a fournir',
+    };
+    return labels[type] || type;
   }
 
   formatIcon(format: string): string {
