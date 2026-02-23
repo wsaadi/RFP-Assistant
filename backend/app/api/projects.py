@@ -1,9 +1,12 @@
 """RFP Project API routes."""
+import io
+import os
 import uuid
 import asyncio
 import logging
 from typing import Dict
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
@@ -1605,4 +1608,196 @@ async def get_anonymization_report(
         entity_groups=entity_groups,
         sample_before=sample_before,
         sample_after=sample_after,
+    )
+
+
+# ── Fill Excel endpoint ─────────────────────────────────────────────
+
+def _read_excel_structure(file_path: str) -> str:
+    """Read an Excel file and return a textual representation of its structure with cell references."""
+    from openpyxl import load_workbook
+    wb = load_workbook(file_path, data_only=True)
+    parts = []
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        parts.append(f"\n=== Onglet: {sheet_name} ===")
+        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
+            row_cells = []
+            for cell in row:
+                coord = cell.coordinate  # e.g. "A1", "B2"
+                val = cell.value
+                if val is not None:
+                    row_cells.append(f"{coord}={val}")
+                else:
+                    row_cells.append(f"{coord}=(vide)")
+            parts.append(" | ".join(row_cells))
+    wb.close()
+    return "\n".join(parts)
+
+
+def _fill_excel_with_data(file_path: str, fill_data: list) -> bytes:
+    """Open an Excel file, fill cells from AI-generated data, return modified bytes."""
+    from openpyxl import load_workbook
+    import re as _re
+    wb = load_workbook(file_path)
+
+    for entry in fill_data:
+        sheet_name = entry.get("sheet", "")
+        cell_ref = entry.get("cell", "")
+        value = entry.get("value")
+
+        if not sheet_name or not cell_ref or value is None:
+            continue
+        if isinstance(value, str) and value.strip() == "[A COMPLÉTER]":
+            continue  # skip placeholder values
+
+        # Find the sheet (try exact match, then case-insensitive)
+        ws = None
+        if sheet_name in wb.sheetnames:
+            ws = wb[sheet_name]
+        else:
+            for sn in wb.sheetnames:
+                if sn.lower() == sheet_name.lower():
+                    ws = wb[sn]
+                    break
+        if ws is None:
+            continue
+
+        # Validate cell reference format
+        if not _re.match(r'^[A-Z]{1,3}[0-9]+$', cell_ref.upper()):
+            continue
+
+        try:
+            ws[cell_ref.upper()] = value
+        except Exception:
+            continue
+
+    output = io.BytesIO()
+    wb.save(output)
+    wb.close()
+    output.seek(0)
+    return output.read()
+
+
+@router.post("/{project_id}/fill-excel/{doc_id}")
+async def fill_excel_document(
+    project_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a filled Excel file for a completion-type document (BPU, DQE, etc.)
+    by using pricing data from the old response and the original Excel template from the DCE."""
+
+    # 1. Get the response document
+    result = await db.execute(
+        select(ResponseDocument)
+        .where(ResponseDocument.id == doc_id, ResponseDocument.project_id == project_id)
+    )
+    resp_doc = result.scalar_one_or_none()
+    if not resp_doc:
+        raise HTTPException(status_code=404, detail="Document livrable non trouvé")
+
+    # 2. Find the source Excel file in uploaded DCE documents
+    # Try matching by rfp_source (filename reference) or by title keywords
+    doc_title_lower = (resp_doc.title or "").lower()
+    rfp_source_lower = (resp_doc.rfp_source or "").lower()
+
+    # Search for Excel files in the project's new_rfp documents
+    docs_result = await db.execute(
+        select(Document)
+        .where(Document.project_id == project_id)
+        .where(Document.category == DocumentCategory.NEW_RFP)
+    )
+    all_dce_docs = docs_result.scalars().all()
+
+    # Find the best matching Excel file
+    excel_doc = None
+    for doc in all_dce_docs:
+        if doc.file_type.value not in ("xlsx", "xls"):
+            continue
+        fname_lower = (doc.original_filename or "").lower()
+        # Match by rfp_source reference or title similarity
+        if rfp_source_lower and rfp_source_lower in fname_lower:
+            excel_doc = doc
+            break
+        if fname_lower and fname_lower in rfp_source_lower:
+            excel_doc = doc
+            break
+        # Fuzzy: check for BPU/DQE keywords
+        for kw in ["bpu", "bordereau", "dqe", "dpgf", "prix"]:
+            if kw in doc_title_lower and kw in fname_lower:
+                excel_doc = doc
+                break
+        if excel_doc:
+            break
+
+    # Fallback: just pick the first Excel file
+    if not excel_doc:
+        for doc in all_dce_docs:
+            if doc.file_type.value in ("xlsx", "xls"):
+                excel_doc = doc
+                break
+
+    if not excel_doc or not os.path.isfile(excel_doc.file_path):
+        raise HTTPException(
+            status_code=404,
+            detail="Aucun fichier Excel source trouvé dans le DCE. "
+                   "Assurez-vous d'avoir uploadé le BPU Excel dans les documents du nouvel AO.",
+        )
+
+    # 3. Read Excel structure
+    excel_structure = _read_excel_structure(excel_doc.file_path)
+
+    # 4. Get project for workspace_id
+    proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = proj_result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    # 5. Load context: new RFP + old response (with pricing)
+    anon_new_rfp, anon_old_response = await asyncio.gather(
+        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+    )
+
+    # Also do a targeted vector search for pricing info
+    pricing_chunks = VectorService.search(
+        str(project_id),
+        f"prix unitaire tarif {resp_doc.title} BPU bordereau montant",
+        top_k=10,
+        category_filter="old_response",
+    )
+    pricing_context = "\n\n".join([
+        f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
+        for c in pricing_chunks
+    ])
+
+    old_response_with_pricing = anon_old_response
+    if pricing_context:
+        old_response_with_pricing = (
+            f"=== EXTRAITS PERTINENTS SUR LES PRIX ===\n{pricing_context}\n\n"
+            f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
+        )
+
+    # 6. Call AI to generate structured fill data
+    ai_service = await _get_ai_service(project.workspace_id, db)
+    fill_data = await ai_service.generate_excel_fill_data(
+        document_title=resp_doc.title,
+        excel_structure=excel_structure,
+        new_rfp_content=anon_new_rfp,
+        old_response_content=old_response_with_pricing,
+    )
+
+    # 7. Fill the Excel and return as download
+    filled_bytes = _fill_excel_with_data(excel_doc.file_path, fill_data)
+
+    # Generate output filename
+    base_name = os.path.splitext(excel_doc.original_filename)[0]
+    output_filename = f"{base_name}_rempli.xlsx"
+
+    return StreamingResponse(
+        io.BytesIO(filled_bytes),
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{output_filename}"'},
     )

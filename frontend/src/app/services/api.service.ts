@@ -209,6 +209,13 @@ export class ApiService {
     return this.http.get<FillDeliverablesStatus>(`${this.baseUrl}/projects/${projectId}/fill-deliverables-status`);
   }
 
+  fillExcelDocument(projectId: string, docId: string): Observable<Blob> {
+    return this.http.post(
+      `${this.baseUrl}/projects/${projectId}/fill-excel/${docId}`, {},
+      { responseType: 'blob' }
+    );
+  }
+
   analyzeCompliance(projectId: string): Observable<{ analysis: ComplianceAnalysis }> {
     return this.http.post<{ analysis: ComplianceAnalysis }>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`, {});
   }

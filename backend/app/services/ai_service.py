@@ -893,6 +893,72 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
             timeout=600, on_progress=on_progress,
         )
 
+    async def generate_excel_fill_data(
+        self,
+        document_title: str,
+        excel_structure: str,
+        new_rfp_content: str,
+        old_response_content: str = "",
+    ) -> List[Dict]:
+        """Generate structured JSON data to fill an Excel BPU/DQE from old response pricing.
+
+        Returns a list of dicts: [{"sheet": str, "cell": str, "value": str|number}, ...]
+        """
+        system_prompt = f"""Tu es un expert senior en réponse aux appels d'offres, spécialisé dans le remplissage
+de Bordereaux de Prix Unitaires (BPU), DQE et DPGF.
+
+Le document à compléter est: **{document_title}**
+
+## Ta mission:
+Tu dois générer les VALEURS EXACTES à inscrire dans chaque cellule de l'Excel,
+en te basant sur l'ancienne réponse qui contient les tarifs/prix déjà pratiqués.
+
+## Règles STRICTES:
+1. Tu DOIS reprendre les prix de l'ancienne réponse quand ils existent
+2. Si un prix n'existe pas dans l'ancienne réponse, mets la valeur "[A COMPLÉTER]"
+3. Ne modifie PAS les cellules d'en-tête, de titre ou de structure (lignes d'entête, titres de colonnes)
+4. Ne remplis QUE les cellules qui sont vides ou qui attendent une valeur du candidat
+5. Pour les prix, utilise des NOMBRES (pas de texte) : 150.00, pas "150,00 €"
+6. Pour les textes (désignations, observations), utilise des chaînes de caractères
+
+## Format de sortie OBLIGATOIRE:
+Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
+[
+  {{"sheet": "Nom de l'onglet", "cell": "B5", "value": 150.00}},
+  {{"sheet": "Nom de l'onglet", "cell": "C5", "value": "Forfait"}},
+  ...
+]
+
+Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie."""
+
+        parts = [f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure}"]
+        parts.append(f"CONTENU DE L'APPEL D'OFFRES:\n{new_rfp_content[:30000]}")
+        if old_response_content:
+            parts.append(
+                f"ANCIENNE RÉPONSE (CONTIENT LES TARIFS À REPRENDRE):\n{old_response_content[:40000]}"
+            )
+
+        user_prompt = "\n\n---\n\n".join(parts)
+        user_prompt += (
+            f"\n\nGénère le JSON de remplissage pour le document '{document_title}'. "
+            "Reprends les tarifs de l'ancienne réponse. Retourne UNIQUEMENT le JSON."
+        )
+
+        raw = await self.generate(system_prompt, user_prompt, temperature=0.1, max_tokens=16000)
+
+        # Parse the JSON response
+        cleaned = _clean_json_response(raw)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            repaired = _repair_truncated_json(cleaned, target="array")
+            data = json.loads(repaired)
+
+        if not isinstance(data, list):
+            raise ValueError("AI response is not a JSON array")
+
+        return data
+
     async def execute_custom_prompt(self, content: str, prompt: str, context: str = "") -> str:
         """Execute a custom user prompt on content."""
         system_prompt = """Tu es un assistant expert en rédaction de réponses aux appels d'offres.
