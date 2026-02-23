@@ -96,15 +96,17 @@ async def lifespan(app: FastAPI):
             END $$
         """))
         # Add content_type enum and column to response_documents
+        # NOTE: SQLAlchemy stores Python enum member NAMES (uppercase) in PostgreSQL,
+        # so enum values must be uppercase to match.
         await conn.execute(text("""
             DO $$ BEGIN
-                CREATE TYPE content_type AS ENUM ('redaction', 'completion');
+                CREATE TYPE content_type AS ENUM ('REDACTION', 'COMPLETION');
             EXCEPTION WHEN duplicate_object THEN NULL;
             END $$
         """))
         await conn.execute(text("""
             DO $$ BEGIN
-                ALTER TABLE response_documents ADD COLUMN content_type content_type DEFAULT 'redaction';
+                ALTER TABLE response_documents ADD COLUMN content_type content_type DEFAULT 'REDACTION';
             EXCEPTION WHEN duplicate_column THEN NULL;
             END $$
         """))
