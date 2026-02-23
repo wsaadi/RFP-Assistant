@@ -50,16 +50,12 @@ import { DocumentPreview, PreviewChapter } from '../../models/report.model';
         <ng-container *ngFor="let ch of preview.chapters">
           <div class="page">
             <h2 class="chapter-title">{{ ch.numbering }} {{ ch.title }}</h2>
-            <div class="chapter-content" *ngIf="ch.content">
-              <p *ngFor="let para of ch.content.split('\\n\\n')">{{ para }}</p>
-            </div>
+            <div class="chapter-content" *ngIf="ch.content" [innerHTML]="renderMarkdown(ch.content)"></div>
             <p *ngIf="!ch.content" class="empty-content">[Section à compléter]</p>
 
             <ng-container *ngFor="let sub of ch.children">
               <h3 class="sub-title">{{ sub.numbering }} {{ sub.title }}</h3>
-              <div class="chapter-content" *ngIf="sub.content">
-                <p *ngFor="let para of sub.content.split('\\n\\n')">{{ para }}</p>
-              </div>
+              <div class="chapter-content" *ngIf="sub.content" [innerHTML]="renderMarkdown(sub.content)"></div>
               <p *ngIf="!sub.content" class="empty-content">[Section à compléter]</p>
             </ng-container>
           </div>
@@ -85,7 +81,19 @@ import { DocumentPreview, PreviewChapter } from '../../models/report.model';
     .toc-sub { padding-left: 24px; font-size: 14px; }
     .chapter-title { color: #1B3A5C; font-size: 20px; border-bottom: 2px solid #2C5F8A; padding-bottom: 8px; }
     .sub-title { color: #2C5F8A; font-size: 16px; margin-top: 24px; }
-    .chapter-content p { text-indent: 1em; line-height: 1.6; text-align: justify; }
+    .chapter-content { line-height: 1.7; }
+    .chapter-content p { margin: 0 0 10px 0; line-height: 1.7; text-align: justify; }
+    .chapter-content h3 { font-size: 16px; font-weight: 700; color: #1B3A5C; margin: 20px 0 8px 0; }
+    .chapter-content h4 { font-size: 15px; font-weight: 600; color: #2C5F8A; margin: 16px 0 6px 0; }
+    .chapter-content h5 { font-size: 14px; font-weight: 600; color: #37474f; margin: 12px 0 4px 0; }
+    .chapter-content ul, .chapter-content ol { margin: 6px 0 10px 0; padding-left: 28px; }
+    .chapter-content ul { list-style-type: disc; }
+    .chapter-content ul ul { list-style-type: circle; margin: 2px 0; }
+    .chapter-content ol { list-style-type: decimal; }
+    .chapter-content li { margin-bottom: 4px; line-height: 1.6; }
+    .chapter-content strong { color: #1B3A5C; }
+    .chapter-content hr { border: none; border-top: 1px solid #ccc; margin: 20px 0; }
+    .chapter-content code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
     .empty-content { color: #999; font-style: italic; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
     @media print { .no-print { display: none !important; } .page { border: none; page-break-after: always; } }
@@ -108,5 +116,55 @@ export class PreviewComponent implements OnInit {
 
   printPreview(): void {
     window.print();
+  }
+
+  renderMarkdown(text: string): string {
+    if (!text) return '';
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const inlineFormat = (s: string) => {
+      return esc(s)
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/`(.+?)`/g, '<code>$1</code>');
+    };
+    const lines = text.split('\n');
+    const out: string[] = [];
+    let inParagraph = false;
+    const listStack: string[] = [];
+    const closeAllLists = () => { while (listStack.length > 0) { out.push('</' + listStack.pop() + '>'); } };
+    const closeParagraph = () => { if (inParagraph) { out.push('</p>'); inParagraph = false; } };
+
+    for (const raw of lines) {
+      const trimmed = raw.trimEnd();
+      if (/^-{3,}$|^\*{3,}$/.test(trimmed.trim())) { closeParagraph(); closeAllLists(); out.push('<hr>'); continue; }
+      const headerMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+      if (headerMatch) {
+        closeParagraph(); closeAllLists();
+        const level = Math.min(headerMatch[1].length + 1, 5);
+        out.push(`<h${level}>${esc(headerMatch[2].replace(/\*\*/g, ''))}</h${level}>`);
+        continue;
+      }
+      const listMatch = trimmed.match(/^(\s*)([-*]|\d+[.)]) (.+)$/);
+      if (listMatch) {
+        closeParagraph();
+        const indent = listMatch[1].length;
+        const isOrdered = /^\d+[.)]/.test(listMatch[2]);
+        const listType = isOrdered ? 'ol' : 'ul';
+        const targetDepth = Math.floor(indent / 2) + 1;
+        while (listStack.length > targetDepth) { out.push('</' + listStack.pop() + '>'); }
+        if (listStack.length < targetDepth) { out.push('<' + listType + '>'); listStack.push(listType); }
+        if (listStack.length === targetDepth && listStack[listStack.length - 1] !== listType) {
+          out.push('</' + listStack.pop() + '>'); out.push('<' + listType + '>'); listStack.push(listType);
+        }
+        out.push('<li>' + inlineFormat(listMatch[3]) + '</li>');
+        continue;
+      }
+      if (listStack.length > 0) { closeAllLists(); }
+      if (trimmed.trim() === '') { closeParagraph(); continue; }
+      if (!inParagraph) { out.push('<p>'); inParagraph = true; } else { out.push('<br>'); }
+      out.push(inlineFormat(trimmed));
+    }
+    closeParagraph(); closeAllLists();
+    return out.join('');
   }
 }

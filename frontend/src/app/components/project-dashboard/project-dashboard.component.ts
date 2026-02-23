@@ -540,16 +540,27 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .sub-ai-prompt { margin-left: 0; }
     .ch-content-preview {
       margin-top: 12px; padding: 16px 20px; background: #fafafa; border: 1px solid #e0e0e0;
-      border-radius: 8px; font-size: 14px; line-height: 1.7; color: #333; max-height: 300px; overflow-y: auto;
+      border-radius: 8px; font-size: 13.5px; line-height: 1.7; color: #333; max-height: 400px; overflow-y: auto;
     }
-    .ch-content-preview h3 { font-size: 15px; font-weight: 600; color: #1B3A5C; margin: 16px 0 6px 0; }
-    .ch-content-preview h3:first-child { margin-top: 0; }
-    .ch-content-preview h4 { font-size: 14px; font-weight: 600; color: #2C5F8A; margin: 12px 0 4px 0; }
-    .ch-content-preview p { margin: 0 0 8px 0; }
-    .ch-content-preview ul { margin: 4px 0 8px 0; padding-left: 20px; }
+    .ch-content-preview h2, .ch-content-preview h3 {
+      font-size: 15px; font-weight: 700; color: #1B3A5C; margin: 20px 0 8px 0;
+      padding-bottom: 4px; border-bottom: 1px solid #e0e0e0;
+    }
+    .ch-content-preview h2:first-child, .ch-content-preview h3:first-child { margin-top: 0; }
+    .ch-content-preview h4 { font-size: 14px; font-weight: 600; color: #2C5F8A; margin: 16px 0 6px 0; }
+    .ch-content-preview h5 { font-size: 13.5px; font-weight: 600; color: #37474f; margin: 12px 0 4px 0; }
+    .ch-content-preview p { margin: 0 0 10px 0; }
+    .ch-content-preview ul, .ch-content-preview ol { margin: 6px 0 10px 0; padding-left: 24px; }
+    .ch-content-preview ul { list-style-type: disc; }
+    .ch-content-preview ul ul { list-style-type: circle; margin: 2px 0 2px 0; }
+    .ch-content-preview ol { list-style-type: decimal; }
     .ch-content-preview li { margin-bottom: 4px; }
+    .ch-content-preview li li { margin-bottom: 2px; }
     .ch-content-preview strong { color: #1B3A5C; }
-    .sub-content-preview { max-height: 200px; margin-top: 8px; font-size: 13px; }
+    .ch-content-preview em { color: #555; }
+    .ch-content-preview code { background: #e8eaf6; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+    .ch-content-preview hr { border: none; border-top: 1px solid #ccc; margin: 16px 0; }
+    .sub-content-preview { max-height: 250px; margin-top: 8px; font-size: 13px; }
     .sub-chapters { margin-top: 12px; padding-left: 24px; }
     .sub-chapter-block { border-bottom: 1px solid #eee; }
     .sub-chapter-item { display: flex; align-items: center; gap: 8px; padding: 8px 0; }
@@ -976,46 +987,104 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   renderMarkdown(text: string): string {
     if (!text) return '';
-    // Escape HTML to prevent XSS
-    let html = text
-      .replace(/&/g, '&amp;')
-      .replace(/</g, '&lt;')
-      .replace(/>/g, '&gt;');
+    const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const inlineFormat = (s: string) => {
+      return esc(s)
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.+?)\*/g, '<em>$1</em>')
+        .replace(/`(.+?)`/g, '<code>$1</code>');
+    };
 
-    // Headers: ### or ## or # at start of line
-    html = html.replace(/^###\s+(.+)$/gm, '<h4>$1</h4>');
-    html = html.replace(/^##\s+(.+)$/gm, '<h3>$1</h3>');
-    html = html.replace(/^#\s+(.+)$/gm, '<h3>$1</h3>');
+    const lines = text.split('\n');
+    const out: string[] = [];
+    let inParagraph = false;
+    const listStack: string[] = []; // track 'ul' or 'ol' nesting
 
-    // Bold: **text**
-    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-    // Italic: *text*
-    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+    const closeAllLists = () => {
+      while (listStack.length > 0) {
+        out.push('</' + listStack.pop() + '>');
+      }
+    };
+    const closeParagraph = () => {
+      if (inParagraph) { out.push('</p>'); inParagraph = false; }
+    };
 
-    // Bullet lists: lines starting with - or *
-    html = html.replace(/^[\-\*]\s+(.+)$/gm, '<li>$1</li>');
-    // Wrap consecutive <li> in <ul>
-    html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
+    for (let i = 0; i < lines.length; i++) {
+      const raw = lines[i];
+      const trimmed = raw.trimEnd();
 
-    // Paragraphs: double newlines
-    html = html.replace(/\n\n+/g, '</p><p>');
-    // Single newlines (not inside tags) to <br>
-    html = html.replace(/([^>])\n([^<])/g, '$1<br>$2');
+      // Horizontal rule: --- or ***
+      if (/^-{3,}$|^\*{3,}$/.test(trimmed.trim())) {
+        closeParagraph();
+        closeAllLists();
+        out.push('<hr>');
+        continue;
+      }
 
-    // Wrap in <p> if not starting with a block element
-    if (!html.match(/^\s*<[hup]/)) {
-      html = '<p>' + html + '</p>';
+      // Headers: # to ####  (strip bold ** inside header text)
+      const headerMatch = trimmed.match(/^(#{1,4})\s+(.+)$/);
+      if (headerMatch) {
+        closeParagraph();
+        closeAllLists();
+        const level = Math.min(headerMatch[1].length + 1, 5); // ## → h3, ### → h4, #### → h5
+        const headerText = headerMatch[2].replace(/\*\*/g, '');
+        out.push(`<h${level}>${esc(headerText)}</h${level}>`);
+        continue;
+      }
+
+      // List items: detect indent level and bullet type
+      const listMatch = trimmed.match(/^(\s*)([-*]|\d+[.)]) (.+)$/);
+      if (listMatch) {
+        closeParagraph();
+        const indent = listMatch[1].length;
+        const isOrdered = /^\d+[.)]/.test(listMatch[2]);
+        const listType = isOrdered ? 'ol' : 'ul';
+        const targetDepth = Math.floor(indent / 2) + 1;
+
+        // Close deeper lists
+        while (listStack.length > targetDepth) {
+          out.push('</' + listStack.pop() + '>');
+        }
+        // Open new list if needed
+        if (listStack.length < targetDepth) {
+          out.push('<' + listType + '>');
+          listStack.push(listType);
+        }
+        // If same depth but different type, switch
+        if (listStack.length === targetDepth && listStack[listStack.length - 1] !== listType) {
+          out.push('</' + listStack.pop() + '>');
+          out.push('<' + listType + '>');
+          listStack.push(listType);
+        }
+
+        out.push('<li>' + inlineFormat(listMatch[3]) + '</li>');
+        continue;
+      }
+
+      // Non-list line: close all open lists
+      if (listStack.length > 0) {
+        closeAllLists();
+      }
+
+      // Empty line
+      if (trimmed.trim() === '') {
+        closeParagraph();
+        continue;
+      }
+
+      // Regular text line
+      if (!inParagraph) {
+        out.push('<p>');
+        inParagraph = true;
+      } else {
+        out.push('<br>');
+      }
+      out.push(inlineFormat(trimmed));
     }
 
-    // Clean up empty paragraphs
-    html = html.replace(/<p>\s*<\/p>/g, '');
-    // Fix <p> wrapping block elements
-    html = html.replace(/<p>\s*(<h[34]>)/g, '$1');
-    html = html.replace(/(<\/h[34]>)\s*<\/p>/g, '$1');
-    html = html.replace(/<p>\s*(<ul>)/g, '$1');
-    html = html.replace(/(<\/ul>)\s*<\/p>/g, '$1');
-
-    return html;
+    closeParagraph();
+    closeAllLists();
+    return out.join('');
   }
 
   // ── Per-chapter AI actions ──
