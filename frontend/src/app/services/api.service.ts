@@ -8,7 +8,7 @@ import {
   Chapter,
   GapAnalysis, ComplianceAnalysis,
   ProjectStatistics, AnonymizationMapping, AnonymizationReport,
-  GenerationStatus, PrefillStatus, DetectDeliverablesStatus, ResponseDocument,
+  GenerationStatus, PrefillStatus, DetectDeliverablesStatus, FillDeliverablesStatus, ResponseDocument,
   SearchResult, DocumentPreview,
   AIConfig, AIConfigUpdate,
   UserInfo, UserCreate, UserUpdate,
@@ -198,6 +198,15 @@ export class ApiService {
 
   confirmDocumentSelection(projectId: string, selections: { id: string; is_selected: boolean }[]): Observable<any> {
     return this.http.post(`${this.baseUrl}/projects/${projectId}/response-documents/confirm-selection`, { selections });
+  }
+
+  // ── Fill Deliverables (Excel/PDF completion) ──
+  fillDeliverables(projectId: string): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/fill-deliverables`, {});
+  }
+
+  getFillDeliverablesStatus(projectId: string): Observable<FillDeliverablesStatus> {
+    return this.http.get<FillDeliverablesStatus>(`${this.baseUrl}/projects/${projectId}/fill-deliverables-status`);
   }
 
   analyzeCompliance(projectId: string): Observable<{ analysis: ComplianceAnalysis }> {

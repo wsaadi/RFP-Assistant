@@ -13,7 +13,7 @@ from ..models.workspace import WorkspaceMember
 from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus
 from ..models.document import Document, DocumentChunk, DocumentCategory
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
-from ..models.response_document import ResponseDocument, DocumentFormat
+from ..models.response_document import ResponseDocument, DocumentFormat, ContentType
 from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectOut,
     ImprovementAxisRequest, GapAnalysisRequest,
@@ -427,6 +427,8 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                     f"Ecarts identifies: {gap_new} nouvelles, {gap_mod} modifiees, {gap_del} supprimees")
 
         # ── Phase 3: Check for response documents ──
+        # Only generate chapters for "redaction" type documents (text to write)
+        # "completion" type documents (Excel/PDF to fill in) are handled separately
         resp_docs = []
         async with async_session() as db:
             result = await db.execute(
@@ -435,7 +437,16 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 .where(ResponseDocument.is_selected == True)
                 .order_by(ResponseDocument.order)
             )
-            resp_docs = [(str(rd.id), rd.title, rd.description) for rd in result.scalars().all()]
+            all_docs = result.scalars().all()
+            resp_docs = [
+                (str(rd.id), rd.title, rd.description)
+                for rd in all_docs
+                if rd.content_type == ContentType.REDACTION or rd.content_type == "redaction"
+            ]
+            completion_docs_count = sum(
+                1 for rd in all_docs
+                if rd.content_type == ContentType.COMPLETION or rd.content_type == "completion"
+            )
 
         # ── Phase 3: Generate structure ──
         order = 0
@@ -585,6 +596,10 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         _update("generating", 85,
                 f"Structure generee: {created_count} chapitres")
 
+        completion_msg = ""
+        if completion_docs_count > 0:
+            completion_msg = f" — {completion_docs_count} document(s) a completer (Excel/PDF) a traiter dans l'onglet Livrables"
+
         _generation_progress[pid] = {
             "status": "completed",
             "step": "done",
@@ -592,9 +607,11 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             "chapters_created": created_count,
             "delta_stats": delta_stats,
             "has_gap_analysis": gap_analysis is not None,
+            "completion_docs_count": completion_docs_count,
             "message": f"{created_count} chapitres crees"
-                       + (f" pour {len(resp_docs)} document(s)" if resp_docs else
-                          f" ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifies, {delta_stats['unchanged']} inchanges)"),
+                       + (f" pour {len(resp_docs)} document(s) redactionnels" if resp_docs else
+                          f" ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifies, {delta_stats['unchanged']} inchanges)")
+                       + completion_msg,
         }
 
     except Exception as e:
@@ -905,11 +922,35 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
                 except ValueError:
                     doc_format = DocumentFormat.OTHER
 
+                # Determine content_type from AI response or infer from format
+                raw_content_type = d.get("content_type", "")
+                if raw_content_type == "completion":
+                    ct = ContentType.COMPLETION
+                elif raw_content_type == "redaction":
+                    ct = ContentType.REDACTION
+                else:
+                    # Infer: xlsx is almost always completion, pdf forms too
+                    if doc_format == DocumentFormat.XLSX:
+                        ct = ContentType.COMPLETION
+                    elif doc_format == DocumentFormat.PDF:
+                        # PDF could be either; default to completion for forms
+                        title_lower = d.get("title", "").lower()
+                        form_keywords = ["dc1", "dc2", "dc3", "dc4", "attri", "noti",
+                                         "acte d'engagement", "formulaire", "cerfa",
+                                         "a completer", "à compléter", "a remplir", "à remplir"]
+                        if any(kw in title_lower for kw in form_keywords):
+                            ct = ContentType.COMPLETION
+                        else:
+                            ct = ContentType.REDACTION
+                    else:
+                        ct = ContentType.REDACTION
+
                 rd = ResponseDocument(
                     project_id=project_id,
                     title=d.get("title", f"Document {idx + 1}"),
                     description=d.get("description", ""),
                     expected_format=doc_format,
+                    content_type=ct,
                     is_selected=d.get("suggested", True),
                     order=idx + 1,
                     rfp_source=d.get("rfp_source", ""),
@@ -958,9 +999,12 @@ async def list_response_documents(
             title=d.title,
             description=d.description,
             expected_format=d.expected_format.value,
+            content_type=d.content_type.value if hasattr(d.content_type, 'value') else (d.content_type or "redaction"),
             is_selected=d.is_selected,
             order=d.order,
             rfp_source=d.rfp_source,
+            fill_content=d.fill_content or "",
+            fill_status=d.fill_status or "pending",
             created_at=d.created_at,
             updated_at=d.updated_at,
             chapter_count=ch_count,
@@ -985,7 +1029,7 @@ async def update_response_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document non trouvé")
 
-    for field in ["title", "description", "expected_format", "is_selected", "order"]:
+    for field in ["title", "description", "expected_format", "content_type", "is_selected", "order"]:
         value = getattr(request, field, None)
         if value is not None:
             setattr(doc, field, value)
@@ -1002,8 +1046,11 @@ async def update_response_document(
         id=str(doc.id), project_id=str(doc.project_id),
         title=doc.title, description=doc.description,
         expected_format=doc.expected_format.value,
+        content_type=doc.content_type.value if hasattr(doc.content_type, 'value') else (doc.content_type or "redaction"),
         is_selected=doc.is_selected, order=doc.order,
         rfp_source=doc.rfp_source,
+        fill_content=doc.fill_content or "",
+        fill_status=doc.fill_status or "pending",
         created_at=doc.created_at, updated_at=doc.updated_at,
         chapter_count=ch_count,
     )
@@ -1035,6 +1082,187 @@ async def confirm_document_selection(
     )).scalar() or 0
 
     return {"success": True, "selected_count": selected_count}
+
+
+# ── Auto-fill completion documents (Excel/PDF) ──
+
+_fill_progress: Dict[str, dict] = {}
+
+
+@router.post("/{project_id}/fill-deliverables")
+async def fill_deliverables(
+    project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Launch auto-fill for completion-type deliverables (background task)."""
+    result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    # Check for completion-type documents
+    comp_result = await db.execute(
+        select(ResponseDocument)
+        .where(ResponseDocument.project_id == project_id)
+        .where(ResponseDocument.is_selected == True)
+        .where(ResponseDocument.content_type == ContentType.COMPLETION)
+    )
+    comp_docs = comp_result.scalars().all()
+    if not comp_docs:
+        raise HTTPException(status_code=400, detail="Aucun document à compléter détecté")
+
+    pid = str(project_id)
+    existing = _fill_progress.get(pid)
+    if existing and existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Auto-remplissage déjà en cours")
+
+    _fill_progress[pid] = {
+        "status": "running", "step": "starting", "progress": 0,
+        "message": "Démarrage de l'auto-remplissage...",
+    }
+
+    background_tasks.add_task(_run_fill_deliverables, project_id, project.workspace_id)
+    return {"success": True, "message": "Auto-remplissage lancé en arrière-plan"}
+
+
+@router.get("/{project_id}/fill-deliverables-status")
+async def get_fill_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of auto-fill for completion documents."""
+    pid = str(project_id)
+    return _fill_progress.get(pid, {
+        "status": "idle", "step": "idle", "progress": 0, "message": "",
+    })
+
+
+async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID):
+    """Background task: auto-fill completion-type documents (BPU, DQE, forms, etc.)."""
+    from ..database import async_session
+    pid = str(project_id)
+
+    def _update(step: str, progress: int, message: str):
+        _fill_progress[pid] = {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+        }
+
+    try:
+        async with async_session() as db:
+            ai_service = await _get_ai_service(workspace_id, db)
+
+            _update("loading", 5, "Chargement des documents à compléter...")
+
+            # Get completion-type documents
+            result = await db.execute(
+                select(ResponseDocument)
+                .where(ResponseDocument.project_id == project_id)
+                .where(ResponseDocument.is_selected == True)
+                .where(ResponseDocument.content_type == ContentType.COMPLETION)
+                .order_by(ResponseDocument.order)
+            )
+            comp_docs = result.scalars().all()
+            total = len(comp_docs)
+
+            if total == 0:
+                _fill_progress[pid] = {
+                    "status": "completed", "step": "done", "progress": 100,
+                    "filled_count": 0,
+                    "message": "Aucun document à compléter",
+                }
+                return
+
+            _update("loading", 10, f"{total} document(s) à compléter...")
+
+            # Load RFP and old response content
+            anon_new_rfp = await _get_all_chunks_anonymized_by_category(
+                db, project_id, DocumentCategory.NEW_RFP
+            )
+            anon_old_response = await _get_all_chunks_anonymized_by_category(
+                db, project_id, DocumentCategory.OLD_RESPONSE
+            )
+
+            # Also gather any already-generated chapter content for context
+            chapters_result = await db.execute(
+                select(Chapter)
+                .where(Chapter.project_id == project_id)
+                .where(Chapter.content != "")
+                .order_by(Chapter.order)
+            )
+            existing_chapters = chapters_result.scalars().all()
+            chapter_context = "\n\n".join([
+                f"## {ch.title}\n{ch.content[:2000]}"
+                for ch in existing_chapters[:10]
+            ])
+
+            filled_count = 0
+
+            for idx, doc in enumerate(comp_docs):
+                doc_num = idx + 1
+                start_pct = 10 + int(85 * idx / total)
+                end_pct = 10 + int(85 * doc_num / total)
+
+                _update("filling", start_pct,
+                        f"Document {doc_num}/{total}: {doc.title}...")
+
+                doc.fill_status = "generating"
+
+                import time
+                t0_doc = time.monotonic()
+
+                async def _on_fill_progress(token_count: int, char_count: int,
+                                            _start=start_pct, _end=end_pct,
+                                            _t0=t0_doc, _doc_num=doc_num, _title=doc.title):
+                    elapsed = int(time.monotonic() - _t0)
+                    ratio = min(token_count / 8000, 0.95)
+                    pct = _start + int((_end - _start) * ratio)
+                    _fill_progress[pid] = {
+                        "status": "running", "step": "filling", "progress": pct,
+                        "message": f"Document {_doc_num}/{total}: {_title} — {token_count} tokens — {elapsed}s",
+                    }
+
+                # Combine old response + chapter context for fuller context
+                combined_context = anon_old_response
+                if chapter_context:
+                    combined_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
+
+                fill_content = await ai_service.generate_fill_content(
+                    document_title=doc.title,
+                    document_description=doc.description,
+                    expected_format=doc.expected_format.value,
+                    new_rfp_content=anon_new_rfp,
+                    old_response_content=combined_context,
+                    on_progress=_on_fill_progress,
+                )
+
+                # Deanonymize the fill content
+                doc.fill_content = await AnonymizationService.deanonymize_text(
+                    fill_content, project_id, db
+                )
+                doc.fill_status = "completed"
+                filled_count += 1
+
+                _update("filling", end_pct,
+                        f"Document {doc_num}/{total} terminé — {filled_count} complété(s)")
+
+            _update("saving", 96, "Enregistrement...")
+            await db.commit()
+
+        _fill_progress[pid] = {
+            "status": "completed", "step": "done", "progress": 100,
+            "filled_count": filled_count,
+            "message": f"{filled_count} document(s) à compléter traité(s)",
+        }
+
+    except Exception as e:
+        logger.exception("Fill deliverables failed for project %s", project_id)
+        _fill_progress[pid] = {
+            "status": "error", "step": "error", "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        }
 
 
 @router.post("/{project_id}/compliance-analysis")

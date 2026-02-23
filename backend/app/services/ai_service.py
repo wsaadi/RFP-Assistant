@@ -495,12 +495,35 @@ et livrables que le candidat doit fournir dans sa réponse.
 - Classe les documents par ordre logique de présentation
 - Si une ancienne réponse est fournie, utilise-la pour confirmer/compléter la liste
 
+## IMPORTANT - Classification du type de contenu (content_type):
+Tu DOIS classifier chaque livrable selon son type de contenu:
+
+- "redaction": Document à RÉDIGER entièrement par le candidat (mémoire technique, note méthodologique, planning détaillé rédigé, etc.)
+  → Le candidat écrit le contenu de zéro, avec des chapitres et du texte libre.
+
+- "completion": Document FOURNI par l'acheteur que le candidat doit COMPLÉTER/REMPLIR (BPU Excel, DQE, DPGF, formulaires DC1/DC2, AE pré-formaté, cadre de réponse imposé, etc.)
+  → Le candidat remplit des cases, cellules, champs dans un document existant fourni par le client.
+
+Indices pour "completion":
+- BPU, DQE, DPGF → toujours "completion" (tableurs à compléter)
+- Formulaires administratifs (DC1, DC2, ATTRI1, NOTI1) → "completion"
+- Acte d'engagement pré-formaté → "completion"
+- Cadre de réponse technique imposé par l'acheteur → "completion"
+- Document avec mention "à compléter", "à remplir", "fourni en annexe" → "completion"
+
+Indices pour "redaction":
+- Mémoire technique → "redaction"
+- Note méthodologique → "redaction"
+- Mémoire environnemental / RSE → "redaction"
+- Fiches références / CV → "redaction"
+
 Réponds UNIQUEMENT au format JSON suivant (sans markdown):
 [
   {
     "title": "Titre du document (ex: Memoire Technique)",
     "description": "Description du contenu attendu dans ce document",
     "expected_format": "docx|xlsx|pdf|other",
+    "content_type": "redaction|completion",
     "rfp_source": "Reference dans l'AO (ex: Article 5.2 du RC, page 12)",
     "suggested": true
   }
@@ -738,6 +761,78 @@ Décris cette image et suggère des tags et chapitres pertinents."""
         if result:
             return result
         return {"description": "", "tags": [], "suggested_chapters": []}
+
+    async def generate_fill_content(
+        self,
+        document_title: str,
+        document_description: str,
+        expected_format: str,
+        new_rfp_content: str,
+        old_response_content: str = "",
+        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    ) -> str:
+        """Generate fill-in content/instructions for a completion-type document (BPU, DQE, forms, etc.).
+
+        Instead of generating chapters of text, this generates structured fill-in guidance
+        that tells the user what values to put in each field/cell of the template document.
+        """
+        system_prompt = f"""Tu es un expert senior en réponse aux appels d'offres, spécialisé dans le remplissage
+de documents types fournis par l'acheteur.
+
+Le document à compléter est: **{document_title}**
+Format attendu: {expected_format.upper()}
+Description: {document_description}
+
+## Ta mission:
+Tu dois générer le CONTENU DE REMPLISSAGE pour ce document, c'est-à-dire les valeurs,
+textes et données à inscrire dans les différents champs/cellules/rubriques du document.
+
+## Règles selon le type de document:
+
+### Si c'est un BPU (Bordereau des Prix Unitaires) ou DQE/DPGF:
+- Génère un tableau markdown avec les colonnes: Poste / Désignation / Unité / Prix unitaire HT / Observations
+- Base-toi sur les prestations décrites dans le CCTP/CCP de l'AO
+- Pour les prix, indique "[A COMPLÉTER - prix]" car les prix sont confidentiels
+- Indique les unités appropriées (forfait, jour, heure, m², etc.)
+- Ajoute des observations sur le périmètre de chaque poste
+
+### Si c'est un formulaire administratif (DC1, DC2, ATTRI1, etc.):
+- Liste chaque rubrique/champ du formulaire
+- Indique la valeur à renseigner ou "[A COMPLÉTER]" pour les données confidentielles
+- Précise les documents justificatifs à joindre
+
+### Si c'est un Acte d'Engagement:
+- Identifie les champs à remplir (raison sociale, montants, lots, etc.)
+- Indique les valeurs connues et "[A COMPLÉTER]" pour les montants
+
+### Si c'est un cadre de réponse technique:
+- Réponds point par point aux questions/rubriques imposées
+- Fournis du contenu professionnel et détaillé pour chaque rubrique
+
+## Format de sortie:
+Génère le contenu en Markdown structuré avec:
+- Des titres ## pour chaque section/onglet du document
+- Des tableaux markdown pour les données tabulaires
+- Des listes à puces pour les champs à remplir
+- **[A COMPLÉTER]** pour les valeurs que seul le candidat connaît (prix, coordonnées exactes, etc.)
+- Du contenu rédigé pour les rubriques textuelles
+
+Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un maximum de champs."""
+
+        parts = [f"CONTENU DE L'APPEL D'OFFRES:\n{new_rfp_content[:60000]}"]
+        if old_response_content:
+            parts.append(f"ANCIENNE RÉPONSE (pour référence):\n{old_response_content[:30000]}")
+
+        user_prompt = "\n\n---\n\n".join(parts)
+        user_prompt += (
+            f"\n\nGénère le contenu de remplissage complet pour le document '{document_title}' "
+            f"({expected_format.upper()}) en te basant sur les exigences de l'AO."
+        )
+
+        return await self.generate_streaming(
+            system_prompt, user_prompt, temperature=0.3, max_tokens=8000,
+            timeout=600, on_progress=on_progress,
+        )
 
     async def execute_custom_prompt(self, content: str, prompt: str, context: str = "") -> str:
         """Execute a custom user prompt on content."""
