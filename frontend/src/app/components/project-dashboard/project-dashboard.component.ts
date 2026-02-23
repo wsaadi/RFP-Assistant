@@ -1579,8 +1579,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       error: (err) => {
         rd._fillingExcel = false;
         this.snackBar.dismiss();
-        const detail = err.error?.detail || 'Erreur lors de la generation de l\'Excel';
-        this.snackBar.open(detail, 'OK', { duration: 8000 });
+        this._showBlobError(err, 'Erreur lors de la generation de l\'Excel');
       },
     });
   }
@@ -1605,10 +1604,28 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       error: (err) => {
         rd._fillingPdf = false;
         this.snackBar.dismiss();
-        const detail = err.error?.detail || 'Erreur lors de la generation du PDF';
-        this.snackBar.open(detail, 'OK', { duration: 8000 });
+        this._showBlobError(err, 'Erreur lors de la generation du PDF');
       },
     });
+  }
+
+  /** Parse error detail from blob responses (responseType: 'blob' returns errors as Blob too). */
+  private _showBlobError(err: any, fallback: string): void {
+    if (err.error instanceof Blob) {
+      const reader = new FileReader();
+      reader.onload = () => {
+        try {
+          const json = JSON.parse(reader.result as string);
+          this.snackBar.open(json.detail || fallback, 'OK', { duration: 8000 });
+        } catch {
+          this.snackBar.open(fallback, 'OK', { duration: 8000 });
+        }
+      };
+      reader.readAsText(err.error);
+    } else {
+      const detail = err.error?.detail || fallback;
+      this.snackBar.open(detail, 'OK', { duration: 8000 });
+    }
   }
 
   resetFillContent(rd: ResponseDocument): void {

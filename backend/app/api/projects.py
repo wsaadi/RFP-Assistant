@@ -1982,30 +1982,40 @@ async def fill_pdf_document(
     all_dce_docs = docs_result.scalars().all()
 
     # Find the best matching PDF file
+    all_pdfs = [doc for doc in all_dce_docs if doc.file_type.value == "pdf"]
+    logger.info(
+        "fill-pdf: looking for PDF source for '%s' (rfp_source='%s'), %d PDFs in DCE: %s",
+        resp_doc.title, resp_doc.rfp_source, len(all_pdfs),
+        [d.original_filename for d in all_pdfs],
+    )
+
     pdf_doc = None
-    for doc in all_dce_docs:
-        if doc.file_type.value != "pdf":
-            continue
+    # Strategy 1: Match by rfp_source reference
+    for doc in all_pdfs:
         fname_lower = (doc.original_filename or "").lower()
-        # Match by rfp_source reference
         if rfp_source_lower and rfp_source_lower in fname_lower:
             pdf_doc = doc
             break
         if fname_lower and fname_lower in rfp_source_lower:
             pdf_doc = doc
             break
-        # Match by title keywords
-        title_words = [w for w in doc_title_lower.split() if len(w) > 3]
-        matches = sum(1 for w in title_words if w in fname_lower)
-        if matches >= 2:
-            pdf_doc = doc
-            break
 
-    # Fallback: pick first PDF with relevant keywords
+    # Strategy 2: Match by title keywords (at least 2 matching words)
     if not pdf_doc:
-        for doc in all_dce_docs:
-            if doc.file_type.value != "pdf":
-                continue
+        title_words = [w for w in doc_title_lower.split() if len(w) > 3]
+        best_score, best_doc = 0, None
+        for doc in all_pdfs:
+            fname_lower = (doc.original_filename or "").lower()
+            matches = sum(1 for w in title_words if w in fname_lower)
+            if matches > best_score:
+                best_score = matches
+                best_doc = doc
+        if best_score >= 2:
+            pdf_doc = best_doc
+
+    # Strategy 3: Match by common admin/form keywords
+    if not pdf_doc:
+        for doc in all_pdfs:
             fname_lower = (doc.original_filename or "").lower()
             for kw in ["formulaire", "acte", "dc1", "dc2", "dc3", "dc4", "attrib", "engagement",
                         "candidature", "marche", "contrat", "annexe"]:
@@ -2015,13 +2025,10 @@ async def fill_pdf_document(
             if pdf_doc:
                 break
 
-    # Last fallback: pick any matching PDF by title words
+    # Strategy 4: Match any word from title in filename
     if not pdf_doc:
-        for doc in all_dce_docs:
-            if doc.file_type.value != "pdf":
-                continue
+        for doc in all_pdfs:
             fname_lower = (doc.original_filename or "").lower()
-            # Check if any word from title appears in filename
             for w in doc_title_lower.split():
                 if len(w) > 4 and w in fname_lower:
                     pdf_doc = doc
@@ -2029,12 +2036,18 @@ async def fill_pdf_document(
             if pdf_doc:
                 break
 
+    # Last fallback: pick the first available PDF
+    if not pdf_doc and all_pdfs:
+        pdf_doc = all_pdfs[0]
+        logger.info("fill-pdf: no keyword match, falling back to first PDF: %s", pdf_doc.original_filename)
+
     if not pdf_doc or not os.path.isfile(pdf_doc.file_path):
         raise HTTPException(
             status_code=404,
             detail="Aucun fichier PDF source trouvé dans le DCE. "
                    "Assurez-vous d'avoir uploadé le PDF correspondant dans les documents du nouvel AO.",
         )
+    logger.info("fill-pdf: matched PDF source '%s' for deliverable '%s'", pdf_doc.original_filename, resp_doc.title)
 
     # 3. Read PDF structure
     pdf_structure = _read_pdf_structure(pdf_doc.file_path)
