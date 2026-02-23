@@ -152,7 +152,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                 [disabled]="prefilling || prefillStatus?.status === 'running'">
                 <mat-spinner *ngIf="prefilling || prefillStatus?.status === 'running'" diameter="18"></mat-spinner>
                 <mat-icon *ngIf="!prefilling && prefillStatus?.status !== 'running'">auto_awesome</mat-icon>
-                3. Pre-remplir
+                {{ selectedChapters.size > 0 ? '3. Pre-remplir (' + selectedChapters.size + ')' : '3. Pre-remplir tout' }}
               </button>
               <span class="spacer"></span>
               <button mat-raised-button color="warn" (click)="deleteSelectedChapters()"
@@ -331,6 +331,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                   <div class="ch-actions">
                     <button mat-raised-button color="primary" [routerLink]="['/project', projectId, 'chapter', ch.id]">
                       <mat-icon>edit</mat-icon> Editer
+                    </button>
+                    <button mat-raised-button color="accent" (click)="prefillChapter(ch.id)"
+                      [disabled]="prefilling" matTooltip="Pre-remplir ce chapitre avec l'IA">
+                      <mat-icon>auto_awesome</mat-icon> Pre-remplir
                     </button>
                     <button mat-icon-button color="warn" (click)="deleteSingleChapter(ch.id)" matTooltip="Supprimer ce chapitre">
                       <mat-icon>delete</mat-icon>
@@ -806,6 +810,15 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   }
 
   prefillAll(): void {
+    const chapterIds = this.selectedChapters.size > 0 ? Array.from(this.selectedChapters) : [];
+    this._launchPrefill(chapterIds);
+  }
+
+  prefillChapter(chapterId: string): void {
+    this._launchPrefill([chapterId]);
+  }
+
+  private _launchPrefill(chapterIds: string[]): void {
     this.prefilling = true;
     this.prefillStatus = {
       status: 'running',
@@ -813,7 +826,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       progress: 0,
       message: 'Lancement du pre-remplissage...',
     };
-    this.api.prefillChapters(this.projectId).subscribe({
+    this.api.prefillChapters(this.projectId, chapterIds).subscribe({
       next: () => {
         this.startPrefillPolling();
       },
