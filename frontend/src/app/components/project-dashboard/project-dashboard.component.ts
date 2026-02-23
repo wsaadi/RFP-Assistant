@@ -271,6 +271,12 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       </button>
                       <mat-chip *ngIf="rd.fill_status === 'completed'" class="fill-done" size="small">Contenu genere</mat-chip>
                       <mat-chip *ngIf="rd.fill_status === 'generating'" class="fill-running" size="small">En cours...</mat-chip>
+                      <button mat-button class="reset-fill-btn"
+                        *ngIf="rd.fill_status === 'completed' || rd.fill_content"
+                        (click)="resetFillContent(rd)"
+                        matTooltip="Supprimer le contenu genere pour pouvoir le regenerer">
+                        <mat-icon>delete_outline</mat-icon> Supprimer le contenu
+                      </button>
                       <button mat-raised-button class="fill-excel-btn"
                         *ngIf="rd.expected_format === 'xlsx' || rd.expected_format === 'xls'"
                         [disabled]="rd._fillingExcel"
@@ -826,6 +832,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .type-toggle-btn mat-icon { font-size: 14px; width: 14px; height: 14px; margin-right: 2px; }
     .type-toggle-btn:hover { color: #1976d2 !important; background: #e3f2fd !important; }
     .fill-excel-btn { font-size: 11px !important; background: #1b5e20 !important; color: white !important; padding: 0 10px !important; line-height: 28px !important; height: 28px !important; border-radius: 4px !important; }
+    .reset-fill-btn { font-size: 11px !important; color: #c62828 !important; padding: 0 8px !important; line-height: 28px !important; height: 28px !important; }
+    .reset-fill-btn mat-icon { font-size: 16px; width: 16px; height: 16px; margin-right: 4px; }
     .fill-excel-btn:disabled { opacity: 0.7; }
     .fill-excel-btn mat-icon { font-size: 16px; width: 16px; height: 16px; margin-right: 4px; }
     .fill-content-panel { margin-top: 10px; box-shadow: none !important; border: 1px solid #e0e0e0; }
@@ -1561,6 +1569,22 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.snackBar.dismiss();
         const detail = err.error?.detail || 'Erreur lors de la generation de l\'Excel';
         this.snackBar.open(detail, 'OK', { duration: 8000 });
+      },
+    });
+  }
+
+  resetFillContent(rd: ResponseDocument): void {
+    if (!confirm('Supprimer le contenu genere pour "' + rd.title + '" ? Vous pourrez ensuite le regenerer.')) {
+      return;
+    }
+    this.api.resetFillContent(this.projectId, rd.id).subscribe({
+      next: (updated) => {
+        rd.fill_content = updated.fill_content;
+        rd.fill_status = updated.fill_status;
+        this.snackBar.open('Contenu supprime. Vous pouvez maintenant regenerer.', 'OK', { duration: 4000 });
+      },
+      error: () => {
+        this.snackBar.open('Erreur lors de la suppression du contenu', 'OK', { duration: 3000 });
       },
     });
   }

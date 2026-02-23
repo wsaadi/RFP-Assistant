@@ -1170,6 +1170,46 @@ async def update_response_document(
     )
 
 
+@router.post("/{project_id}/response-documents/{doc_id}/reset-fill")
+async def reset_fill_content(
+    project_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Reset fill_content and fill_status for a response document so it can be regenerated."""
+    result = await db.execute(
+        select(ResponseDocument)
+        .where(ResponseDocument.id == doc_id, ResponseDocument.project_id == project_id)
+    )
+    doc = result.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="Document non trouvé")
+
+    doc.fill_content = ""
+    doc.fill_status = "pending"
+    await db.commit()
+    await db.refresh(doc)
+
+    ch_count = (await db.execute(
+        select(func.count()).select_from(Chapter)
+        .where(Chapter.response_document_id == doc.id)
+    )).scalar() or 0
+
+    return ResponseDocumentOut(
+        id=str(doc.id), project_id=str(doc.project_id),
+        title=doc.title, description=doc.description,
+        expected_format=doc.expected_format.value,
+        content_type=doc.content_type.value if hasattr(doc.content_type, 'value') else (doc.content_type or "REDACTION").lower(),
+        is_selected=doc.is_selected, order=doc.order,
+        rfp_source=doc.rfp_source,
+        fill_content="",
+        fill_status="pending",
+        created_at=doc.created_at, updated_at=doc.updated_at,
+        chapter_count=ch_count,
+    )
+
+
 @router.post("/{project_id}/response-documents/confirm-selection")
 async def confirm_document_selection(
     project_id: uuid.UUID,
@@ -1614,7 +1654,8 @@ async def get_anonymization_report(
 # ── Fill Excel endpoint ─────────────────────────────────────────────
 
 def _read_excel_structure(file_path: str) -> str:
-    """Read an Excel file and return a textual representation of its structure with cell references."""
+    """Read an Excel file and return a textual representation of its structure with cell references.
+    Skips fully empty rows and only marks empty cells adjacent to filled cells to reduce noise."""
     from openpyxl import load_workbook
     wb = load_workbook(file_path, data_only=True)
     parts = []
@@ -1623,14 +1664,18 @@ def _read_excel_structure(file_path: str) -> str:
         parts.append(f"\n=== Onglet: {sheet_name} ===")
         for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
             row_cells = []
+            has_value = False
             for cell in row:
-                coord = cell.coordinate  # e.g. "A1", "B2"
+                coord = cell.coordinate
                 val = cell.value
                 if val is not None:
+                    has_value = True
                     row_cells.append(f"{coord}={val}")
                 else:
                     row_cells.append(f"{coord}=(vide)")
-            parts.append(" | ".join(row_cells))
+            # Only include rows that have at least one non-empty cell
+            if has_value:
+                parts.append(" | ".join(row_cells))
     wb.close()
     return "\n".join(parts)
 
@@ -1764,8 +1809,8 @@ async def fill_excel_document(
     # Also do a targeted vector search for pricing info
     pricing_chunks = VectorService.search(
         str(project_id),
-        f"prix unitaire tarif {resp_doc.title} BPU bordereau montant",
-        top_k=10,
+        f"prix unitaire tarif {resp_doc.title} BPU bordereau montant coût forfait taux journalier",
+        top_k=20,
         category_filter="old_response",
     )
     pricing_context = "\n\n".join([
@@ -1781,6 +1826,11 @@ async def fill_excel_document(
         )
 
     # 6. Call AI to generate structured fill data
+    logger.info(
+        "fill-excel %s: excel_structure=%d chars, old_response=%d chars, pricing_chunks=%d, new_rfp=%d chars",
+        resp_doc.title, len(excel_structure), len(old_response_with_pricing),
+        len(pricing_chunks), len(anon_new_rfp),
+    )
     ai_service = await _get_ai_service(project.workspace_id, db)
     fill_data = await ai_service.generate_excel_fill_data(
         document_title=resp_doc.title,
@@ -1788,6 +1838,7 @@ async def fill_excel_document(
         new_rfp_content=anon_new_rfp,
         old_response_content=old_response_with_pricing,
     )
+    logger.info("fill-excel %s: AI returned %d cell entries", resp_doc.title, len(fill_data))
 
     # 7. Fill the Excel and return as download
     filled_bytes = _fill_excel_with_data(excel_doc.file_path, fill_data)
