@@ -10,9 +10,12 @@ class ResponseDocumentOut(BaseModel):
     title: str
     description: str
     expected_format: str
+    content_type: str = "redaction"
     is_selected: bool
     order: int
     rfp_source: str
+    fill_content: str = ""
+    fill_status: str = "pending"
     created_at: datetime
     updated_at: datetime
     chapter_count: int = 0
@@ -24,6 +27,7 @@ class ResponseDocumentUpdate(BaseModel):
     title: Optional[str] = Field(None, min_length=1, max_length=500)
     description: Optional[str] = None
     expected_format: Optional[str] = None
+    content_type: Optional[str] = None
     is_selected: Optional[bool] = None
     order: Optional[int] = None
 

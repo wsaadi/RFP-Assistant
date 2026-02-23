@@ -186,9 +186,12 @@ export interface ResponseDocument {
   title: string;
   description: string;
   expected_format: string;
+  content_type: 'redaction' | 'completion';
   is_selected: boolean;
   order: number;
   rfp_source: string;
+  fill_content: string;
+  fill_status: 'pending' | 'generating' | 'completed' | 'error';
   created_at: string;
   updated_at: string;
   chapter_count: number;
@@ -200,6 +203,14 @@ export interface DetectDeliverablesStatus {
   progress: number;
   message: string;
   deliverables_count?: number;
+}
+
+export interface FillDeliverablesStatus {
+  status: 'idle' | 'running' | 'completed' | 'error';
+  step: string;
+  progress: number;
+  message: string;
+  filled_count?: number;
 }
 
 // ── Prefill Progress ──

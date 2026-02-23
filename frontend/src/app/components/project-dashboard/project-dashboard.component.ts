@@ -21,7 +21,7 @@ import { Subscription, interval, timer, forkJoin } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { renderMarkdown } from '../../services/markdown.service';
-import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus, DetectDeliverablesStatus, ResponseDocument } from '../../models/report.model';
+import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus, DetectDeliverablesStatus, FillDeliverablesStatus, ResponseDocument } from '../../models/report.model';
 
 @Component({
   selector: 'app-project-dashboard',
@@ -131,41 +131,24 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           </div>
         </mat-tab>
 
-        <!-- Chapters tab -->
-        <mat-tab label="Structure">
+        <!-- Livrables tab (NEW - separated from Structure) -->
+        <mat-tab label="Livrables">
           <div class="tab-content">
-            <!-- Step 1: Detect deliverables -->
             <div class="chapter-actions">
               <button mat-raised-button (click)="detectDeliverables()"
                 [disabled]="detectingDeliverables || detectStatus?.status === 'running'"
                 style="background: #7b1fa2; color: white;">
                 <mat-spinner *ngIf="detectingDeliverables || detectStatus?.status === 'running'" diameter="18"></mat-spinner>
                 <mat-icon *ngIf="!detectingDeliverables && detectStatus?.status !== 'running'">find_in_page</mat-icon>
-                1. Detecter les livrables attendus
+                Detecter les livrables attendus
               </button>
-              <button mat-raised-button color="primary" (click)="generateStructure()"
-                [disabled]="generatingStructure || genStatus?.status === 'running'">
-                <mat-spinner *ngIf="generatingStructure || genStatus?.status === 'running'" diameter="18"></mat-spinner>
-                <mat-icon *ngIf="!generatingStructure && genStatus?.status !== 'running'">auto_fix_high</mat-icon>
-                2. Generer la structure
-              </button>
-              <button mat-raised-button color="accent" (click)="prefillAll()"
-                [disabled]="prefilling || prefillStatus?.status === 'running'">
-                <mat-spinner *ngIf="prefilling || prefillStatus?.status === 'running'" diameter="18"></mat-spinner>
-                <mat-icon *ngIf="!prefilling && prefillStatus?.status !== 'running'">auto_awesome</mat-icon>
-                {{ selectedChapters.size > 0 ? '3. Pre-remplir (' + selectedChapters.size + ')' : '3. Pre-remplir tout' }}
-              </button>
-              <span class="spacer"></span>
-              <button mat-raised-button color="warn" (click)="deleteSelectedChapters()"
-                *ngIf="selectedChapters.size > 0" [disabled]="deletingChapters">
-                <mat-spinner *ngIf="deletingChapters" diameter="18"></mat-spinner>
-                <mat-icon *ngIf="!deletingChapters">delete</mat-icon>
-                Supprimer ({{ selectedChapters.size }})
-              </button>
-              <button mat-button color="warn" (click)="deleteAllChapters()"
-                *ngIf="chapters.length > 0" [disabled]="deletingChapters">
-                <mat-icon>delete_sweep</mat-icon>
-                Tout supprimer
+              <button mat-raised-button (click)="fillDeliverables()"
+                *ngIf="hasCompletionDocs()"
+                [disabled]="fillingDeliverables || fillStatus?.status === 'running'"
+                style="background: #2e7d32; color: white;">
+                <mat-spinner *ngIf="fillingDeliverables || fillStatus?.status === 'running'" diameter="18"></mat-spinner>
+                <mat-icon *ngIf="!fillingDeliverables && fillStatus?.status !== 'running'">auto_fix_high</mat-icon>
+                Auto-completer les Excel/PDF
               </button>
             </div>
 
@@ -195,19 +178,45 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               <mat-icon>check_circle</mat-icon>
               <div>
                 <strong>{{ detectStatus.deliverables_count }} livrables detectes</strong>
-                <span class="detect-success-hint">Selectionnez les documents a produire puis generez la structure.</span>
+                <span class="detect-success-hint">Selectionnez les documents a produire puis passez a l'onglet Structure pour generer les chapitres.</span>
               </div>
             </mat-card>
 
-            <!-- Deliverables list -->
-            <mat-card *ngIf="responseDocuments.length > 0" class="deliverables-card">
-              <div class="deliverables-header">
-                <mat-icon>description</mat-icon>
-                <h3>Documents attendus par l'AO</h3>
-                <span class="deliverables-count">{{ selectedDocCount() }}/{{ responseDocuments.length }} selectionnes</span>
+            <!-- Fill progress -->
+            <mat-card *ngIf="fillStatus && fillStatus.status === 'running'" class="gen-progress-card fill-progress-card">
+              <div class="gen-progress-header">
+                <mat-icon class="spin-icon">auto_fix_high</mat-icon>
+                <h3>Auto-remplissage des documents a completer...</h3>
               </div>
+              <mat-progress-bar mode="determinate" [value]="fillStatus.progress"></mat-progress-bar>
+              <div class="gen-progress-detail">
+                <span class="gen-step fill-step">{{ fillStatus.step === 'filling' ? 'Remplissage IA' : 'Chargement' }}</span>
+                <span class="gen-pct">{{ fillStatus.progress }}%</span>
+              </div>
+              <p class="gen-message">{{ fillStatus.message }}</p>
+            </mat-card>
+
+            <mat-card *ngIf="fillStatus && fillStatus.status === 'error'" class="gen-error-card">
+              <mat-icon>error_outline</mat-icon>
+              <div>
+                <strong>Echec de l'auto-remplissage</strong>
+                <p>{{ fillStatus.message }}</p>
+              </div>
+            </mat-card>
+
+            <mat-card *ngIf="fillStatus && fillStatus.status === 'completed'" class="gen-success-card fill-success-card">
+              <mat-icon>check_circle</mat-icon>
+              <div>
+                <strong>{{ fillStatus.message }}</strong>
+              </div>
+            </mat-card>
+
+            <!-- Deliverables list - Redaction type -->
+            <div *ngIf="redactionDocs.length > 0" class="deliverables-section">
+              <h3 class="section-title"><mat-icon>edit_document</mat-icon> Documents a rediger ({{ redactionDocs.length }})</h3>
+              <p class="section-subtitle">Ces documents necessitent la redaction de chapitres. Utilisez l'onglet Structure pour generer et rediger le contenu.</p>
               <div class="deliverables-list">
-                <div *ngFor="let rd of responseDocuments; let i = index" class="deliverable-item"
+                <div *ngFor="let rd of redactionDocs" class="deliverable-item"
                   [class.deselected]="!rd.is_selected">
                   <mat-checkbox [checked]="rd.is_selected"
                     (change)="toggleDeliverable(rd, $event.checked)">
@@ -220,6 +229,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <strong>{{ rd.title }}</strong>
                     <span class="deliverable-desc">{{ rd.description }}</span>
                     <div class="deliverable-meta">
+                      <mat-chip class="type-redaction" size="small">Redaction</mat-chip>
                       <span class="deliverable-source" *ngIf="rd.rfp_source">
                         <mat-icon class="meta-icon">source</mat-icon> {{ rd.rfp_source }}
                       </span>
@@ -229,6 +239,92 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     </div>
                   </div>
                 </div>
+              </div>
+            </div>
+
+            <!-- Deliverables list - Completion type -->
+            <div *ngIf="completionDocs.length > 0" class="deliverables-section">
+              <h3 class="section-title"><mat-icon>assignment</mat-icon> Documents a completer ({{ completionDocs.length }})</h3>
+              <p class="section-subtitle">Ces documents (Excel, PDF, formulaires) sont fournis par l'acheteur et doivent etre completes. L'IA peut pre-remplir le contenu.</p>
+              <div class="deliverables-list">
+                <div *ngFor="let rd of completionDocs" class="deliverable-item completion-item"
+                  [class.deselected]="!rd.is_selected">
+                  <mat-checkbox [checked]="rd.is_selected"
+                    (change)="toggleDeliverable(rd, $event.checked)">
+                  </mat-checkbox>
+                  <div class="deliverable-format-icon" [class]="'format-' + rd.expected_format">
+                    <mat-icon>{{ formatIcon(rd.expected_format) }}</mat-icon>
+                    <span class="format-label">{{ rd.expected_format | uppercase }}</span>
+                  </div>
+                  <div class="deliverable-info" style="flex: 1;">
+                    <strong>{{ rd.title }}</strong>
+                    <span class="deliverable-desc">{{ rd.description }}</span>
+                    <div class="deliverable-meta">
+                      <mat-chip class="type-completion" size="small">A completer</mat-chip>
+                      <mat-chip *ngIf="rd.fill_status === 'completed'" class="fill-done" size="small">Contenu genere</mat-chip>
+                      <mat-chip *ngIf="rd.fill_status === 'generating'" class="fill-running" size="small">En cours...</mat-chip>
+                      <span class="deliverable-source" *ngIf="rd.rfp_source">
+                        <mat-icon class="meta-icon">source</mat-icon> {{ rd.rfp_source }}
+                      </span>
+                    </div>
+                    <!-- Fill content preview -->
+                    <mat-expansion-panel *ngIf="rd.fill_content" class="fill-content-panel">
+                      <mat-expansion-panel-header>
+                        <mat-panel-title>
+                          <mat-icon>visibility</mat-icon> Voir le contenu de remplissage
+                        </mat-panel-title>
+                      </mat-expansion-panel-header>
+                      <div class="fill-content-preview" [innerHTML]="renderMarkdown(rd.fill_content)"></div>
+                    </mat-expansion-panel>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Empty state -->
+            <div *ngIf="responseDocuments.length === 0" class="empty-state">
+              <mat-icon>find_in_page</mat-icon>
+              <p>Aucun livrable detecte. Cliquez sur "Detecter les livrables attendus" pour analyser l'AO.</p>
+            </div>
+          </div>
+        </mat-tab>
+
+        <!-- Structure tab (cleaned up - only chapters) -->
+        <mat-tab label="Structure">
+          <div class="tab-content">
+            <div class="chapter-actions">
+              <button mat-raised-button color="primary" (click)="generateStructure()"
+                [disabled]="generatingStructure || genStatus?.status === 'running'">
+                <mat-spinner *ngIf="generatingStructure || genStatus?.status === 'running'" diameter="18"></mat-spinner>
+                <mat-icon *ngIf="!generatingStructure && genStatus?.status !== 'running'">auto_fix_high</mat-icon>
+                Generer la structure
+              </button>
+              <button mat-raised-button color="accent" (click)="prefillAll()"
+                [disabled]="prefilling || prefillStatus?.status === 'running'">
+                <mat-spinner *ngIf="prefilling || prefillStatus?.status === 'running'" diameter="18"></mat-spinner>
+                <mat-icon *ngIf="!prefilling && prefillStatus?.status !== 'running'">auto_awesome</mat-icon>
+                {{ selectedChapters.size > 0 ? 'Pre-remplir (' + selectedChapters.size + ')' : 'Pre-remplir tout' }}
+              </button>
+              <span class="spacer"></span>
+              <button mat-raised-button color="warn" (click)="deleteSelectedChapters()"
+                *ngIf="selectedChapters.size > 0" [disabled]="deletingChapters">
+                <mat-spinner *ngIf="deletingChapters" diameter="18"></mat-spinner>
+                <mat-icon *ngIf="!deletingChapters">delete</mat-icon>
+                Supprimer ({{ selectedChapters.size }})
+              </button>
+              <button mat-button color="warn" (click)="deleteAllChapters()"
+                *ngIf="chapters.length > 0" [disabled]="deletingChapters">
+                <mat-icon>delete_sweep</mat-icon>
+                Tout supprimer
+              </button>
+            </div>
+
+            <!-- Hint if no deliverables detected yet -->
+            <mat-card *ngIf="responseDocuments.length === 0 && chapters.length === 0" class="hint-card">
+              <mat-icon>info</mat-icon>
+              <div>
+                <strong>Conseil</strong>
+                <p>Detectez d'abord les livrables dans l'onglet "Livrables" pour une generation de structure adaptee a chaque document.</p>
               </div>
             </mat-card>
 
@@ -607,10 +703,6 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .detect-progress-card .spin-icon { color: #7b1fa2; }
     .detect-step { color: #7b1fa2 !important; }
     .deliverables-card { margin: 16px 0; padding: 20px; border-left: 4px solid #7b1fa2; }
-    .deliverables-header { display: flex; align-items: center; gap: 8px; margin-bottom: 16px; }
-    .deliverables-header mat-icon { color: #7b1fa2; }
-    .deliverables-header h3 { margin: 0; color: #1B3A5C; font-size: 15px; }
-    .deliverables-count { margin-left: auto; font-size: 13px; color: #7b1fa2; font-weight: 500; }
     .deliverables-list { display: flex; flex-direction: column; gap: 10px; }
     .deliverable-item { display: flex; align-items: flex-start; gap: 12px; padding: 12px; border-radius: 8px; background: #fafafa; border: 1px solid #eee; transition: opacity 0.2s, border-color 0.2s; }
     .deliverable-item:hover { border-color: #7b1fa2; }
@@ -636,6 +728,36 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .detect-success-card { border-left-color: #7b1fa2; }
     .detect-success-card mat-icon { color: #7b1fa2; }
     .detect-success-hint { display: block; font-size: 13px; color: #666; margin-top: 2px; }
+    .fill-progress-card { border-left-color: #2e7d32; }
+    .fill-progress-card .gen-progress-header h3 { color: #2e7d32; }
+    .fill-progress-card .spin-icon { color: #2e7d32; }
+    .fill-step { color: #2e7d32 !important; }
+    .fill-success-card { border-left-color: #2e7d32; }
+    .fill-success-card mat-icon { color: #2e7d32; }
+    .fill-done { background: #c8e6c9 !important; color: #2e7d32 !important; font-weight: 500; }
+    .fill-running { background: #fff3e0 !important; color: #e65100 !important; }
+    .deliverables-section { margin: 20px 0; }
+    .section-title { display: flex; align-items: center; gap: 8px; color: #1B3A5C; font-size: 16px; margin-bottom: 4px; }
+    .section-title mat-icon { color: #7b1fa2; }
+    .section-subtitle { color: #888; font-size: 13px; margin: 0 0 12px 0; }
+    .type-redaction { background: #e3f2fd !important; color: #1565c0 !important; font-weight: 500; }
+    .type-completion { background: #fff3e0 !important; color: #e65100 !important; font-weight: 500; }
+    .completion-item { border-left: 3px solid #e65100; }
+    .fill-content-panel { margin-top: 10px; box-shadow: none !important; border: 1px solid #e0e0e0; }
+    .fill-content-preview { font-size: 13px; line-height: 1.7; color: #333; max-height: 500px; overflow-y: auto; padding: 8px 0; }
+    ::ng-deep .fill-content-preview h2, ::ng-deep .fill-content-preview h3 { font-size: 15px; font-weight: 700; color: #1B3A5C; margin: 16px 0 8px 0; }
+    ::ng-deep .fill-content-preview h2:first-child, ::ng-deep .fill-content-preview h3:first-child { margin-top: 0; }
+    ::ng-deep .fill-content-preview table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 12px 0; }
+    ::ng-deep .fill-content-preview th, ::ng-deep .fill-content-preview td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
+    ::ng-deep .fill-content-preview th { background: #e8f5e9; color: #2e7d32; font-weight: 600; }
+    ::ng-deep .fill-content-preview tr:nth-child(even) td { background: #fafafa; }
+    ::ng-deep .fill-content-preview ul { list-style-type: disc; padding-left: 24px; }
+    ::ng-deep .fill-content-preview strong { color: #e65100; }
+    .empty-state { text-align: center; padding: 48px 24px; color: #888; }
+    .empty-state mat-icon { font-size: 48px; width: 48px; height: 48px; margin-bottom: 8px; color: #ccc; }
+    .hint-card { margin: 16px 0; padding: 16px 20px; border-left: 4px solid #1976d2; display: flex; align-items: flex-start; gap: 12px; }
+    .hint-card mat-icon { color: #1976d2; }
+    .hint-card p { margin: 4px 0 0 0; color: #666; font-size: 13px; }
     .doc-group-header { display: flex; align-items: center; gap: 8px; padding: 12px 0 6px 0; border-bottom: 2px solid #7b1fa2; margin-bottom: 8px; margin-top: 16px; }
     .doc-group-header mat-icon { color: #7b1fa2; }
     .doc-group-header strong { color: #1B3A5C; font-size: 15px; }
@@ -668,9 +790,14 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   prefillStatus: PrefillStatus | null = null;
   private prefillPollSub: Subscription | null = null;
   responseDocuments: ResponseDocument[] = [];
+  redactionDocs: ResponseDocument[] = [];
+  completionDocs: ResponseDocument[] = [];
   detectingDeliverables = false;
   detectStatus: DetectDeliverablesStatus | null = null;
   private detectPollSub: Subscription | null = null;
+  fillingDeliverables = false;
+  fillStatus: FillDeliverablesStatus | null = null;
+  private fillPollSub: Subscription | null = null;
   selectedChapters = new Set<string>();
   deletingChapters = false;
   showImprovementForm = false;
@@ -732,6 +859,16 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         }
       },
     });
+    // Resume fill polling if already running
+    this.api.getFillDeliverablesStatus(this.projectId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.fillStatus = status;
+          this.fillingDeliverables = true;
+          this.startFillPolling();
+        }
+      },
+    });
   }
 
   ngOnDestroy(): void {
@@ -739,6 +876,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.stopGenPolling();
     this.stopPrefillPolling();
     this.stopDetectPolling();
+    this.stopFillPolling();
   }
 
   loadAll(): void {
@@ -1159,7 +1297,12 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   loadResponseDocuments(): void {
     this.api.getResponseDocuments(this.projectId).subscribe({
-      next: (docs) => { this.responseDocuments = docs; this._refreshGroupedChapters(); },
+      next: (docs) => {
+        this.responseDocuments = docs;
+        this.redactionDocs = docs.filter(d => d.content_type === 'redaction');
+        this.completionDocs = docs.filter(d => d.content_type === 'completion');
+        this._refreshGroupedChapters();
+      },
       error: () => {},
     });
   }
@@ -1208,6 +1351,58 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   private stopDetectPolling(): void {
     this.detectPollSub?.unsubscribe();
     this.detectPollSub = null;
+  }
+
+  // ── Fill deliverables (Excel/PDF completion) ──
+
+  hasCompletionDocs(): boolean {
+    return this.completionDocs.some(d => d.is_selected);
+  }
+
+  fillDeliverables(): void {
+    this.fillingDeliverables = true;
+    this.fillStatus = {
+      status: 'running',
+      step: 'starting',
+      progress: 0,
+      message: 'Lancement de l\'auto-remplissage...',
+    };
+    this.api.fillDeliverables(this.projectId).subscribe({
+      next: () => {
+        this.fillingDeliverables = false;
+        this.startFillPolling();
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
+        this.fillingDeliverables = false;
+        this.fillStatus = null;
+      },
+    });
+  }
+
+  private startFillPolling(): void {
+    this.stopFillPolling();
+    this.fillPollSub = timer(0, 2000).pipe(
+      switchMap(() => this.api.getFillDeliverablesStatus(this.projectId))
+    ).subscribe({
+      next: (status) => {
+        this.fillStatus = status;
+        if (status.status === 'completed') {
+          this.stopFillPolling();
+          this.fillingDeliverables = false;
+          this.snackBar.open(status.message || 'Auto-remplissage termine', 'OK', { duration: 5000 });
+          this.loadResponseDocuments();
+        } else if (status.status === 'error') {
+          this.stopFillPolling();
+          this.fillingDeliverables = false;
+        }
+      },
+    });
+  }
+
+  private stopFillPolling(): void {
+    this.fillPollSub?.unsubscribe();
+    this.fillPollSub = null;
   }
 
   toggleDeliverable(rd: ResponseDocument, checked: boolean): void {
