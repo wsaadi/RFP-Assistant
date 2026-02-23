@@ -95,6 +95,32 @@ async def lifespan(app: FastAPI):
             EXCEPTION WHEN duplicate_column THEN NULL;
             END $$
         """))
+        # Add content_type enum and column to response_documents
+        await conn.execute(text("""
+            DO $$ BEGIN
+                CREATE TYPE content_type AS ENUM ('redaction', 'completion');
+            EXCEPTION WHEN duplicate_object THEN NULL;
+            END $$
+        """))
+        await conn.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE response_documents ADD COLUMN content_type content_type DEFAULT 'redaction';
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
+        # Add fill_content and fill_status columns to response_documents
+        await conn.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE response_documents ADD COLUMN fill_content TEXT DEFAULT '';
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
+        await conn.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE response_documents ADD COLUMN fill_status VARCHAR(50) DEFAULT 'pending';
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
 
     # Create data directories
     for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir]:
