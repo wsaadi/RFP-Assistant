@@ -969,14 +969,13 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
         pdf_structure: str,
         new_rfp_content: str,
         old_response_content: str = "",
+        has_form_fields: bool = False,
     ) -> List[Dict]:
         """Generate structured JSON data to fill a PDF form/document.
 
-        Returns a list of dicts:
-        - For form PDFs: [{"field": "field_name", "value": "..."}, ...]
-        - For text PDFs: [{"page": 1, "x": 100, "y": 200, "value": "...", "font_size": 10}, ...]
+        For form PDFs:  [{"field": "field_name", "value": "..."}, ...]
+        For zone PDFs:  [{"zone_id": "z0", "value": "..."}, ...]
         """
-        has_form_fields = "CHAMPS DE FORMULAIRE PDF" in pdf_structure
 
         if has_form_fields:
             output_format = """## Format de sortie OBLIGATOIRE (PDF avec champs de formulaire):
@@ -989,21 +988,22 @@ Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
 
 Utilise EXACTEMENT les noms de champs tels qu'ils apparaissent dans la structure du PDF."""
         else:
-            output_format = """## Format de sortie OBLIGATOIRE (PDF sans formulaire - annotations texte):
+            output_format = """## Format de sortie OBLIGATOIRE (PDF avec zones identifiées):
+Le système a détecté des zones remplissables dans le PDF, chacune identifiée par un ID (z0, z1, z2, ...).
+Pour chaque zone que tu veux remplir, donne l'ID et la valeur.
+
 Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
 [
-  {"page": 1, "x": 150, "y": 300, "value": "texte à inscrire", "font_size": 10},
-  {"page": 1, "x": 150, "y": 320, "value": "autre texte", "font_size": 10},
+  {"zone_id": "z0", "value": "ACME Corporation"},
+  {"zone_id": "z1", "value": "123 rue de la Paix, 75001 Paris"},
+  {"zone_id": "z3", "value": "12345678901234"},
   ...
 ]
 
-Règles de positionnement:
-- page: numéro de page (commence à 1)
-- x: position horizontale en points (72 pts = 1 pouce, page standard = 595 pts de large)
-- y: position verticale en points depuis le HAUT (page standard = 842 pts de haut)
-- Place le texte à côté ou en dessous des labels/champs existants
-- font_size: taille de police (8-12 pour formulaires)
-- Identifie les zones vides à remplir (après les deux-points, dans les espaces prévus, lignes pointillées)"""
+IMPORTANT:
+- Utilise EXACTEMENT les zone_id tels qu'indiqués (z0, z1, z2, etc.)
+- Ne remplis que les zones pour lesquelles tu as une valeur pertinente
+- N'invente PAS de zone_id qui n'existent pas dans la liste"""
 
         system_prompt = f"""Tu es un expert senior en réponse aux appels d'offres, spécialisé dans le remplissage
 de documents administratifs PDF (DC1, DC2, DC3, actes d'engagement, formulaires de candidature, etc.).
@@ -1021,6 +1021,7 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
 4. Pour les cases à cocher, utilise "X" ou "Oui"/"Non"
 5. Pour les dates, utilise le format JJ/MM/AAAA
 6. Pour les montants, utilise des nombres avec 2 décimales (ex: 15000.00)
+7. Garde les valeurs COURTES et concises (pas de phrases longues)
 
 {output_format}"""
 
@@ -1029,7 +1030,7 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
             parts.append(
                 f"⚠️ ANCIENNE RÉPONSE (CONTIENT LES INFORMATIONS ENTREPRISE À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
             )
-        parts.append(f"STRUCTURE DU PDF À REMPLIR:\n{pdf_structure[:40000]}")
+        parts.append(f"STRUCTURE DU PDF ET ZONES REMPLISSABLES:\n{pdf_structure[:40000]}")
         parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:20000]}")
 
         user_prompt = "\n\n---\n\n".join(parts)
