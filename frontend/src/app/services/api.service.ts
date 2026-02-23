@@ -222,6 +222,13 @@ export class ApiService {
     );
   }
 
+  fillPdfDocument(projectId: string, docId: string): Observable<Blob> {
+    return this.http.post(
+      `${this.baseUrl}/projects/${projectId}/fill-pdf/${docId}`, {},
+      { responseType: 'blob' }
+    );
+  }
+
   analyzeCompliance(projectId: string): Observable<{ analysis: ComplianceAnalysis }> {
     return this.http.post<{ analysis: ComplianceAnalysis }>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`, {});
   }

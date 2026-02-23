@@ -286,6 +286,15 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                         <mat-icon *ngIf="!rd._fillingExcel">download</mat-icon>
                         {{ rd._fillingExcel ? 'Generation en cours...' : 'Telecharger Excel rempli' }}
                       </button>
+                      <button mat-raised-button class="fill-pdf-btn"
+                        *ngIf="rd.expected_format === 'pdf'"
+                        [disabled]="rd._fillingPdf"
+                        (click)="fillAndDownloadPdf(rd)"
+                        matTooltip="Remplir le PDF avec les informations de l'ancienne reponse et telecharger">
+                        <mat-spinner *ngIf="rd._fillingPdf" diameter="16"></mat-spinner>
+                        <mat-icon *ngIf="!rd._fillingPdf">picture_as_pdf</mat-icon>
+                        {{ rd._fillingPdf ? 'Generation en cours...' : 'Telecharger PDF rempli' }}
+                      </button>
                       <span class="deliverable-source" *ngIf="rd.rfp_source">
                         <mat-icon class="meta-icon">source</mat-icon> {{ rd.rfp_source }}
                       </span>
@@ -832,6 +841,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .type-toggle-btn mat-icon { font-size: 14px; width: 14px; height: 14px; margin-right: 2px; }
     .type-toggle-btn:hover { color: #1976d2 !important; background: #e3f2fd !important; }
     .fill-excel-btn { font-size: 11px !important; background: #1b5e20 !important; color: white !important; padding: 0 10px !important; line-height: 28px !important; height: 28px !important; border-radius: 4px !important; }
+    .fill-pdf-btn { font-size: 11px !important; background: #b71c1c !important; color: white !important; padding: 0 10px !important; line-height: 28px !important; height: 28px !important; border-radius: 4px !important; }
+    .fill-pdf-btn:disabled { opacity: 0.7; }
+    .fill-pdf-btn mat-icon { font-size: 16px; width: 16px; height: 16px; margin-right: 4px; }
     .reset-fill-btn { font-size: 11px !important; color: #c62828 !important; padding: 0 8px !important; line-height: 28px !important; height: 28px !important; }
     .reset-fill-btn mat-icon { font-size: 16px; width: 16px; height: 16px; margin-right: 4px; }
     .fill-excel-btn:disabled { opacity: 0.7; }
@@ -1568,6 +1580,32 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         rd._fillingExcel = false;
         this.snackBar.dismiss();
         const detail = err.error?.detail || 'Erreur lors de la generation de l\'Excel';
+        this.snackBar.open(detail, 'OK', { duration: 8000 });
+      },
+    });
+  }
+
+  fillAndDownloadPdf(rd: any): void {
+    rd._fillingPdf = true;
+    this.snackBar.open('Generation du PDF en cours (informations de l\'ancienne reponse)...', '', { duration: 60000 });
+    this.api.fillPdfDocument(this.projectId, rd.id).subscribe({
+      next: (blob: Blob) => {
+        rd._fillingPdf = false;
+        this.snackBar.dismiss();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `${rd.title.replace(/[^a-zA-Z0-9_-]/g, '_')}_rempli.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+        this.snackBar.open('PDF rempli telecharge avec succes !', 'OK', { duration: 5000 });
+      },
+      error: (err) => {
+        rd._fillingPdf = false;
+        this.snackBar.dismiss();
+        const detail = err.error?.detail || 'Erreur lors de la generation du PDF';
         this.snackBar.open(detail, 'OK', { duration: 8000 });
       },
     });

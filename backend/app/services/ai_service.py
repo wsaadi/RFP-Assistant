@@ -963,6 +963,96 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
 
         return data
 
+    async def generate_pdf_fill_data(
+        self,
+        document_title: str,
+        pdf_structure: str,
+        new_rfp_content: str,
+        old_response_content: str = "",
+    ) -> List[Dict]:
+        """Generate structured JSON data to fill a PDF form/document.
+
+        Returns a list of dicts:
+        - For form PDFs: [{"field": "field_name", "value": "..."}, ...]
+        - For text PDFs: [{"page": 1, "x": 100, "y": 200, "value": "...", "font_size": 10}, ...]
+        """
+        has_form_fields = "CHAMPS DE FORMULAIRE PDF" in pdf_structure
+
+        if has_form_fields:
+            output_format = """## Format de sortie OBLIGATOIRE (PDF avec champs de formulaire):
+Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
+[
+  {"field": "nom_du_champ", "value": "valeur à inscrire"},
+  {"field": "autre_champ", "value": "autre valeur"},
+  ...
+]
+
+Utilise EXACTEMENT les noms de champs tels qu'ils apparaissent dans la structure du PDF."""
+        else:
+            output_format = """## Format de sortie OBLIGATOIRE (PDF sans formulaire - annotations texte):
+Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
+[
+  {"page": 1, "x": 150, "y": 300, "value": "texte à inscrire", "font_size": 10},
+  {"page": 1, "x": 150, "y": 320, "value": "autre texte", "font_size": 10},
+  ...
+]
+
+Règles de positionnement:
+- page: numéro de page (commence à 1)
+- x: position horizontale en points (72 pts = 1 pouce, page standard = 595 pts de large)
+- y: position verticale en points depuis le HAUT (page standard = 842 pts de haut)
+- Place le texte à côté ou en dessous des labels/champs existants
+- font_size: taille de police (8-12 pour formulaires)
+- Identifie les zones vides à remplir (après les deux-points, dans les espaces prévus, lignes pointillées)"""
+
+        system_prompt = f"""Tu es un expert senior en réponse aux appels d'offres, spécialisé dans le remplissage
+de documents administratifs PDF (DC1, DC2, DC3, actes d'engagement, formulaires de candidature, etc.).
+
+Le document à compléter est: **{document_title}**
+
+## Ta mission:
+Tu dois générer les VALEURS EXACTES à inscrire dans ce PDF,
+en te basant sur l'ancienne réponse et les informations de l'entreprise.
+
+## Règles STRICTES:
+1. Tu DOIS reprendre les informations de l'ancienne réponse quand elles existent (raison sociale, SIRET, adresse, etc.)
+2. Si une information n'existe pas dans l'ancienne réponse, mets la valeur "[A COMPLÉTER]"
+3. Ne remplis QUE les champs/zones qui attendent une réponse du candidat
+4. Pour les cases à cocher, utilise "X" ou "Oui"/"Non"
+5. Pour les dates, utilise le format JJ/MM/AAAA
+6. Pour les montants, utilise des nombres avec 2 décimales (ex: 15000.00)
+
+{output_format}"""
+
+        parts = []
+        if old_response_content:
+            parts.append(
+                f"⚠️ ANCIENNE RÉPONSE (CONTIENT LES INFORMATIONS ENTREPRISE À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
+            )
+        parts.append(f"STRUCTURE DU PDF À REMPLIR:\n{pdf_structure[:40000]}")
+        parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:20000]}")
+
+        user_prompt = "\n\n---\n\n".join(parts)
+        user_prompt += (
+            f"\n\n⚠️ RAPPEL IMPORTANT: Génère le JSON de remplissage pour le document '{document_title}'. "
+            "Tu DOIS reprendre TOUTES les informations connues de l'ancienne réponse (raison sociale, SIRET, adresse, "
+            "représentant légal, etc.). Retourne UNIQUEMENT le JSON."
+        )
+
+        raw = await self.generate(system_prompt, user_prompt, temperature=0.1, max_tokens=32000)
+
+        cleaned = _clean_json_response(raw)
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            repaired = _repair_truncated_json(cleaned, target="array")
+            data = json.loads(repaired)
+
+        if not isinstance(data, list):
+            raise ValueError("AI response is not a JSON array")
+
+        return data
+
     async def execute_custom_prompt(self, content: str, prompt: str, context: str = "") -> str:
         """Execute a custom user prompt on content."""
         system_prompt = """Tu es un assistant expert en rédaction de réponses aux appels d'offres.
