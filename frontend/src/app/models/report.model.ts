@@ -175,6 +175,7 @@ export interface GenerationStatus {
   progress: number;
   message: string;
   chapters_created?: number;
+  completion_docs_count?: number;
   delta_stats?: { new: number; modified: number; unchanged: number };
   has_gap_analysis?: boolean;
 }
