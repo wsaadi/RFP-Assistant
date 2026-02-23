@@ -294,10 +294,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           <div class="tab-content">
             <div class="chapter-actions">
               <button mat-raised-button color="primary" (click)="generateStructure()"
-                [disabled]="generatingStructure || genStatus?.status === 'running' || (responseDocuments.length > 0 && redactionDocs.length === 0)">
+                [disabled]="generatingStructure || genStatus?.status === 'running' || (responseDocuments.length > 0 && selectedRedactionCount() === 0)">
                 <mat-spinner *ngIf="generatingStructure || genStatus?.status === 'running'" diameter="18"></mat-spinner>
                 <mat-icon *ngIf="!generatingStructure && genStatus?.status !== 'running'">auto_fix_high</mat-icon>
-                Generer la structure
+                {{ redactionDocs.length > 0 ? 'Generer la structure (' + selectedRedactionCount() + '/' + redactionDocs.length + ')' : 'Generer la structure' }}
               </button>
               <button mat-raised-button color="accent" (click)="prefillAll()"
                 [disabled]="prefilling || prefillStatus?.status === 'running'">
@@ -318,6 +318,42 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                 Tout supprimer
               </button>
             </div>
+
+            <!-- Document selector for structure generation -->
+            <mat-card *ngIf="redactionDocs.length > 0" class="doc-selector-card">
+              <div class="doc-selector-header">
+                <mat-icon>checklist</mat-icon>
+                <div>
+                  <strong>Documents a rediger ({{ selectedRedactionCount() }}/{{ redactionDocs.length }} selectionnes)</strong>
+                  <p class="doc-selector-hint">Cochez les documents pour lesquels generer la structure de chapitres.</p>
+                </div>
+                <span class="spacer"></span>
+                <button mat-button (click)="selectAllRedaction(true)" *ngIf="selectedRedactionCount() < redactionDocs.length">
+                  <mat-icon>check_box</mat-icon> Tout selectionner
+                </button>
+                <button mat-button (click)="selectAllRedaction(false)" *ngIf="selectedRedactionCount() > 0">
+                  <mat-icon>check_box_outline_blank</mat-icon> Tout deselectionner
+                </button>
+              </div>
+              <div class="doc-selector-list">
+                <div *ngFor="let rd of redactionDocs" class="doc-selector-item"
+                  [class.deselected]="!rd.is_selected">
+                  <mat-checkbox [checked]="rd.is_selected"
+                    (change)="toggleDeliverable(rd, $event.checked)">
+                  </mat-checkbox>
+                  <div class="doc-selector-format" [class]="'format-' + rd.expected_format">
+                    <mat-icon>{{ formatIcon(rd.expected_format) }}</mat-icon>
+                  </div>
+                  <div class="doc-selector-info">
+                    <strong>{{ rd.title }}</strong>
+                    <span class="doc-selector-desc">{{ rd.description }}</span>
+                  </div>
+                  <mat-chip *ngIf="rd.chapter_count > 0" size="small" class="doc-selector-chapters">
+                    {{ rd.chapter_count }} chapitres
+                  </mat-chip>
+                </div>
+              </div>
+            </mat-card>
 
             <!-- Hint if no deliverables detected yet -->
             <mat-card *ngIf="responseDocuments.length === 0 && chapters.length === 0" class="hint-card">
@@ -783,6 +819,21 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .progress-info { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; }
     .progress-label { font-size: 12px; color: #555; }
     .progress-pct { font-size: 12px; color: #888; margin-left: auto; }
+    .doc-selector-card { margin: 0 0 16px 0; padding: 16px 20px; border-left: 4px solid #1976d2; background: #f8faff; }
+    .doc-selector-header { display: flex; align-items: flex-start; gap: 10px; margin-bottom: 12px; }
+    .doc-selector-header mat-icon { color: #1976d2; margin-top: 2px; }
+    .doc-selector-header strong { color: #1B3A5C; font-size: 14px; }
+    .doc-selector-hint { color: #888; font-size: 13px; margin: 2px 0 0 0; }
+    .doc-selector-list { display: flex; flex-direction: column; gap: 6px; }
+    .doc-selector-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 6px; background: white; border: 1px solid #e0e0e0; transition: opacity 0.2s, border-color 0.2s; }
+    .doc-selector-item:hover { border-color: #1976d2; }
+    .doc-selector-item.deselected { opacity: 0.45; }
+    .doc-selector-format { display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 6px; }
+    .doc-selector-format mat-icon { font-size: 20px; width: 20px; height: 20px; }
+    .doc-selector-info { flex: 1; min-width: 0; }
+    .doc-selector-info strong { display: block; font-size: 13px; color: #1B3A5C; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .doc-selector-desc { display: block; font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .doc-selector-chapters { font-size: 11px !important; }
   `],
 })
 export class ProjectDashboardComponent implements OnInit, OnDestroy {
@@ -1427,6 +1478,18 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   selectedDocCount(): number {
     return this.responseDocuments.filter(rd => rd.is_selected).length;
+  }
+
+  selectedRedactionCount(): number {
+    return this.redactionDocs.filter(rd => rd.is_selected).length;
+  }
+
+  selectAllRedaction(selected: boolean): void {
+    for (const rd of this.redactionDocs) {
+      if (rd.is_selected !== selected) {
+        this.toggleDeliverable(rd, selected);
+      }
+    }
   }
 
   private _refreshGroupedChapters(): void {
