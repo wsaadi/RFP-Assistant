@@ -1,4 +1,5 @@
 """Chapter API routes for content editing and AI generation."""
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException
@@ -258,12 +259,10 @@ async def generate_chapter_content(
     ai_service = MistralAIService.from_config(config, config.mistral_api_key_encrypted)
 
     if request.action == "custom" and request.custom_prompt:
-        # Custom prompt
-        anon_content = await AnonymizationService.anonymize_text(
-            chapter.content, chapter.project_id, db
-        )
-        anon_prompt = await AnonymizationService.anonymize_text(
-            request.custom_prompt, chapter.project_id, db
+        # Custom prompt — anonymize content and prompt in parallel
+        anon_content, anon_prompt = await asyncio.gather(
+            AnonymizationService.anonymize_text(chapter.content, chapter.project_id, db),
+            AnonymizationService.anonymize_text(request.custom_prompt, chapter.project_id, db),
         )
         result_text = await ai_service.execute_custom_prompt(
             anon_content, anon_prompt, chapter.title
@@ -287,9 +286,9 @@ async def generate_chapter_content(
 
     else:
         # Generate new content
+        # Run both vector searches in parallel (sync but fast)
         old_response_content = ""
-        context_chunks_text = ""
-
+        search_results = []
         if request.use_old_response:
             search_results = VectorService.search(
                 str(chapter.project_id),
@@ -297,20 +296,20 @@ async def generate_chapter_content(
                 top_k=5,
                 category_filter="old_response",
             )
-            if search_results:
-                old_response_content = "\n\n".join([r["content"] for r in search_results])
-                old_response_content = await AnonymizationService.anonymize_text(
-                    old_response_content, chapter.project_id, db
-                )
-
-        # Get context from all documents
         context_results = VectorService.search(
             str(chapter.project_id),
             f"{chapter.title} {chapter.rfp_requirement}",
             top_k=3,
         )
-        if context_results:
-            context_chunks_text = "\n\n".join([r["content"] for r in context_results])
+
+        context_chunks_text = "\n\n".join([r["content"] for r in context_results]) if context_results else ""
+
+        # Anonymize old response content if found
+        if search_results:
+            raw_old = "\n\n".join([r["content"] for r in search_results])
+            old_response_content = await AnonymizationService.anonymize_text(
+                raw_old, chapter.project_id, db
+            )
 
         notes_text = "\n".join([n.get("content", "") for n in (chapter.notes or [])])
         improvement = project.improvement_axes if request.include_improvement_axes else ""
