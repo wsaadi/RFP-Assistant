@@ -22,7 +22,7 @@ import { GapAnalysis } from '../../models/report.model';
         <button mat-raised-button color="primary" (click)="runAnalysis()" [disabled]="analyzing">
           <mat-spinner *ngIf="analyzing" diameter="18"></mat-spinner>
           <mat-icon *ngIf="!analyzing">compare_arrows</mat-icon>
-          {{ analysis ? 'Relancer' : 'Lancer l\'analyse' }}
+          {{ analysis ? 'Relancer' : 'Lancer analyse' }}
         </button>
       </div>
 
