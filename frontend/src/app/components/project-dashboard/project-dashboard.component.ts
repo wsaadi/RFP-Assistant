@@ -294,7 +294,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           <div class="tab-content">
             <div class="chapter-actions">
               <button mat-raised-button color="primary" (click)="generateStructure()"
-                [disabled]="generatingStructure || genStatus?.status === 'running'">
+                [disabled]="generatingStructure || genStatus?.status === 'running' || (responseDocuments.length > 0 && redactionDocs.length === 0)">
                 <mat-spinner *ngIf="generatingStructure || genStatus?.status === 'running'" diameter="18"></mat-spinner>
                 <mat-icon *ngIf="!generatingStructure && genStatus?.status !== 'running'">auto_fix_high</mat-icon>
                 Generer la structure
@@ -325,6 +325,16 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               <div>
                 <strong>Conseil</strong>
                 <p>Detectez d'abord les livrables dans l'onglet "Livrables" pour une generation de structure adaptee a chaque document.</p>
+              </div>
+            </mat-card>
+
+            <!-- Warning if all deliverables are completion-type -->
+            <mat-card *ngIf="responseDocuments.length > 0 && redactionDocs.length === 0 && chapters.length === 0" class="hint-card">
+              <mat-icon>check_circle</mat-icon>
+              <div>
+                <strong>Aucun document a rediger</strong>
+                <p>Tous les livrables detectes ({{ completionDocs.length }}) sont des documents a completer (Excel, PDF, formulaires).
+                Ils sont a traiter dans l'onglet "Livrables". Aucune structure de chapitres n'est necessaire.</p>
               </div>
             </mat-card>
 
