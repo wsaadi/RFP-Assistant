@@ -38,6 +38,8 @@ logger = logging.getLogger(__name__)
 # In-memory progress tracking for long-running generation tasks
 _generation_progress: Dict[str, dict] = {}
 _prefill_progress: Dict[str, dict] = {}
+_gap_analysis_progress: Dict[str, dict] = {}
+_compliance_progress: Dict[str, dict] = {}
 
 
 async def _get_ai_service(workspace_id: uuid.UUID, db: AsyncSession) -> MistralAIService:
@@ -250,64 +252,114 @@ async def get_gap_analysis(
 @router.post("/{project_id}/gap-analysis")
 async def analyze_gap(
     project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Analyze gaps between old and new RFP."""
+    """Launch gap analysis as a background task (returns immediately)."""
+    pid = str(project_id)
+
+    existing = _gap_analysis_progress.get(pid)
+    if existing and existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Analyse des ecarts deja en cours")
+
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    ai_service = await _get_ai_service(project.workspace_id, db)
+    _gap_analysis_progress[pid] = {
+        "status": "running", "step": "starting", "progress": 0,
+        "message": "Demarrage de l'analyse des ecarts...",
+    }
 
-    # Get old + new RFP chunks (sync vector search, fast)
-    old_rfp_chunks = VectorService.search(str(project_id), "exigences appel d'offres", top_k=20, category_filter="old_rfp")
-    new_rfp_chunks = VectorService.search(str(project_id), "exigences appel d'offres", top_k=20, category_filter="new_rfp")
+    background_tasks.add_task(_run_gap_analysis, project_id, project.workspace_id)
 
-    old_rfp_content = "\n\n".join([c["content"] for c in old_rfp_chunks])
-    new_rfp_content = "\n\n".join([c["content"] for c in new_rfp_chunks])
+    return {"success": True, "message": "Analyse des ecarts lancee en arriere-plan"}
 
-    if not old_rfp_content or not new_rfp_content:
-        raise HTTPException(
-            status_code=400,
-            detail="Documents d'ancien et/ou de nouvel appel d'offres manquants ou non indexés",
-        )
 
-    # Anonymize sequentially (same DB session cannot be used concurrently)
-    anon_old = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
-    anon_new = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
+@router.get("/{project_id}/gap-analysis-status")
+async def get_gap_analysis_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of gap analysis."""
+    pid = str(project_id)
+    return _gap_analysis_progress.get(pid, {
+        "status": "idle", "step": "idle", "progress": 0, "message": "",
+    })
 
-    analysis = await ai_service.analyze_gap(anon_old, anon_new)
 
-    # Deanonymize the response
-    for key in ["summary"]:
-        if key in analysis and isinstance(analysis[key], str):
-            analysis[key] = await AnonymizationService.deanonymize_text(analysis[key], project_id, db)
-    # Deanonymize nested fields
-    for req_list_key in ["new_requirements", "removed_requirements", "modified_requirements", "unchanged_requirements"]:
-        for req in analysis.get(req_list_key, []):
-            for field in ["title", "description", "old_description", "new_description", "impact"]:
-                if field in req and req[field]:
-                    req[field] = await AnonymizationService.deanonymize_text(req[field], project_id, db)
+async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
+    """Background task for gap analysis."""
+    from ..database import async_session
+    pid = str(project_id)
 
-    # Persist the result
-    gr = GapAnalysisResult(
-        project_id=project_id,
-        summary=analysis.get("summary", ""),
-        new_requirements=analysis.get("new_requirements", []),
-        removed_requirements=analysis.get("removed_requirements", []),
-        modified_requirements=analysis.get("modified_requirements", []),
-        unchanged_requirements=analysis.get("unchanged_requirements", []),
-    )
-    db.add(gr)
-    await db.commit()
-    await db.refresh(gr)
+    def _update(step: str, progress: int, message: str):
+        _gap_analysis_progress[pid] = {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+        }
 
-    analysis["id"] = str(gr.id)
-    analysis["created_at"] = gr.created_at.isoformat() if gr.created_at else None
+    try:
+        async with async_session() as db:
+            ai_service = await _get_ai_service(workspace_id, db)
 
-    return {"success": True, "analysis": analysis}
+            _update("searching", 10, "Recherche des documents d'appel d'offres...")
+
+            old_rfp_chunks = VectorService.search(str(project_id), "exigences appel d'offres", top_k=20, category_filter="old_rfp")
+            new_rfp_chunks = VectorService.search(str(project_id), "exigences appel d'offres", top_k=20, category_filter="new_rfp")
+
+            old_rfp_content = "\n\n".join([c["content"] for c in old_rfp_chunks])
+            new_rfp_content = "\n\n".join([c["content"] for c in new_rfp_chunks])
+
+            if not old_rfp_content or not new_rfp_content:
+                _gap_analysis_progress[pid] = {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "Documents d'ancien et/ou de nouvel appel d'offres manquants",
+                }
+                return
+
+            _update("anonymizing", 20, "Anonymisation des documents...")
+            anon_old = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
+            anon_new = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
+
+            _update("analyzing", 40, "Analyse IA des ecarts en cours...")
+            analysis = await ai_service.analyze_gap(anon_old, anon_new)
+
+            _update("deanonymizing", 75, "Deanonymisation des resultats...")
+            for key in ["summary"]:
+                if key in analysis and isinstance(analysis[key], str):
+                    analysis[key] = await AnonymizationService.deanonymize_text(analysis[key], project_id, db)
+            for req_list_key in ["new_requirements", "removed_requirements", "modified_requirements", "unchanged_requirements"]:
+                for req in analysis.get(req_list_key, []):
+                    for field in ["title", "description", "old_description", "new_description", "impact"]:
+                        if field in req and req[field]:
+                            req[field] = await AnonymizationService.deanonymize_text(req[field], project_id, db)
+
+            _update("saving", 90, "Enregistrement des resultats...")
+            gr = GapAnalysisResult(
+                project_id=project_id,
+                summary=analysis.get("summary", ""),
+                new_requirements=analysis.get("new_requirements", []),
+                removed_requirements=analysis.get("removed_requirements", []),
+                modified_requirements=analysis.get("modified_requirements", []),
+                unchanged_requirements=analysis.get("unchanged_requirements", []),
+            )
+            db.add(gr)
+            await db.commit()
+
+        _gap_analysis_progress[pid] = {
+            "status": "completed", "step": "done", "progress": 100,
+            "message": "Analyse des ecarts terminee",
+        }
+
+    except Exception as e:
+        logger.exception("Gap analysis failed for project %s", project_id)
+        _gap_analysis_progress[pid] = {
+            "status": "error", "step": "error", "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        }
 
 
 async def _get_all_chunks_by_category(
@@ -1509,82 +1561,135 @@ async def get_compliance_analysis(
 @router.post("/{project_id}/compliance-analysis")
 async def analyze_compliance(
     project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Analyze exhaustiveness and compliance of the current response."""
+    """Launch compliance analysis as a background task (returns immediately)."""
+    pid = str(project_id)
+
+    existing = _compliance_progress.get(pid)
+    if existing and existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Analyse de conformite deja en cours")
+
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    ai_service = await _get_ai_service(project.workspace_id, db)
-
-    # Get all chapter content
+    # Quick pre-checks before launching background task
     chapters_result = await db.execute(
-        select(Chapter)
-        .where(Chapter.project_id == project_id)
-        .order_by(Chapter.order)
+        select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
     )
     chapters = chapters_result.scalars().all()
     response_content = "\n\n".join([
         f"## {c.title}\n{c.content}" for c in chapters if c.content
     ])
-
     if not response_content.strip():
         raise HTTPException(status_code=400, detail="Aucun contenu de chapitre à analyser. Rédigez d'abord les chapitres.")
 
-    # Get new RFP requirements
-    new_rfp_chunks = VectorService.search(str(project_id), "exigences critères évaluation", top_k=25, category_filter="new_rfp")
-    rfp_requirements = "\n\n".join([c["content"] for c in new_rfp_chunks])
+    _compliance_progress[pid] = {
+        "status": "running", "step": "starting", "progress": 0,
+        "message": "Demarrage de l'analyse de conformite...",
+    }
 
-    if not rfp_requirements:
-        raise HTTPException(status_code=400, detail="Aucun document d'appel d'offres indexé")
+    background_tasks.add_task(_run_compliance_analysis, project_id, project.workspace_id)
+
+    return {"success": True, "message": "Analyse de conformite lancee en arriere-plan"}
+
+
+@router.get("/{project_id}/compliance-analysis-status")
+async def get_compliance_analysis_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of compliance analysis."""
+    pid = str(project_id)
+    return _compliance_progress.get(pid, {
+        "status": "idle", "step": "idle", "progress": 0, "message": "",
+    })
+
+
+async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
+    """Background task for compliance analysis."""
+    from ..database import async_session
+    pid = str(project_id)
+
+    def _update(step: str, progress: int, message: str):
+        _compliance_progress[pid] = {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+        }
 
     try:
-        # Anonymize sequentially (same DB session cannot be used concurrently)
-        anon_response = await AnonymizationService.anonymize_text(response_content, project_id, db)
-        anon_rfp = await AnonymizationService.anonymize_text(rfp_requirements, project_id, db)
+        async with async_session() as db:
+            ai_service = await _get_ai_service(workspace_id, db)
 
-        analysis = await ai_service.analyze_compliance(anon_response, anon_rfp)
+            _update("loading", 10, "Chargement des chapitres...")
+            chapters_result = await db.execute(
+                select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
+            )
+            chapters = chapters_result.scalars().all()
+            response_content = "\n\n".join([
+                f"## {c.title}\n{c.content}" for c in chapters if c.content
+            ])
 
-        # Deanonymize text fields in the analysis so user sees real values
-        for req in analysis.get("covered_requirements", []):
-            for key in ("requirement", "comment"):
-                if key in req and req[key]:
-                    req[key] = await AnonymizationService.deanonymize_text(req[key], project_id, db)
-        for elem in analysis.get("missing_elements", []):
-            for key in ("requirement", "description"):
-                if key in elem and elem[key]:
-                    elem[key] = await AnonymizationService.deanonymize_text(elem[key], project_id, db)
-        for i, rec in enumerate(analysis.get("recommendations", [])):
-            if rec:
-                analysis["recommendations"][i] = await AnonymizationService.deanonymize_text(rec, project_id, db)
-        if analysis.get("summary"):
-            analysis["summary"] = await AnonymizationService.deanonymize_text(analysis["summary"], project_id, db)
-    except HTTPException:
-        raise
+            _update("searching", 15, "Recherche des exigences du cahier des charges...")
+            new_rfp_chunks = VectorService.search(str(project_id), "exigences critères évaluation", top_k=25, category_filter="new_rfp")
+            rfp_requirements = "\n\n".join([c["content"] for c in new_rfp_chunks])
+
+            if not rfp_requirements:
+                _compliance_progress[pid] = {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "Aucun document d'appel d'offres indexe",
+                }
+                return
+
+            _update("anonymizing", 25, "Anonymisation des contenus...")
+            anon_response = await AnonymizationService.anonymize_text(response_content, project_id, db)
+            anon_rfp = await AnonymizationService.anonymize_text(rfp_requirements, project_id, db)
+
+            _update("analyzing", 40, "Analyse IA de la conformite en cours...")
+            analysis = await ai_service.analyze_compliance(anon_response, anon_rfp)
+
+            _update("deanonymizing", 75, "Deanonymisation des resultats...")
+            for req in analysis.get("covered_requirements", []):
+                for key in ("requirement", "comment"):
+                    if key in req and req[key]:
+                        req[key] = await AnonymizationService.deanonymize_text(req[key], project_id, db)
+            for elem in analysis.get("missing_elements", []):
+                for key in ("requirement", "description"):
+                    if key in elem and elem[key]:
+                        elem[key] = await AnonymizationService.deanonymize_text(elem[key], project_id, db)
+            for i, rec in enumerate(analysis.get("recommendations", [])):
+                if rec:
+                    analysis["recommendations"][i] = await AnonymizationService.deanonymize_text(rec, project_id, db)
+            if analysis.get("summary"):
+                analysis["summary"] = await AnonymizationService.deanonymize_text(analysis["summary"], project_id, db)
+
+            _update("saving", 90, "Enregistrement des resultats...")
+            cr = ComplianceResult(
+                project_id=project_id,
+                score=analysis.get("score", 0),
+                summary=analysis.get("summary", ""),
+                covered_requirements=analysis.get("covered_requirements", []),
+                missing_elements=analysis.get("missing_elements", []),
+                recommendations=analysis.get("recommendations", []),
+            )
+            db.add(cr)
+            await db.commit()
+
+        _compliance_progress[pid] = {
+            "status": "completed", "step": "done", "progress": 100,
+            "message": "Analyse de conformite terminee",
+        }
+
     except Exception as e:
         logger.exception("Compliance analysis failed for project %s", project_id)
-        raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse de conformité: {str(e)}")
-
-    # Persist the result
-    cr = ComplianceResult(
-        project_id=project_id,
-        score=analysis.get("score", 0),
-        summary=analysis.get("summary", ""),
-        covered_requirements=analysis.get("covered_requirements", []),
-        missing_elements=analysis.get("missing_elements", []),
-        recommendations=analysis.get("recommendations", []),
-    )
-    db.add(cr)
-    await db.commit()
-    await db.refresh(cr)
-
-    analysis["id"] = str(cr.id)
-    analysis["created_at"] = cr.created_at.isoformat() if cr.created_at else None
-
-    return {"success": True, "analysis": analysis}
+        _compliance_progress[pid] = {
+            "status": "error", "step": "error", "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        }
 
 
 @router.post("/{project_id}/compliance-analysis/generate-recommendation")

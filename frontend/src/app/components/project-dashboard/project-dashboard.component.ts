@@ -44,8 +44,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           </div>
         </div>
         <div class="header-actions">
-          <button mat-raised-button (click)="exportWord()" matTooltip="Exporter en Word">
-            <mat-icon>file_download</mat-icon> DOCX
+          <button mat-raised-button (click)="exportWord()" [disabled]="exportingWord" matTooltip="Exporter en Word">
+            <mat-spinner *ngIf="exportingWord" diameter="18"></mat-spinner>
+            <mat-icon *ngIf="!exportingWord">file_download</mat-icon>
+            {{ exportingWord ? 'Export...' : 'DOCX' }}
           </button>
           <button mat-raised-button (click)="exportBackup()" [disabled]="exportingBackup" matTooltip="Sauvegarder le projet">
             <mat-spinner *ngIf="exportingBackup" diameter="18"></mat-spinner>
@@ -57,6 +59,20 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           </button>
         </div>
       </div>
+
+      <!-- Word export progress -->
+      <mat-card *ngIf="wordProgress && wordProgress.status === 'running'" class="gen-progress-card word-progress-card">
+        <div class="gen-progress-header">
+          <mat-spinner diameter="20" class="spin-icon"></mat-spinner>
+          <h3>Export Word en cours...</h3>
+        </div>
+        <mat-progress-bar mode="determinate" [value]="wordProgress.progress"></mat-progress-bar>
+        <div class="gen-progress-details">
+          <span class="gen-step">{{ wordProgress.step }}</span>
+          <span class="gen-pct">{{ wordProgress.progress }}%</span>
+        </div>
+        <p class="gen-message">{{ wordProgress.message }}</p>
+      </mat-card>
 
       <!-- Backup progress -->
       <mat-card *ngIf="backupProgress && backupProgress.status === 'running'" class="gen-progress-card backup-progress-card">
@@ -885,6 +901,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .doc-group-count { font-size: 12px; color: #888; margin-left: auto; }
     .prefill-progress-card { border-left-color: #7b1fa2; }
     .prefill-progress-card .gen-progress-header h3 { color: #7b1fa2; }
+    .word-progress-card { border-left-color: #1565c0; }
+    .word-progress-card .gen-progress-header h3 { color: #1565c0; }
+    .word-progress-card .spin-icon { color: #1565c0; }
     .backup-progress-card { border-left-color: #00695c; }
     .backup-progress-card .gen-progress-header h3 { color: #00695c; }
     .backup-progress-card .spin-icon { color: #00695c; }
@@ -1017,6 +1036,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.stopDetectPolling();
     this.stopFillPolling();
     this.stopBackupPolling();
+    this.stopWordPolling();
   }
 
   loadAll(): void {
@@ -1736,18 +1756,65 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
+  exportingWord = false;
+  wordProgress: { status: string; step: string; progress: number; message: string } | null = null;
+  private wordPollSub: Subscription | null = null;
+
   exportWord(): void {
+    this.exportingWord = true;
+    this.wordProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de l\'export Word...' };
     this.api.exportWord(this.projectId).subscribe({
-      next: (blob) => {
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `reponse_ao_${this.project?.rfp_reference || 'export'}.docx`;
-        a.click();
-        window.URL.revokeObjectURL(url);
+      next: () => {
+        this.startWordPolling();
       },
-      error: (err) => this.snackBar.open('Erreur export', 'OK', { duration: 3000 }),
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur export', 'OK', { duration: 5000 });
+        this.exportingWord = false;
+        this.wordProgress = null;
+      },
     });
+  }
+
+  private startWordPolling(): void {
+    this.stopWordPolling();
+    this.wordPollSub = timer(1000, 1500).pipe(
+      switchMap(() => this.api.getWordStatus(this.projectId))
+    ).subscribe({
+      next: (status) => {
+        this.wordProgress = status;
+        if (status.status === 'completed') {
+          this.stopWordPolling();
+          this.api.downloadWord(this.projectId).subscribe({
+            next: (blob) => {
+              const url = window.URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `reponse_ao_${this.project?.rfp_reference || 'export'}.docx`;
+              a.click();
+              window.URL.revokeObjectURL(url);
+              this.exportingWord = false;
+              this.wordProgress = null;
+              this.snackBar.open('Export Word telecharge', 'OK', { duration: 3000 });
+            },
+            error: () => {
+              this.exportingWord = false;
+              this.wordProgress = null;
+              this.snackBar.open('Erreur telechargement Word', 'OK', { duration: 5000 });
+            },
+          });
+        } else if (status.status === 'error') {
+          this.stopWordPolling();
+          this.exportingWord = false;
+          this.snackBar.open(status.message || 'Erreur export Word', 'OK', { duration: 5000 });
+          this.wordProgress = null;
+        }
+      },
+    });
+  }
+
+  private stopWordPolling(): void {
+    this.wordPollSub?.unsubscribe();
+    this.wordPollSub = null;
   }
 
   exportingBackup = false;

@@ -147,11 +147,15 @@ export class ApiService {
     return this.http.post(`${this.baseUrl}/chapters/${chapterId}/note`, { content });
   }
 
-  generateChapterContent(chapterId: string, action: string, customPrompt: string = '', useOldResponse: boolean = true, includeImprovementAxes: boolean = true): Observable<{ content: string }> {
-    return this.http.post<{ content: string }>(
+  generateChapterContent(chapterId: string, action: string, customPrompt: string = '', useOldResponse: boolean = true, includeImprovementAxes: boolean = true): Observable<any> {
+    return this.http.post<any>(
       `${this.baseUrl}/chapters/${chapterId}/generate-content`,
       { action, custom_prompt: customPrompt, use_old_response: useOldResponse, include_improvement_axes: includeImprovementAxes }
     );
+  }
+
+  getChapterGenStatus(chapterId: string): Observable<{ status: string; step: string; progress: number; message: string }> {
+    return this.http.get<any>(`${this.baseUrl}/chapters/${chapterId}/generate-status`);
   }
 
   reorderChapters(chapterOrders: { id: string; order: number }[]): Observable<any> {
@@ -163,8 +167,12 @@ export class ApiService {
     return this.http.get<{ analysis: GapAnalysis | null }>(`${this.baseUrl}/projects/${projectId}/gap-analysis`);
   }
 
-  analyzeGap(projectId: string): Observable<{ analysis: GapAnalysis }> {
-    return this.http.post<{ analysis: GapAnalysis }>(`${this.baseUrl}/projects/${projectId}/gap-analysis`, {});
+  analyzeGap(projectId: string): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/gap-analysis`, {});
+  }
+
+  getGapAnalysisStatus(projectId: string): Observable<{ status: string; step: string; progress: number; message: string }> {
+    return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/gap-analysis-status`);
   }
 
   generateStructure(projectId: string): Observable<any> {
@@ -237,8 +245,12 @@ export class ApiService {
     return this.http.get<{ analysis: ComplianceAnalysis | null }>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`);
   }
 
-  analyzeCompliance(projectId: string): Observable<{ analysis: ComplianceAnalysis }> {
-    return this.http.post<{ analysis: ComplianceAnalysis }>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`, {});
+  analyzeCompliance(projectId: string): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`, {});
+  }
+
+  getComplianceAnalysisStatus(projectId: string): Observable<{ status: string; step: string; progress: number; message: string }> {
+    return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/compliance-analysis-status`);
   }
 
   generateRecommendationContent(projectId: string, recommendation: string, chapterId?: string): Observable<{ content: string }> {
@@ -285,8 +297,16 @@ export class ApiService {
   }
 
   // ── Export/Import ──
-  exportWord(projectId: string): Observable<Blob> {
-    return this.http.post(`${this.baseUrl}/export/${projectId}/word`, {}, { responseType: 'blob' });
+  exportWord(projectId: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/word`, {});
+  }
+
+  getWordStatus(projectId: string): Observable<{ status: string; step: string; progress: number; message: string }> {
+    return this.http.get<any>(`${this.baseUrl}/export/${projectId}/word-status`);
+  }
+
+  downloadWord(projectId: string): Observable<Blob> {
+    return this.http.get(`${this.baseUrl}/export/${projectId}/word-download`, { responseType: 'blob' });
   }
 
   exportBackup(projectId: string): Observable<any> {
