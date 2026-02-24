@@ -14,7 +14,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
 from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType, ComplianceResult, GapAnalysisResult
-from ..models.document import Document, DocumentChunk, DocumentCategory
+from ..models.document import Document, DocumentChunk, DocumentCategory, ProcessingStatus
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
 from ..models.response_document import ResponseDocument, DocumentFormat, ContentType
 from ..schemas.project import (
@@ -1616,15 +1616,30 @@ async def analyze_compliance(
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
     # Quick pre-checks before launching background task
-    chapters_result = await db.execute(
-        select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
+    # Check for NEW_RESPONSE documents (uploaded response files)
+    nr_result = await db.execute(
+        select(Document.id).where(
+            Document.project_id == project_id,
+            Document.category == DocumentCategory.NEW_RESPONSE,
+            Document.processing_status == ProcessingStatus.COMPLETED,
+        ).limit(1)
     )
-    chapters = chapters_result.scalars().all()
-    response_content = "\n\n".join([
-        f"## {c.title}\n{c.content}" for c in chapters if c.content
-    ])
-    if not response_content.strip():
-        raise HTTPException(status_code=400, detail="Aucun contenu de chapitre à analyser. Rédigez d'abord les chapitres.")
+    has_new_response_docs = nr_result.scalar_one_or_none() is not None
+
+    if not has_new_response_docs:
+        # Fallback: check chapters content
+        chapters_result = await db.execute(
+            select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
+        )
+        chapters = chapters_result.scalars().all()
+        response_content = "\n\n".join([
+            f"## {c.title}\n{c.content}" for c in chapters if c.content
+        ])
+        if not response_content.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="Aucun contenu à analyser. Chargez des documents 'Notre réponse' ou rédigez les chapitres.",
+            )
 
     _compliance_progress[pid] = {
         "status": "running", "step": "starting", "progress": 0,
