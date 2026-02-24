@@ -553,9 +553,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     </button>
                     <button mat-raised-button color="accent" (click)="aiGenerate(ch.id)"
                       [disabled]="aiProcessing[ch.id]"
-                      matTooltip="Generer le contenu a partir de l'AO et de l'ancienne reponse">
+                      [matTooltip]="ch.children?.length ? 'Generer le contenu du chapitre et de ses ' + ch.children.length + ' sous-chapitres' : 'Generer le contenu a partir de l\'AO et de l\'ancienne reponse'">
                       <mat-icon>auto_awesome</mat-icon>
                       {{ ch.content ? 'Regenerer' : 'Remplir avec IA' }}
+                      <span *ngIf="ch.children?.length" class="ai-badge">+{{ ch.children.length }}</span>
                     </button>
                     <button mat-icon-button (click)="toggleAiPrompt(ch.id)" matTooltip="Instruction personnalisee a l'IA">
                       <mat-icon>psychology</mat-icon>
@@ -756,6 +757,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .ai-progress-section { margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 8px; border-left: 3px solid #7b1fa2; }
     .ai-progress-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #7b1fa2; font-weight: 500; }
     .ai-progress-pct { text-align: right; font-size: 12px; font-weight: bold; color: #7b1fa2; margin-top: 4px; }
+    .ai-badge { background: #fff; color: #7b1fa2; border-radius: 10px; padding: 1px 6px; font-size: 11px; font-weight: bold; margin-left: 4px; }
     .ai-prompt-section { margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 8px; }
     .ai-prompt-section .full-width { width: 100%; }
     .ai-prompt-actions { display: flex; gap: 8px; align-items: center; }
@@ -1328,40 +1330,70 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   }
 
   aiGenerate(chapterId: string): void {
-    this.aiProcessing[chapterId] = true;
-    this.aiProgress[chapterId] = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de la generation...' };
-    this.api.generateChapterContent(chapterId, 'generate').subscribe({
-      next: () => {
-        this._startAiPolling(chapterId);
-      },
-      error: (err) => {
-        this.aiProcessing[chapterId] = false;
-        delete this.aiProgress[chapterId];
-        this.snackBar.open(err.error?.detail || 'Erreur generation', 'OK', { duration: 5000 });
-      },
-    });
+    // Find the chapter to check for children
+    const chapter = this._findChapter(chapterId);
+    const allIds = [chapterId];
+    if (chapter?.children?.length) {
+      for (const sub of chapter.children) {
+        allIds.push(sub.id);
+      }
+    }
+    this._launchAiGenerate(allIds, 'generate');
   }
 
   aiCustomPrompt(chapterId: string): void {
     const prompt = this.aiPromptText[chapterId];
     if (!prompt) return;
-    this.aiProcessing[chapterId] = true;
-    this.aiProgress[chapterId] = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de la generation...' };
-    this.api.generateChapterContent(chapterId, 'custom', prompt).subscribe({
-      next: () => {
-        this.aiPromptVisible[chapterId] = false;
-        this.aiPromptText[chapterId] = '';
-        this._startAiPolling(chapterId);
-      },
-      error: (err) => {
-        this.aiProcessing[chapterId] = false;
-        delete this.aiProgress[chapterId];
-        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
-      },
-    });
+    this.aiPromptVisible[chapterId] = false;
+    this.aiPromptText[chapterId] = '';
+    this._launchAiGenerate([chapterId], 'custom', prompt);
   }
 
-  private _startAiPolling(chapterId: string): void {
+  private _launchAiGenerate(chapterIds: string[], action: string, customPrompt: string = ''): void {
+    // Mark all as processing immediately
+    for (const id of chapterIds) {
+      this.aiProcessing[id] = true;
+      this.aiProgress[id] = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de la generation...' };
+    }
+
+    // Track how many are pending so we reload only once all are done
+    let pending = chapterIds.length;
+    const onDone = () => {
+      pending--;
+      if (pending <= 0) {
+        this.loadAll();
+      }
+    };
+
+    // Launch each chapter generation in parallel
+    for (const id of chapterIds) {
+      this.api.generateChapterContent(id, action, customPrompt).subscribe({
+        next: () => {
+          this._startAiPolling(id, onDone);
+        },
+        error: (err) => {
+          this.aiProcessing[id] = false;
+          delete this.aiProgress[id];
+          this.snackBar.open(err.error?.detail || 'Erreur generation', 'OK', { duration: 5000 });
+          onDone();
+        },
+      });
+    }
+  }
+
+  private _findChapter(chapterId: string): Chapter | null {
+    for (const group of this.groupedChapters) {
+      for (const ch of group.chapters) {
+        if (ch.id === chapterId) return ch;
+        for (const sub of (ch.children || [])) {
+          if (sub.id === chapterId) return sub;
+        }
+      }
+    }
+    return null;
+  }
+
+  private _startAiPolling(chapterId: string, onComplete?: () => void): void {
     this._stopAiPolling(chapterId);
     this.aiPollSubs[chapterId] = timer(500, 1500).pipe(
       switchMap(() => this.api.getChapterGenStatus(chapterId))
@@ -1371,13 +1403,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
           this._stopAiPolling(chapterId);
           this.aiProcessing[chapterId] = false;
           delete this.aiProgress[chapterId];
-          this.snackBar.open('Contenu genere', 'OK', { duration: 3000 });
-          this.loadAll();
+          onComplete?.();
         } else if (status.status === 'error') {
           this._stopAiPolling(chapterId);
           this.aiProcessing[chapterId] = false;
           delete this.aiProgress[chapterId];
           this.snackBar.open(status.message || 'Erreur generation', 'OK', { duration: 5000 });
+          onComplete?.();
         } else {
           this.aiProgress[chapterId] = status;
         }
