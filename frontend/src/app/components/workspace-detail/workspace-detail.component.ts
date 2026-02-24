@@ -13,6 +13,7 @@ import { MatListModule } from '@angular/material/list';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
+import { MatCheckboxModule } from '@angular/material/checkbox';
 import { Router } from '@angular/router';
 import { ApiService } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
@@ -25,7 +26,7 @@ import { Workspace, RFPProject, WorkspaceMember } from '../../models/report.mode
     CommonModule, FormsModule, RouterLink,
     MatCardModule, MatButtonModule, MatIconModule, MatInputModule,
     MatTabsModule, MatChipsModule, MatProgressSpinnerModule, MatListModule, MatSnackBarModule,
-    MatMenuModule, MatTooltipModule,
+    MatMenuModule, MatTooltipModule, MatCheckboxModule,
   ],
   template: `
     <div class="page-container" *ngIf="workspace">
@@ -92,6 +93,18 @@ import { Workspace, RFPProject, WorkspaceMember } from '../../models/report.mode
                 <mat-label>Description</mat-label>
                 <textarea matInput [(ngModel)]="newProject.description" rows="2"></textarea>
               </mat-form-field>
+              <div class="category-selection">
+                <h4>Catégories de documents à inclure</h4>
+                <div class="category-checkboxes">
+                  <mat-checkbox *ngFor="let cat of availableCategories"
+                    [checked]="newProject.enabled_categories.includes(cat.value)"
+                    (change)="toggleCategory(cat.value, $event.checked)">
+                    <mat-icon [style.color]="cat.color" style="font-size:18px;vertical-align:middle;margin-right:4px">{{ cat.icon }}</mat-icon>
+                    {{ cat.label }}
+                    <span class="cat-desc">{{ cat.desc }}</span>
+                  </mat-checkbox>
+                </div>
+              </div>
               <div class="form-actions">
                 <button mat-button (click)="showCreateProject = false">Annuler</button>
                 <button mat-raised-button color="primary" (click)="createProject()" [disabled]="!newProject.name">Créer</button>
@@ -202,6 +215,11 @@ import { Workspace, RFPProject, WorkspaceMember } from '../../models/report.mode
     .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; }
     .full-width { width: 100%; }
     .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .category-selection { margin-bottom: 16px; }
+    .category-selection h4 { color: #1B3A5C; margin: 0 0 8px 0; font-size: 14px; }
+    .category-checkboxes { display: flex; flex-wrap: wrap; gap: 12px 24px; }
+    .category-checkboxes mat-checkbox { font-size: 13px; }
+    .cat-desc { color: #888; font-size: 11px; margin-left: 4px; }
     .ws-description { color: #666; font-size: 13px; }
     .edit-ws-inline { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
     .edit-ws-inline mat-form-field { width: 200px; }
@@ -231,7 +249,13 @@ export class WorkspaceDetailComponent implements OnInit {
   loading = true;
   showCreateProject = false;
   isAdmin = false;
-  newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '' };
+  availableCategories = [
+    { value: 'old_rfp', label: 'Ancien AO', desc: 'Documents de l\'ancien appel d\'offres', icon: 'history', color: '#1976d2' },
+    { value: 'old_response', label: 'Ancienne Réponse', desc: 'Réponse à l\'ancien AO', icon: 'reply', color: '#388e3c' },
+    { value: 'new_rfp', label: 'Nouvel AO', desc: 'Documents du nouvel appel d\'offres', icon: 'fiber_new', color: '#d32f2f' },
+    { value: 'new_response', label: 'Notre Réponse', desc: 'Notre réponse à analyser', icon: 'task', color: '#7b1fa2' },
+  ];
+  newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'] as string[] };
   editingWorkspace = false;
   editWsName = '';
   editWsDescription = '';
@@ -266,11 +290,21 @@ export class WorkspaceDetailComponent implements OnInit {
     });
   }
 
+  toggleCategory(value: string, checked: boolean): void {
+    if (checked) {
+      if (!this.newProject.enabled_categories.includes(value)) {
+        this.newProject.enabled_categories.push(value);
+      }
+    } else {
+      this.newProject.enabled_categories = this.newProject.enabled_categories.filter(c => c !== value);
+    }
+  }
+
   createProject(): void {
     this.api.createProject(this.workspaceId, this.newProject).subscribe({
       next: () => {
         this.showCreateProject = false;
-        this.newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '' };
+        this.newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'] };
         this.loadData();
       },
     });

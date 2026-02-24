@@ -982,11 +982,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   aiPromptVisible: Record<string, boolean> = {};
   aiPromptText: Record<string, string> = {};
 
-  categories = [
+  allCategories = [
     { value: 'old_rfp', label: 'Ancien AO', desc: 'Documents de l\'ancien appel d\'offres', icon: 'history', color: '#1976d2' },
     { value: 'old_response', label: 'Ancienne Réponse', desc: 'Réponse à l\'ancien AO', icon: 'reply', color: '#388e3c' },
     { value: 'new_rfp', label: 'Nouvel AO', desc: 'Documents du nouvel appel d\'offres', icon: 'fiber_new', color: '#d32f2f' },
+    { value: 'new_response', label: 'Notre Réponse', desc: 'Notre réponse à analyser', icon: 'task', color: '#7b1fa2' },
   ];
+  categories = this.allCategories.slice(0, 3);
 
   constructor(
     private route: ActivatedRoute,
@@ -1077,7 +1079,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   loadAll(): void {
     this.loading = true;
     this.api.getProject(this.projectId).subscribe({
-      next: (p) => { this.project = p; this.loading = false; },
+      next: (p) => {
+        this.project = p;
+        this.loading = false;
+        if (p.enabled_categories && p.enabled_categories.length) {
+          this.categories = this.allCategories.filter(c => p.enabled_categories.includes(c.value));
+        }
+      },
       error: () => { this.loading = false; },
     });
     this.api.getChapters(this.projectId).subscribe({

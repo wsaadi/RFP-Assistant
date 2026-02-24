@@ -70,6 +70,7 @@ export interface RFPProject {
   deadline: string;
   status: string;
   improvement_axes: string;
+  enabled_categories: string[];
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -83,6 +84,7 @@ export interface ProjectCreate {
   client_name: string;
   rfp_reference: string;
   deadline: string;
+  enabled_categories: string[];
 }
 
 // ── Document ──
