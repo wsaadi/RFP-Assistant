@@ -28,6 +28,9 @@ logger = logging.getLogger(__name__)
 # In-memory progress tracking for chapter generation
 _chapter_gen_progress: Dict[str, dict] = {}
 
+# Semaphore to limit concurrent chapter generations (avoids DB pool exhaustion)
+_gen_semaphore = asyncio.Semaphore(3)
+
 
 def _chapter_to_out(chapter: Chapter, children: list = None) -> ChapterOut:
     """Convert Chapter model to ChapterOut schema."""
@@ -250,7 +253,7 @@ async def generate_chapter_content(
     cid = str(chapter_id)
 
     existing = _chapter_gen_progress.get(cid)
-    if existing and existing.get("status") == "running":
+    if existing and existing.get("status") in ("running", "queued"):
         raise HTTPException(status_code=409, detail="Generation deja en cours pour ce chapitre")
 
     result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
@@ -269,8 +272,8 @@ async def generate_chapter_content(
         raise HTTPException(status_code=400, detail="Configuration IA non définie")
 
     _chapter_gen_progress[cid] = {
-        "status": "running", "step": "starting", "progress": 0,
-        "message": "Demarrage de la generation...",
+        "status": "queued", "step": "queued", "progress": 0,
+        "message": "En file d'attente...",
     }
 
     background_tasks.add_task(
@@ -298,7 +301,11 @@ async def _run_chapter_generation(
     chapter_id: uuid.UUID, project_id: uuid.UUID, workspace_id: uuid.UUID,
     action: str, custom_prompt: str, use_old_response: bool, include_improvement_axes: bool,
 ):
-    """Background task for chapter content generation."""
+    """Background task for chapter content generation.
+
+    Uses a semaphore to limit concurrent generations and avoid DB pool exhaustion.
+    Tasks wait in queue with status 'queued' until a slot is available.
+    """
     from ..database import async_session
     cid = str(chapter_id)
 
@@ -309,86 +316,89 @@ async def _run_chapter_generation(
         }
 
     try:
-        async with async_session() as db:
-            config_result = await db.execute(
-                select(AIConfig).where(AIConfig.workspace_id == workspace_id)
-            )
-            config = config_result.scalar_one_or_none()
-            ai_service = MistralAIService.from_config(config, config.mistral_api_key_encrypted)
-
-            result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
-            chapter = result.scalar_one()
-            project_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
-            project = project_result.scalar_one()
-
-            if action == "custom" and custom_prompt:
-                _update("anonymizing", 15, "Anonymisation du contenu...")
-                anon_content = await AnonymizationService.anonymize_text(chapter.content or "", project_id, db)
-                anon_prompt = await AnonymizationService.anonymize_text(custom_prompt, project_id, db)
-
-                _update("generating", 35, "Generation IA en cours...")
-                result_text = await ai_service.execute_custom_prompt(
-                    anon_content, anon_prompt, chapter.title
+        # Wait for a slot in the concurrency pool
+        async with _gen_semaphore:
+            _update("starting", 0, "Demarrage de la generation...")
+            async with async_session() as db:
+                config_result = await db.execute(
+                    select(AIConfig).where(AIConfig.workspace_id == workspace_id)
                 )
+                config = config_result.scalar_one_or_none()
+                ai_service = MistralAIService.from_config(config, config.mistral_api_key_encrypted)
 
-                _update("deanonymizing", 80, "Deanonymisation...")
-                chapter.content = await AnonymizationService.deanonymize_text(result_text, project_id, db)
+                result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
+                chapter = result.scalar_one()
+                project_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+                project = project_result.scalar_one()
 
-            elif action == "enrich" and chapter.content:
-                _update("anonymizing", 15, "Anonymisation du contenu...")
-                anon_content = await AnonymizationService.anonymize_text(chapter.content, project_id, db)
-                improvement = project.improvement_axes if include_improvement_axes else ""
+                if action == "custom" and custom_prompt:
+                    _update("anonymizing", 15, "Anonymisation du contenu...")
+                    anon_content = await AnonymizationService.anonymize_text(chapter.content or "", project_id, db)
+                    anon_prompt = await AnonymizationService.anonymize_text(custom_prompt, project_id, db)
 
-                _update("generating", 35, "Enrichissement IA en cours...")
-                result_text = await ai_service.enrich_content(
-                    anon_content, chapter.title, chapter.rfp_requirement, improvement
-                )
-
-                _update("deanonymizing", 80, "Deanonymisation...")
-                chapter.content = await AnonymizationService.deanonymize_text(result_text, project_id, db)
-
-            else:
-                _update("searching", 10, "Recherche de contenu pertinent...")
-                old_response_content = ""
-                search_results = []
-                if use_old_response:
-                    search_results = VectorService.search(
-                        str(project_id),
-                        f"{chapter.title} {chapter.description}",
-                        top_k=5, category_filter="old_response",
+                    _update("generating", 35, "Generation IA en cours...")
+                    result_text = await ai_service.execute_custom_prompt(
+                        anon_content, anon_prompt, chapter.title
                     )
-                context_results = VectorService.search(
-                    str(project_id),
-                    f"{chapter.title} {chapter.rfp_requirement}",
-                    top_k=3,
-                )
-                context_chunks_text = "\n\n".join([r["content"] for r in context_results]) if context_results else ""
 
-                _update("anonymizing", 25, "Anonymisation...")
-                if search_results:
-                    raw_old = "\n\n".join([r["content"] for r in search_results])
-                    old_response_content = await AnonymizationService.anonymize_text(raw_old, project_id, db)
+                    _update("deanonymizing", 80, "Deanonymisation...")
+                    chapter.content = await AnonymizationService.deanonymize_text(result_text, project_id, db)
 
-                notes_text = "\n".join([n.get("content", "") for n in (chapter.notes or [])])
-                improvement = project.improvement_axes if include_improvement_axes else ""
+                elif action == "enrich" and chapter.content:
+                    _update("anonymizing", 15, "Anonymisation du contenu...")
+                    anon_content = await AnonymizationService.anonymize_text(chapter.content, project_id, db)
+                    improvement = project.improvement_axes if include_improvement_axes else ""
 
-                _update("generating", 40, "Generation IA du contenu...")
-                result_text = await ai_service.generate_chapter_content(
-                    chapter_title=chapter.title,
-                    chapter_description=chapter.description,
-                    rfp_requirement=chapter.rfp_requirement,
-                    old_response_content=old_response_content,
-                    context_chunks=context_chunks_text,
-                    improvement_axes=improvement,
-                    notes=notes_text,
-                )
+                    _update("generating", 35, "Enrichissement IA en cours...")
+                    result_text = await ai_service.enrich_content(
+                        anon_content, chapter.title, chapter.rfp_requirement, improvement
+                    )
 
-                _update("deanonymizing", 80, "Deanonymisation...")
-                chapter.content = await AnonymizationService.deanonymize_text(result_text, project_id, db)
+                    _update("deanonymizing", 80, "Deanonymisation...")
+                    chapter.content = await AnonymizationService.deanonymize_text(result_text, project_id, db)
 
-            _update("saving", 90, "Enregistrement...")
-            chapter.status = ChapterStatus.IN_PROGRESS
-            await db.commit()
+                else:
+                    _update("searching", 10, "Recherche de contenu pertinent...")
+                    old_response_content = ""
+                    search_results = []
+                    if use_old_response:
+                        search_results = VectorService.search(
+                            str(project_id),
+                            f"{chapter.title} {chapter.description}",
+                            top_k=5, category_filter="old_response",
+                        )
+                    context_results = VectorService.search(
+                        str(project_id),
+                        f"{chapter.title} {chapter.rfp_requirement}",
+                        top_k=3,
+                    )
+                    context_chunks_text = "\n\n".join([r["content"] for r in context_results]) if context_results else ""
+
+                    _update("anonymizing", 25, "Anonymisation...")
+                    if search_results:
+                        raw_old = "\n\n".join([r["content"] for r in search_results])
+                        old_response_content = await AnonymizationService.anonymize_text(raw_old, project_id, db)
+
+                    notes_text = "\n".join([n.get("content", "") for n in (chapter.notes or [])])
+                    improvement = project.improvement_axes if include_improvement_axes else ""
+
+                    _update("generating", 40, "Generation IA du contenu...")
+                    result_text = await ai_service.generate_chapter_content(
+                        chapter_title=chapter.title,
+                        chapter_description=chapter.description,
+                        rfp_requirement=chapter.rfp_requirement,
+                        old_response_content=old_response_content,
+                        context_chunks=context_chunks_text,
+                        improvement_axes=improvement,
+                        notes=notes_text,
+                    )
+
+                    _update("deanonymizing", 80, "Deanonymisation...")
+                    chapter.content = await AnonymizationService.deanonymize_text(result_text, project_id, db)
+
+                _update("saving", 90, "Enregistrement...")
+                chapter.status = ChapterStatus.IN_PROGRESS
+                await db.commit()
 
         _chapter_gen_progress[cid] = {
             "status": "completed", "step": "done", "progress": 100,

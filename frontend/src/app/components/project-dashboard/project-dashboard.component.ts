@@ -569,10 +569,11 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                   <!-- AI progress bar -->
                   <div *ngIf="aiProcessing[ch.id]" class="ai-progress-section">
                     <div class="ai-progress-header">
-                      <mat-spinner diameter="16"></mat-spinner>
+                      <mat-icon *ngIf="aiProgress[ch.id]?.status === 'queued'" class="queued-icon">schedule</mat-icon>
+                      <mat-spinner *ngIf="aiProgress[ch.id]?.status !== 'queued'" diameter="16"></mat-spinner>
                       <span>{{ aiProgress[ch.id]?.message || 'Generation IA en cours...' }}</span>
                     </div>
-                    <mat-progress-bar [mode]="aiProgress[ch.id]?.progress ? 'determinate' : 'indeterminate'" [value]="aiProgress[ch.id]?.progress || 0" color="accent"></mat-progress-bar>
+                    <mat-progress-bar [mode]="aiProgress[ch.id]?.progress ? 'determinate' : 'indeterminate'" [value]="aiProgress[ch.id]?.progress || 0" [color]="aiProgress[ch.id]?.status === 'queued' ? 'primary' : 'accent'"></mat-progress-bar>
                     <div *ngIf="aiProgress[ch.id]?.progress" class="ai-progress-pct">{{ aiProgress[ch.id]?.progress }}%</div>
                   </div>
 
@@ -630,10 +631,11 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       <!-- AI progress bar for sub-chapter -->
                       <div *ngIf="aiProcessing[sub.id]" class="ai-progress-section">
                         <div class="ai-progress-header">
-                          <mat-spinner diameter="16"></mat-spinner>
+                          <mat-icon *ngIf="aiProgress[sub.id]?.status === 'queued'" class="queued-icon">schedule</mat-icon>
+                          <mat-spinner *ngIf="aiProgress[sub.id]?.status !== 'queued'" diameter="16"></mat-spinner>
                           <span>{{ aiProgress[sub.id]?.message || 'Generation IA en cours...' }}</span>
                         </div>
-                        <mat-progress-bar [mode]="aiProgress[sub.id]?.progress ? 'determinate' : 'indeterminate'" [value]="aiProgress[sub.id]?.progress || 0" color="accent"></mat-progress-bar>
+                        <mat-progress-bar [mode]="aiProgress[sub.id]?.progress ? 'determinate' : 'indeterminate'" [value]="aiProgress[sub.id]?.progress || 0" [color]="aiProgress[sub.id]?.status === 'queued' ? 'primary' : 'accent'"></mat-progress-bar>
                         <div *ngIf="aiProgress[sub.id]?.progress" class="ai-progress-pct">{{ aiProgress[sub.id]?.progress }}%</div>
                       </div>
                       <!-- AI custom prompt for sub-chapter -->
@@ -758,6 +760,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .ai-progress-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #7b1fa2; font-weight: 500; }
     .ai-progress-pct { text-align: right; font-size: 12px; font-weight: bold; color: #7b1fa2; margin-top: 4px; }
     .ai-badge { background: #fff; color: #7b1fa2; border-radius: 10px; padding: 1px 6px; font-size: 11px; font-weight: bold; margin-left: 4px; }
+    .queued-icon { font-size: 18px; width: 18px; height: 18px; color: #1565c0; }
     .ai-prompt-section { margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 8px; }
     .ai-prompt-section .full-width { width: 100%; }
     .ai-prompt-actions { display: flex; gap: 8px; align-items: center; }
