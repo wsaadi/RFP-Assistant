@@ -1021,7 +1021,11 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
 4. Pour les cases à cocher, utilise "X" ou "Oui"/"Non"
 5. Pour les dates, utilise le format JJ/MM/AAAA
 6. Pour les montants, utilise des nombres avec 2 décimales (ex: 15000.00)
-7. Garde les valeurs COURTES et concises (pas de phrases longues)
+7. TRÈS IMPORTANT — Valeurs COURTES: chaque valeur doit tenir sur UNE SEULE LIGNE dans le PDF.
+   Maximum 60 caractères par valeur. Pas de phrases longues, pas de retours à la ligne.
+   Exemple BON: "ACME SAS" / "12 rue de la Paix, 75001 Paris" / "01 23 45 67 89"
+   Exemple MAUVAIS: "La société ACME SAS, immatriculée au RCS de Paris sous le numéro..."
+8. Ne duplique PAS les informations du label dans ta valeur (si le label dit "Nom:", ne mets pas "Nom: ACME")
 
 {output_format}"""
 
