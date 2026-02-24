@@ -777,14 +777,20 @@ RSE, développement durable, technique, qualité, sécurité, organisation, réf
 Ne marque PAS une exigence comme manquante si elle est couverte quelque part dans le contenu,
 même si l'information se trouve dans une section différente ou un onglet Excel séparé.
 
+Les documents sont structurés avec des marqueurs === DOCUMENT: nom_du_fichier === et --- Section ---.
+Utilise ces noms de documents pour indiquer les sources dans ta réponse.
+
 Réponds au format JSON (sans markdown):
 {
   "score": 0-100,
-  "covered_requirements": [{"requirement": "...", "coverage": "complete|partial|missing", "comment": "..."}],
-  "missing_elements": [{"requirement": "...", "description": "ce qui manque"}],
+  "covered_requirements": [{"requirement": "...", "coverage": "complete|partial|missing", "comment": "...", "source_rfp": "nom du document AO source", "source_response": "nom du document de réponse où l'info se trouve"}],
+  "missing_elements": [{"requirement": "...", "description": "ce qui manque", "source_rfp": "nom du document AO source"}],
   "recommendations": ["..."],
   "summary": "..."
-}"""
+}
+
+Pour source_rfp: indique le nom du document de l'appel d'offres où l'exigence est mentionnée.
+Pour source_response: indique le nom du document de la réponse qui couvre cette exigence (ou vide si manquant)."""
 
         user_prompt = f"""EXIGENCES DE L'APPEL D'OFFRES:
 {rfp_requirements[:50000]}
@@ -793,7 +799,8 @@ CONTENU DE LA RÉPONSE:
 {response_content[:50000]}
 
 Analyse l'exhaustivité et la conformité de cette réponse.
-IMPORTANT: Analyse TOUT le contenu fourni, y compris les données RSE, qualité, environnement, et tout autre thème présent."""
+IMPORTANT: Analyse TOUT le contenu fourni, y compris les données RSE, qualité, environnement, et tout autre thème présent.
+Indique pour chaque exigence le document source (AO) et le document de réponse correspondant."""
 
         response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000)
         result = _parse_json_object(response)

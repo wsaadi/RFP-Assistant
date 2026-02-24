@@ -167,8 +167,8 @@ export interface GapAnalysis {
 export interface ComplianceAnalysis {
   id?: string;
   score: number;
-  covered_requirements: { requirement: string; coverage: string; comment: string }[];
-  missing_elements: { requirement: string; description: string }[];
+  covered_requirements: { requirement: string; coverage: string; comment: string; source_rfp?: string; source_response?: string }[];
+  missing_elements: { requirement: string; description: string; source_rfp?: string }[];
   recommendations: string[];
   summary: string;
   created_at?: string;
