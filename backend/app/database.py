@@ -8,10 +8,11 @@ from .config import settings
 engine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
-    pool_size=5,
-    max_overflow=5,
+    pool_size=10,
+    max_overflow=20,
     pool_pre_ping=True,
     pool_recycle=300,
+    pool_timeout=60,
 )
 
 async_session = async_sessionmaker(

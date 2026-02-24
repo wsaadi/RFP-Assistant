@@ -872,6 +872,7 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
 
     Processes chapters sequentially and saves each one immediately
     so partial results are preserved if something fails.
+    DB connections are released during slow AI calls to minimize pool pressure.
     """
     from ..database import async_session
     pid = str(project_id)
@@ -886,12 +887,12 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
         }
 
     try:
+        # Short DB session to load config + chapter list
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
             _update("loading", 5, "Chargement des chapitres...")
 
-            # Get chapters to prefill
             query = select(Chapter).where(Chapter.project_id == project_id)
             if chapter_ids:
                 chapter_uuids = [uuid.UUID(cid) for cid in chapter_ids]
@@ -899,75 +900,88 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
             result = await db.execute(query.order_by(Chapter.order))
             chapters = result.scalars().all()
 
-            # Filter to chapters without content
-            to_prefill = [ch for ch in chapters if not ch.content]
-            total = len(to_prefill)
+            # Capture plain data we need (detach from session)
+            to_prefill = []
+            for ch in chapters:
+                if not ch.content:
+                    to_prefill.append({
+                        "id": ch.id,
+                        "title": ch.title,
+                        "description": ch.description,
+                        "rfp_requirement": ch.rfp_requirement,
+                    })
+            total_chapters = len(chapters)
+        # DB connection released here
 
-            if total == 0:
-                _prefill_progress[pid] = {
-                    "status": "completed",
-                    "step": "done",
-                    "progress": 100,
-                    "prefilled_count": 0,
-                    "message": "Aucun chapitre vide a pre-remplir",
-                }
-                return
+        total = len(to_prefill)
 
-            _update("loading", 10,
-                    f"{total} chapitre(s) vide(s) a pre-remplir sur {len(chapters)} total")
+        if total == 0:
+            _prefill_progress[pid] = {
+                "status": "completed",
+                "step": "done",
+                "progress": 100,
+                "prefilled_count": 0,
+                "message": "Aucun chapitre vide a pre-remplir",
+            }
+            return
 
-            prefilled = 0
-            skipped = 0
+        _update("loading", 10,
+                f"{total} chapitre(s) vide(s) a pre-remplir sur {total_chapters} total")
 
-            # Process chapters sequentially to avoid DB session concurrency issues
-            # and save each chapter immediately for incremental persistence
-            for idx, chapter in enumerate(to_prefill):
-                try:
-                    progress = 10 + int(85 * (idx + 1) / total)
-                    _update("prefilling", progress,
-                            f"Chapitre {idx + 1}/{total}: {chapter.title[:60]}...",
-                            prefilled_count=prefilled)
+        prefilled = 0
+        skipped = 0
 
-                    # Search old response for relevant content (sync, fast)
-                    search_query = f"{chapter.title} {chapter.description}"
-                    old_response_chunks = VectorService.search(
-                        str(project_id), search_query, top_k=5, category_filter="old_response"
-                    )
+        for idx, ch_data in enumerate(to_prefill):
+            try:
+                progress = 10 + int(85 * (idx + 1) / total)
+                _update("prefilling", progress,
+                        f"Chapitre {idx + 1}/{total}: {ch_data['title'][:60]}...",
+                        prefilled_count=prefilled)
 
-                    if not old_response_chunks:
-                        skipped += 1
-                        continue
+                # Vector search (no DB needed)
+                search_query = f"{ch_data['title']} {ch_data['description']}"
+                old_response_chunks = VectorService.search(
+                    str(project_id), search_query, top_k=5, category_filter="old_response"
+                )
 
-                    old_content = "\n\n".join([c["content"] for c in old_response_chunks])
+                if not old_response_chunks:
+                    skipped += 1
+                    continue
 
+                old_content = "\n\n".join([c["content"] for c in old_response_chunks])
+
+                # Short DB session for anonymization
+                async with async_session() as db:
                     anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
 
-                    content = await ai_service.generate_chapter_content(
-                        chapter_title=chapter.title,
-                        chapter_description=chapter.description,
-                        rfp_requirement=chapter.rfp_requirement,
-                        old_response_content=anon_content,
-                    )
+                # AI call (no DB connection held)
+                content = await ai_service.generate_chapter_content(
+                    chapter_title=ch_data["title"],
+                    chapter_description=ch_data["description"],
+                    rfp_requirement=ch_data["rfp_requirement"],
+                    old_response_content=anon_content,
+                )
 
+                # Short DB session for deanonymization + save
+                refs = [
+                    {"document": c["document_name"], "page": c["page_number"], "score": c["score"]}
+                    for c in old_response_chunks[:3]
+                ]
+                async with async_session() as db:
                     deanon = await AnonymizationService.deanonymize_text(content, project_id, db)
-                    refs = [
-                        {"document": c["document_name"], "page": c["page_number"], "score": c["score"]}
-                        for c in old_response_chunks[:3]
-                    ]
-
-                    # Save immediately after each chapter
+                    chap_result = await db.execute(select(Chapter).where(Chapter.id == ch_data["id"]))
+                    chapter = chap_result.scalar_one()
                     chapter.content = deanon
                     chapter.is_prefilled = True
                     chapter.status = ChapterStatus.IN_PROGRESS
                     chapter.source_references = refs
                     await db.commit()
-                    prefilled += 1
+                prefilled += 1
 
-                except Exception as ch_err:
-                    logger.warning("Prefill failed for chapter %s: %s", chapter.title, str(ch_err)[:200])
-                    skipped += 1
-                    # Continue with next chapter instead of failing completely
-                    continue
+            except Exception as ch_err:
+                logger.warning("Prefill failed for chapter %s: %s", ch_data["title"], str(ch_err)[:200])
+                skipped += 1
+                continue
 
         _prefill_progress[pid] = {
             "status": "completed",
