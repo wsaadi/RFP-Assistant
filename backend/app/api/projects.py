@@ -244,11 +244,9 @@ async def analyze_gap(
             detail="Documents d'ancien et/ou de nouvel appel d'offres manquants ou non indexés",
         )
 
-    # Anonymize both in parallel
-    anon_old, anon_new = await asyncio.gather(
-        AnonymizationService.anonymize_text(old_rfp_content, project_id, db),
-        AnonymizationService.anonymize_text(new_rfp_content, project_id, db),
-    )
+    # Anonymize sequentially (same DB session cannot be used concurrently)
+    anon_old = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
+    anon_new = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
 
     analysis = await ai_service.analyze_gap(anon_old, anon_new)
 
@@ -1462,13 +1460,26 @@ async def analyze_compliance(
         raise HTTPException(status_code=400, detail="Aucun document d'appel d'offres indexé")
 
     try:
-        # Anonymize both in parallel
-        anon_response, anon_rfp = await asyncio.gather(
-            AnonymizationService.anonymize_text(response_content, project_id, db),
-            AnonymizationService.anonymize_text(rfp_requirements, project_id, db),
-        )
+        # Anonymize sequentially (same DB session cannot be used concurrently)
+        anon_response = await AnonymizationService.anonymize_text(response_content, project_id, db)
+        anon_rfp = await AnonymizationService.anonymize_text(rfp_requirements, project_id, db)
 
         analysis = await ai_service.analyze_compliance(anon_response, anon_rfp)
+
+        # Deanonymize text fields in the analysis so user sees real values
+        for req in analysis.get("covered_requirements", []):
+            for key in ("requirement", "comment"):
+                if key in req and req[key]:
+                    req[key] = await AnonymizationService.deanonymize_text(req[key], project_id, db)
+        for elem in analysis.get("missing_elements", []):
+            for key in ("requirement", "description"):
+                if key in elem and elem[key]:
+                    elem[key] = await AnonymizationService.deanonymize_text(elem[key], project_id, db)
+        for i, rec in enumerate(analysis.get("recommendations", [])):
+            if rec:
+                analysis["recommendations"][i] = await AnonymizationService.deanonymize_text(rec, project_id, db)
+        if analysis.get("summary"):
+            analysis["summary"] = await AnonymizationService.deanonymize_text(analysis["summary"], project_id, db)
     except HTTPException:
         raise
     except Exception as e:
