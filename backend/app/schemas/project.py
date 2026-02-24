@@ -10,6 +10,7 @@ class ProjectCreate(BaseModel):
     client_name: str = ""
     rfp_reference: str = ""
     deadline: str = ""
+    enabled_categories: List[str] = ["old_rfp", "old_response", "new_rfp"]
 
 
 class ProjectUpdate(BaseModel):
@@ -20,6 +21,7 @@ class ProjectUpdate(BaseModel):
     deadline: Optional[str] = None
     status: Optional[str] = None
     improvement_axes: Optional[str] = None
+    enabled_categories: Optional[List[str]] = None
 
 
 class ProjectOut(BaseModel):
@@ -32,6 +34,7 @@ class ProjectOut(BaseModel):
     deadline: str
     status: str
     improvement_axes: str
+    enabled_categories: List[str] = ["old_rfp", "old_response", "new_rfp"]
     created_by: str
     created_at: datetime
     updated_at: datetime

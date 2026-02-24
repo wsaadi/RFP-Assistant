@@ -52,6 +52,9 @@ class RFPProject(Base):
         default=ProjectStatus.DRAFT,
     )
     improvement_axes: Mapped[str] = mapped_column(Text, default="")
+    enabled_categories: Mapped[list] = mapped_column(
+        JSON, default=lambda: ["old_rfp", "old_response", "new_rfp"]
+    )
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )

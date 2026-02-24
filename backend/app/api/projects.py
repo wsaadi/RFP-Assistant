@@ -89,6 +89,7 @@ async def list_projects(
             deadline=p.deadline,
             status=p.status.value,
             improvement_axes=p.improvement_axes,
+            enabled_categories=p.enabled_categories or ["old_rfp", "old_response", "new_rfp"],
             created_by=str(p.created_by),
             created_at=p.created_at,
             updated_at=p.updated_at,
@@ -113,6 +114,7 @@ async def create_project(
         client_name=request.client_name,
         rfp_reference=request.rfp_reference,
         deadline=request.deadline,
+        enabled_categories=request.enabled_categories,
         created_by=current_user.id,
     )
     db.add(project)
@@ -129,6 +131,7 @@ async def create_project(
         deadline=project.deadline,
         status=project.status.value,
         improvement_axes=project.improvement_axes,
+        enabled_categories=project.enabled_categories or ["old_rfp", "old_response", "new_rfp"],
         created_by=str(project.created_by),
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -166,6 +169,7 @@ async def get_project(
         deadline=project.deadline,
         status=project.status.value,
         improvement_axes=project.improvement_axes,
+        enabled_categories=project.enabled_categories or ["old_rfp", "old_response", "new_rfp"],
         created_by=str(project.created_by),
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -187,7 +191,7 @@ async def update_project(
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    for field in ["name", "description", "client_name", "rfp_reference", "deadline", "improvement_axes"]:
+    for field in ["name", "description", "client_name", "rfp_reference", "deadline", "improvement_axes", "enabled_categories"]:
         value = getattr(request, field, None)
         if value is not None:
             setattr(project, field, value)
@@ -1663,14 +1667,22 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            _update("loading", 10, "Chargement des chapitres...")
-            chapters_result = await db.execute(
-                select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
+            # Check if project has new_response documents to use instead of chapters
+            _update("loading", 10, "Chargement de la réponse...")
+            new_response_chunks = VectorService.search(
+                str(project_id), "contenu réponse appel offres", top_k=50, category_filter="new_response"
             )
-            chapters = chapters_result.scalars().all()
-            response_content = "\n\n".join([
-                f"## {c.title}\n{c.content}" for c in chapters if c.content
-            ])
+            if new_response_chunks:
+                response_content = "\n\n".join([c["content"] for c in new_response_chunks])
+            else:
+                # Fallback: use chapters content (existing behaviour)
+                chapters_result = await db.execute(
+                    select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
+                )
+                chapters = chapters_result.scalars().all()
+                response_content = "\n\n".join([
+                    f"## {c.title}\n{c.content}" for c in chapters if c.content
+                ])
 
             _update("searching", 15, "Recherche des exigences du cahier des charges...")
             new_rfp_chunks = VectorService.search(str(project_id), "exigences critères évaluation", top_k=25, category_filter="new_rfp")
