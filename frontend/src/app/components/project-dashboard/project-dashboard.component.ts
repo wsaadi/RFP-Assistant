@@ -553,7 +553,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     </button>
                     <button mat-raised-button color="accent" (click)="aiGenerate(ch.id)"
                       [disabled]="aiProcessing[ch.id]"
-                      [matTooltip]="ch.children?.length ? 'Generer le contenu du chapitre et de ses ' + ch.children.length + ' sous-chapitres' : 'Generer le contenu a partir de l\'AO et de l\'ancienne reponse'">
+                      [matTooltip]="getAiGenerateTooltip(ch)">
                       <mat-icon>auto_awesome</mat-icon>
                       {{ ch.content ? 'Regenerer' : 'Remplir avec IA' }}
                       <span *ngIf="ch.children?.length" class="ai-badge">+{{ ch.children.length }}</span>
@@ -1327,6 +1327,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   toggleAiPrompt(chapterId: string): void {
     this.aiPromptVisible[chapterId] = !this.aiPromptVisible[chapterId];
+  }
+
+  getAiGenerateTooltip(ch: Chapter): string {
+    if (ch.children?.length) {
+      return `Generer le contenu du chapitre et de ses ${ch.children.length} sous-chapitres`;
+    }
+    return 'Generer le contenu a partir de l\u2019AO et de l\u2019ancienne reponse';
   }
 
   aiGenerate(chapterId: string): void {
