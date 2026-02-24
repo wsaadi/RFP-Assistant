@@ -553,9 +553,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     </button>
                     <button mat-raised-button color="accent" (click)="aiGenerate(ch.id)"
                       [disabled]="aiProcessing[ch.id]"
-                      matTooltip="Generer le contenu a partir de l'AO et de l'ancienne reponse">
+                      [matTooltip]="ch.children?.length ? 'Generer le contenu du chapitre et de ses ' + ch.children.length + ' sous-chapitres' : 'Generer le contenu a partir de l\'AO et de l\'ancienne reponse'">
                       <mat-icon>auto_awesome</mat-icon>
                       {{ ch.content ? 'Regenerer' : 'Remplir avec IA' }}
+                      <span *ngIf="ch.children?.length" class="ai-badge">+{{ ch.children.length }}</span>
                     </button>
                     <button mat-icon-button (click)="toggleAiPrompt(ch.id)" matTooltip="Instruction personnalisee a l'IA">
                       <mat-icon>psychology</mat-icon>
@@ -569,9 +570,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                   <div *ngIf="aiProcessing[ch.id]" class="ai-progress-section">
                     <div class="ai-progress-header">
                       <mat-spinner diameter="16"></mat-spinner>
-                      <span>Generation IA en cours...</span>
+                      <span>{{ aiProgress[ch.id]?.message || 'Generation IA en cours...' }}</span>
                     </div>
-                    <mat-progress-bar mode="indeterminate" color="accent"></mat-progress-bar>
+                    <mat-progress-bar [mode]="aiProgress[ch.id]?.progress ? 'determinate' : 'indeterminate'" [value]="aiProgress[ch.id]?.progress || 0" color="accent"></mat-progress-bar>
+                    <div *ngIf="aiProgress[ch.id]?.progress" class="ai-progress-pct">{{ aiProgress[ch.id]?.progress }}%</div>
                   </div>
 
                   <!-- AI custom prompt -->
@@ -629,9 +631,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       <div *ngIf="aiProcessing[sub.id]" class="ai-progress-section">
                         <div class="ai-progress-header">
                           <mat-spinner diameter="16"></mat-spinner>
-                          <span>Generation IA en cours...</span>
+                          <span>{{ aiProgress[sub.id]?.message || 'Generation IA en cours...' }}</span>
                         </div>
-                        <mat-progress-bar mode="indeterminate" color="accent"></mat-progress-bar>
+                        <mat-progress-bar [mode]="aiProgress[sub.id]?.progress ? 'determinate' : 'indeterminate'" [value]="aiProgress[sub.id]?.progress || 0" color="accent"></mat-progress-bar>
+                        <div *ngIf="aiProgress[sub.id]?.progress" class="ai-progress-pct">{{ aiProgress[sub.id]?.progress }}%</div>
                       </div>
                       <!-- AI custom prompt for sub-chapter -->
                       <div *ngIf="aiPromptVisible[sub.id]" class="ai-prompt-section sub-ai-prompt">
@@ -751,8 +754,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .ch-desc { color: #666; font-size: 13px; }
     .ch-req { font-size: 13px; background: #f5f5f5; padding: 8px; border-radius: 4px; }
     .ch-actions { display: flex; gap: 8px; margin-top: 8px; align-items: center; }
-    .ai-progress-section { margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 8px; }
+    .ai-progress-section { margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 8px; border-left: 3px solid #7b1fa2; }
     .ai-progress-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #7b1fa2; font-weight: 500; }
+    .ai-progress-pct { text-align: right; font-size: 12px; font-weight: bold; color: #7b1fa2; margin-top: 4px; }
+    .ai-badge { background: #fff; color: #7b1fa2; border-radius: 10px; padding: 1px 6px; font-size: 11px; font-weight: bold; margin-left: 4px; }
     .ai-prompt-section { margin-top: 12px; padding: 12px; background: #f3e5f5; border-radius: 8px; }
     .ai-prompt-section .full-width { width: 100%; }
     .ai-prompt-actions { display: flex; gap: 8px; align-items: center; }
@@ -969,6 +974,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   // Per-chapter AI state
   aiProcessing: Record<string, boolean> = {};
+  aiProgress: Record<string, { status: string; step: string; progress: number; message: string }> = {};
+  private aiPollSubs: Record<string, Subscription> = {};
   aiPromptVisible: Record<string, boolean> = {};
   aiPromptText: Record<string, string> = {};
 
@@ -1057,6 +1064,11 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.stopFillPolling();
     this.stopBackupPolling();
     this.stopWordPolling();
+    // Stop all per-chapter AI polls
+    for (const sub of Object.values(this.aiPollSubs)) {
+      sub.unsubscribe();
+    }
+    this.aiPollSubs = {};
   }
 
   loadAll(): void {
@@ -1318,37 +1330,96 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   }
 
   aiGenerate(chapterId: string): void {
-    this.aiProcessing[chapterId] = true;
-    this.api.generateChapterContent(chapterId, 'generate').subscribe({
-      next: () => {
-        this.aiProcessing[chapterId] = false;
-        this.snackBar.open('Contenu genere', 'OK', { duration: 3000 });
-        this.loadAll();
-      },
-      error: (err) => {
-        this.aiProcessing[chapterId] = false;
-        this.snackBar.open(err.error?.detail || 'Erreur generation', 'OK', { duration: 5000 });
-      },
-    });
+    // Find the chapter to check for children
+    const chapter = this._findChapter(chapterId);
+    const allIds = [chapterId];
+    if (chapter?.children?.length) {
+      for (const sub of chapter.children) {
+        allIds.push(sub.id);
+      }
+    }
+    this._launchAiGenerate(allIds, 'generate');
   }
 
   aiCustomPrompt(chapterId: string): void {
     const prompt = this.aiPromptText[chapterId];
     if (!prompt) return;
-    this.aiProcessing[chapterId] = true;
-    this.api.generateChapterContent(chapterId, 'custom', prompt).subscribe({
-      next: () => {
-        this.aiProcessing[chapterId] = false;
-        this.aiPromptVisible[chapterId] = false;
-        this.aiPromptText[chapterId] = '';
-        this.snackBar.open('Contenu mis a jour', 'OK', { duration: 3000 });
+    this.aiPromptVisible[chapterId] = false;
+    this.aiPromptText[chapterId] = '';
+    this._launchAiGenerate([chapterId], 'custom', prompt);
+  }
+
+  private _launchAiGenerate(chapterIds: string[], action: string, customPrompt: string = ''): void {
+    // Mark all as processing immediately
+    for (const id of chapterIds) {
+      this.aiProcessing[id] = true;
+      this.aiProgress[id] = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de la generation...' };
+    }
+
+    // Track how many are pending so we reload only once all are done
+    let pending = chapterIds.length;
+    const onDone = () => {
+      pending--;
+      if (pending <= 0) {
         this.loadAll();
-      },
-      error: (err) => {
-        this.aiProcessing[chapterId] = false;
-        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
+      }
+    };
+
+    // Launch each chapter generation in parallel
+    for (const id of chapterIds) {
+      this.api.generateChapterContent(id, action, customPrompt).subscribe({
+        next: () => {
+          this._startAiPolling(id, onDone);
+        },
+        error: (err) => {
+          this.aiProcessing[id] = false;
+          delete this.aiProgress[id];
+          this.snackBar.open(err.error?.detail || 'Erreur generation', 'OK', { duration: 5000 });
+          onDone();
+        },
+      });
+    }
+  }
+
+  private _findChapter(chapterId: string): Chapter | null {
+    for (const group of this.groupedChapters) {
+      for (const ch of group.chapters) {
+        if (ch.id === chapterId) return ch;
+        for (const sub of (ch.children || [])) {
+          if (sub.id === chapterId) return sub;
+        }
+      }
+    }
+    return null;
+  }
+
+  private _startAiPolling(chapterId: string, onComplete?: () => void): void {
+    this._stopAiPolling(chapterId);
+    this.aiPollSubs[chapterId] = timer(500, 1500).pipe(
+      switchMap(() => this.api.getChapterGenStatus(chapterId))
+    ).subscribe({
+      next: (status) => {
+        if (status.status === 'completed') {
+          this._stopAiPolling(chapterId);
+          this.aiProcessing[chapterId] = false;
+          delete this.aiProgress[chapterId];
+          onComplete?.();
+        } else if (status.status === 'error') {
+          this._stopAiPolling(chapterId);
+          this.aiProcessing[chapterId] = false;
+          delete this.aiProgress[chapterId];
+          this.snackBar.open(status.message || 'Erreur generation', 'OK', { duration: 5000 });
+          onComplete?.();
+        } else {
+          this.aiProgress[chapterId] = status;
+        }
       },
     });
+  }
+
+  private _stopAiPolling(chapterId: string): void {
+    this.aiPollSubs[chapterId]?.unsubscribe();
+    delete this.aiPollSubs[chapterId];
   }
 
   // ── Chapter selection & deletion ──
