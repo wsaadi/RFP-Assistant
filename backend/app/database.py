@@ -51,8 +51,9 @@ async def init_db():
     autocommit_engine = engine.execution_options(isolation_level="AUTOCOMMIT")
     async with autocommit_engine.connect() as conn:
         try:
+            # SQLAlchemy SAEnum uses Python enum .name (uppercase) by default
             await conn.execute(text(
-                "ALTER TYPE document_category ADD VALUE IF NOT EXISTS 'new_response'"
+                "ALTER TYPE document_category ADD VALUE IF NOT EXISTS 'NEW_RESPONSE'"
             ))
         except Exception:
             logger.debug("document_category enum already has 'new_response' or ALTER TYPE not supported")
