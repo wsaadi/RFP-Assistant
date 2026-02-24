@@ -143,7 +143,7 @@ import { renderMarkdown } from '../../services/markdown.service';
         <mat-icon>fact_check</mat-icon>
         <div>
           <h3>Aucune analyse disponible</h3>
-          <p>Lancez une analyse pour evaluer la conformite de votre reponse par rapport au cahier des charges.</p>
+          <p>Lancez une analyse pour evaluer la conformite de votre reponse par rapport au cahier des charges. Fonctionne avec les documents "Notre reponse" charges ou les chapitres rediges.</p>
         </div>
       </mat-card>
 
