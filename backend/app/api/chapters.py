@@ -259,11 +259,9 @@ async def generate_chapter_content(
     ai_service = MistralAIService.from_config(config, config.mistral_api_key_encrypted)
 
     if request.action == "custom" and request.custom_prompt:
-        # Custom prompt — anonymize content and prompt in parallel
-        anon_content, anon_prompt = await asyncio.gather(
-            AnonymizationService.anonymize_text(chapter.content, chapter.project_id, db),
-            AnonymizationService.anonymize_text(request.custom_prompt, chapter.project_id, db),
-        )
+        # Custom prompt — anonymize sequentially (same DB session)
+        anon_content = await AnonymizationService.anonymize_text(chapter.content, chapter.project_id, db)
+        anon_prompt = await AnonymizationService.anonymize_text(request.custom_prompt, chapter.project_id, db)
         result_text = await ai_service.execute_custom_prompt(
             anon_content, anon_prompt, chapter.title
         )
