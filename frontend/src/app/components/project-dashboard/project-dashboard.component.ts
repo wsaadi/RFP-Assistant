@@ -61,12 +61,12 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
       </div>
 
       <!-- Word export progress -->
-      <mat-card *ngIf="wordProgress && wordProgress.status === 'running'" class="gen-progress-card word-progress-card">
+      <mat-card *ngIf="wordProgress" class="gen-progress-card word-progress-card">
         <div class="gen-progress-header">
           <mat-spinner diameter="20" class="spin-icon"></mat-spinner>
-          <h3>Export Word en cours...</h3>
+          <h3>{{ wordProgress.step === 'downloading' ? 'Telechargement Word...' : 'Export Word en cours...' }}</h3>
         </div>
-        <mat-progress-bar mode="determinate" [value]="wordProgress.progress"></mat-progress-bar>
+        <mat-progress-bar [mode]="wordProgress.step === 'downloading' ? 'indeterminate' : 'determinate'" [value]="wordProgress.progress"></mat-progress-bar>
         <div class="gen-progress-details">
           <span class="gen-step">{{ wordProgress.step }}</span>
           <span class="gen-pct">{{ wordProgress.progress }}%</span>
@@ -75,12 +75,12 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
       </mat-card>
 
       <!-- Backup progress -->
-      <mat-card *ngIf="backupProgress && backupProgress.status === 'running'" class="gen-progress-card backup-progress-card">
+      <mat-card *ngIf="backupProgress" class="gen-progress-card backup-progress-card">
         <div class="gen-progress-header">
           <mat-spinner diameter="20" class="spin-icon"></mat-spinner>
-          <h3>Export backup en cours...</h3>
+          <h3>{{ backupProgress.step === 'downloading' ? 'Telechargement backup...' : 'Export backup en cours...' }}</h3>
         </div>
-        <mat-progress-bar mode="determinate" [value]="backupProgress.progress"></mat-progress-bar>
+        <mat-progress-bar [mode]="backupProgress.step === 'downloading' ? 'indeterminate' : 'determinate'" [value]="backupProgress.progress"></mat-progress-bar>
         <div class="gen-progress-details">
           <span class="gen-step">{{ backupProgress.step }}</span>
           <span class="gen-pct">{{ backupProgress.progress }}%</span>
@@ -1027,6 +1027,26 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         }
       },
     });
+    // Resume backup polling if already running
+    this.api.getBackupStatus(this.projectId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.exportingBackup = true;
+          this.backupProgress = status;
+          this.startBackupPolling();
+        }
+      },
+    });
+    // Resume word export polling if already running
+    this.api.getWordStatus(this.projectId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.exportingWord = true;
+          this.wordProgress = status;
+          this.startWordPolling();
+        }
+      },
+    });
   }
 
   ngOnDestroy(): void {
@@ -1777,12 +1797,12 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   private startWordPolling(): void {
     this.stopWordPolling();
-    this.wordPollSub = timer(1000, 1500).pipe(
+    this.wordPollSub = timer(500, 1500).pipe(
       switchMap(() => this.api.getWordStatus(this.projectId))
     ).subscribe({
       next: (status) => {
-        this.wordProgress = status;
         if (status.status === 'completed') {
+          this.wordProgress = { status: 'running', step: 'downloading', progress: 100, message: 'Telechargement du fichier...' };
           this.stopWordPolling();
           this.api.downloadWord(this.projectId).subscribe({
             next: (blob) => {
@@ -1795,11 +1815,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
               this.exportingWord = false;
               this.wordProgress = null;
               this.snackBar.open('Export Word telecharge', 'OK', { duration: 3000 });
+              this.api.clearWordProgress(this.projectId).subscribe();
             },
             error: () => {
               this.exportingWord = false;
               this.wordProgress = null;
               this.snackBar.open('Erreur telechargement Word', 'OK', { duration: 5000 });
+              this.api.clearWordProgress(this.projectId).subscribe();
             },
           });
         } else if (status.status === 'error') {
@@ -1807,6 +1829,9 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
           this.exportingWord = false;
           this.snackBar.open(status.message || 'Erreur export Word', 'OK', { duration: 5000 });
           this.wordProgress = null;
+          this.api.clearWordProgress(this.projectId).subscribe();
+        } else if (status.status === 'running') {
+          this.wordProgress = status;
         }
       },
     });
@@ -1838,12 +1863,12 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   private startBackupPolling(): void {
     this.stopBackupPolling();
-    this.backupPollSub = timer(1000, 1500).pipe(
+    this.backupPollSub = timer(500, 1500).pipe(
       switchMap(() => this.api.getBackupStatus(this.projectId))
     ).subscribe({
       next: (status) => {
-        this.backupProgress = status;
         if (status.status === 'completed') {
+          this.backupProgress = { status: 'running', step: 'downloading', progress: 100, message: 'Telechargement du fichier...' };
           this.stopBackupPolling();
           this.api.downloadBackup(this.projectId).subscribe({
             next: (blob) => {
@@ -1856,17 +1881,23 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
               this.exportingBackup = false;
               this.backupProgress = null;
               this.snackBar.open('Backup telecharge', 'OK', { duration: 3000 });
+              this.api.clearBackupProgress(this.projectId).subscribe();
             },
             error: () => {
               this.exportingBackup = false;
               this.backupProgress = null;
               this.snackBar.open('Erreur telechargement backup', 'OK', { duration: 5000 });
+              this.api.clearBackupProgress(this.projectId).subscribe();
             },
           });
         } else if (status.status === 'error') {
           this.stopBackupPolling();
           this.exportingBackup = false;
           this.snackBar.open(status.message || 'Erreur export', 'OK', { duration: 5000 });
+          this.backupProgress = null;
+          this.api.clearBackupProgress(this.projectId).subscribe();
+        } else if (status.status === 'running') {
+          this.backupProgress = status;
         }
       },
     });
