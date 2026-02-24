@@ -27,10 +27,14 @@ import { ComplianceAnalysis } from '../../models/report.model';
         </button>
       </div>
 
-      <div *ngIf="analyzing" class="loading-container">
-        <mat-spinner diameter="40"></mat-spinner>
-        <p>Analyse de conformité en cours...</p>
-      </div>
+      <mat-card *ngIf="analyzing" class="progress-card">
+        <div class="progress-header">
+          <mat-spinner diameter="20"></mat-spinner>
+          <h3>Analyse de conformité en cours...</h3>
+        </div>
+        <mat-progress-bar mode="indeterminate" color="primary"></mat-progress-bar>
+        <p class="progress-detail">L'IA analyse l'exhaustivité de votre réponse par rapport au cahier des charges. Cela peut prendre quelques instants.</p>
+      </mat-card>
 
       <div *ngIf="analysis" class="analysis-results">
         <!-- Score -->
@@ -94,7 +98,10 @@ import { ComplianceAnalysis } from '../../models/report.model';
     .page-container { max-width: 1000px; margin: 0 auto; }
     .page-header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
     .page-header h1 { flex: 1; margin: 0; color: #1B3A5C; font-size: 20px; }
-    .loading-container { text-align: center; padding: 48px; }
+    .progress-card { padding: 24px; margin-bottom: 16px; border-left: 4px solid #1976d2; }
+    .progress-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .progress-header h3 { margin: 0; color: #1976d2; font-size: 15px; }
+    .progress-detail { margin: 12px 0 0 0; font-size: 13px; color: #666; }
     .score-card { display: flex; align-items: center; gap: 24px; padding: 32px; margin-bottom: 16px; }
     .score-circle { width: 100px; height: 100px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; }
     .score-circle.high { background: #e8f5e9; border: 4px solid #4caf50; }

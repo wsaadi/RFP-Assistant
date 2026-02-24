@@ -1448,6 +1448,9 @@ async def analyze_compliance(
         f"## {c.title}\n{c.content}" for c in chapters if c.content
     ])
 
+    if not response_content.strip():
+        raise HTTPException(status_code=400, detail="Aucun contenu de chapitre à analyser. Rédigez d'abord les chapitres.")
+
     # Get new RFP requirements
     new_rfp_chunks = VectorService.search(str(project_id), "exigences critères évaluation", top_k=25, category_filter="new_rfp")
     rfp_requirements = "\n\n".join([c["content"] for c in new_rfp_chunks])
@@ -1455,13 +1458,19 @@ async def analyze_compliance(
     if not rfp_requirements:
         raise HTTPException(status_code=400, detail="Aucun document d'appel d'offres indexé")
 
-    # Anonymize both in parallel
-    anon_response, anon_rfp = await asyncio.gather(
-        AnonymizationService.anonymize_text(response_content, project_id, db),
-        AnonymizationService.anonymize_text(rfp_requirements, project_id, db),
-    )
+    try:
+        # Anonymize both in parallel
+        anon_response, anon_rfp = await asyncio.gather(
+            AnonymizationService.anonymize_text(response_content, project_id, db),
+            AnonymizationService.anonymize_text(rfp_requirements, project_id, db),
+        )
 
-    analysis = await ai_service.analyze_compliance(anon_response, anon_rfp)
+        analysis = await ai_service.analyze_compliance(anon_response, anon_rfp)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("Compliance analysis failed for project %s", project_id)
+        raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse de conformité: {str(e)}")
 
     return {"success": True, "analysis": analysis}
 
@@ -1530,6 +1539,12 @@ async def get_statistics(
 
     completion = (completed / len(chapters) * 100) if chapters else 0
 
+    # Build chapters_by_status breakdown
+    by_status: Dict[str, int] = {}
+    for c in chapters:
+        s = c.status.value if hasattr(c.status, 'value') else str(c.status)
+        by_status[s] = by_status.get(s, 0) + 1
+
     return StatisticsOut(
         total_pages=total_pages,
         total_words=total_words,
@@ -1541,6 +1556,7 @@ async def get_statistics(
         documents_count=doc_count,
         images_count=img_count,
         completion_percentage=round(completion, 1),
+        chapters_by_status=by_status,
     )
 
 

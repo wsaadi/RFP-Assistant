@@ -1,6 +1,6 @@
 """Document schemas."""
 from datetime import datetime
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pydantic import BaseModel
 
 
@@ -81,6 +81,7 @@ class StatisticsOut(BaseModel):
     documents_count: int = 0
     images_count: int = 0
     completion_percentage: float = 0.0
+    chapters_by_status: Dict[str, int] = {}
 
 
 class AnonymizationEntityGroup(BaseModel):
