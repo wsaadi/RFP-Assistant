@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, ViewEncapsulation } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
@@ -13,6 +13,7 @@ import { DocumentPreview, PreviewChapter } from '../../models/report.model';
   selector: 'app-preview',
   standalone: true,
   imports: [CommonModule, RouterLink, MatCardModule, MatButtonModule, MatIconModule, MatProgressSpinnerModule],
+  encapsulation: ViewEncapsulation.None,
   template: `
     <div class="preview-container" *ngIf="preview">
       <div class="preview-header no-print">
@@ -70,31 +71,33 @@ import { DocumentPreview, PreviewChapter } from '../../models/report.model';
     .preview-container { max-width: 900px; margin: 0 auto; }
     .preview-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
     .preview-header h1 { flex: 1; margin: 0; color: #1B3A5C; }
-    .document-preview { background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-    .page { padding: 48px; min-height: 600px; border-bottom: 2px dashed #ddd; }
-    .cover-page { text-align: center; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 700px; }
-    .doc-title { font-size: 28px; color: #1B3A5C; }
+    .document-preview { background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); border-radius: 4px; overflow: hidden; }
+    .page { padding: 48px 56px; min-height: 600px; border-bottom: 1px solid #e0e0e0; }
+    .cover-page { text-align: center; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 700px; background: linear-gradient(180deg, #f8fafd 0%, #ffffff 100%); }
+    .doc-title { font-size: 28px; color: #1B3A5C; letter-spacing: 0.5px; }
     .project-name { font-size: 22px; color: #2C5F8A; }
     .separator { width: 200px; height: 2px; background: #2C5F8A; margin: 24px 0; }
     .confidential { color: #990000; font-weight: bold; font-size: 12px; margin-top: 48px; }
-    .toc-page h2 { color: #1B3A5C; margin-bottom: 24px; }
-    .toc-entry { padding: 6px 0; border-bottom: 1px dotted #ddd; }
-    .toc-sub { padding-left: 24px; font-size: 14px; }
-    .chapter-title { color: #1B3A5C; font-size: 20px; border-bottom: 2px solid #2C5F8A; padding-bottom: 8px; }
-    .sub-title { color: #2C5F8A; font-size: 16px; margin-top: 24px; }
-    .chapter-content { line-height: 1.7; }
-    .chapter-content p { margin: 0 0 10px 0; line-height: 1.7; text-align: justify; }
-    .chapter-content h3 { font-size: 16px; font-weight: 700; color: #1B3A5C; margin: 20px 0 8px 0; }
-    .chapter-content h4 { font-size: 15px; font-weight: 600; color: #2C5F8A; margin: 16px 0 6px 0; }
-    .chapter-content h5 { font-size: 14px; font-weight: 600; color: #37474f; margin: 12px 0 4px 0; }
-    .chapter-content ul, .chapter-content ol { margin: 6px 0 10px 0; padding-left: 28px; }
+    .toc-page h2 { color: #1B3A5C; margin-bottom: 24px; border-bottom: 2px solid #2C5F8A; padding-bottom: 8px; }
+    .toc-entry { padding: 8px 0; border-bottom: 1px dotted #ddd; font-size: 15px; color: #333; }
+    .toc-sub { padding-left: 28px; font-size: 14px; color: #555; }
+    .chapter-title { color: #1B3A5C; font-size: 20px; border-bottom: 2px solid #2C5F8A; padding-bottom: 8px; margin-bottom: 16px; }
+    .sub-title { color: #2C5F8A; font-size: 17px; margin-top: 28px; margin-bottom: 12px; padding-bottom: 4px; border-bottom: 1px solid #e0e0e0; }
+    .chapter-content { line-height: 1.7; font-size: 14px; color: #333; }
+    .chapter-content p { margin: 0 0 12px 0; line-height: 1.7; text-align: justify; }
+    .chapter-content h2, .chapter-content h3 { font-size: 17px; font-weight: 700; color: #1B3A5C; margin: 24px 0 10px 0; padding-bottom: 4px; border-bottom: 1px solid #e0e0e0; }
+    .chapter-content h2:first-child, .chapter-content h3:first-child { margin-top: 0; }
+    .chapter-content h4 { font-size: 15px; font-weight: 600; color: #2C5F8A; margin: 18px 0 8px 0; }
+    .chapter-content h5 { font-size: 14px; font-weight: 600; color: #37474f; margin: 14px 0 6px 0; }
+    .chapter-content ul, .chapter-content ol { margin: 6px 0 12px 0; padding-left: 28px; }
     .chapter-content ul { list-style-type: disc; }
     .chapter-content ul ul { list-style-type: circle; margin: 2px 0; }
     .chapter-content ol { list-style-type: decimal; }
     .chapter-content li { margin-bottom: 4px; line-height: 1.6; }
     .chapter-content strong { color: #1B3A5C; }
+    .chapter-content em { color: #555; }
     .chapter-content hr { border: none; border-top: 1px solid #ccc; margin: 20px 0; }
-    .chapter-content code { background: #f5f5f5; padding: 1px 4px; border-radius: 3px; font-size: 13px; }
+    .chapter-content code { background: #e8eaf6; padding: 1px 5px; border-radius: 3px; font-size: 13px; }
     .chapter-content .table-wrap { overflow-x: auto; margin: 16px 0; }
     .chapter-content table { border-collapse: collapse; width: 100%; font-size: 14px; }
     .chapter-content th, .chapter-content td { border: 1px solid #ccc; padding: 10px 12px; text-align: left; }
