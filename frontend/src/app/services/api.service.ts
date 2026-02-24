@@ -1,6 +1,6 @@
 import { Injectable } from '@angular/core';
-import { HttpClient } from '@angular/common/http';
-import { Observable } from 'rxjs';
+import { HttpClient, HttpEventType, HttpRequest } from '@angular/common/http';
+import { Observable, Subject } from 'rxjs';
 import {
   Workspace, WorkspaceMember,
   RFPProject, ProjectCreate,
@@ -89,6 +89,42 @@ export class ApiService {
     formData.append('file', file);
     formData.append('category', category);
     return this.http.post<DocumentInfo>(`${this.baseUrl}/documents/upload/${projectId}`, formData);
+  }
+
+  /** Upload with HTTP progress events. Emits 0-100 for upload progress, then the server response. */
+  uploadDocumentWithProgress(projectId: string, file: File, category: string): {
+    progress$: Observable<number>;
+    response$: Observable<DocumentInfo>;
+  } {
+    const formData = new FormData();
+    formData.append('file', file);
+    formData.append('category', category);
+
+    const progress$ = new Subject<number>();
+    const response$ = new Subject<DocumentInfo>();
+
+    const req = new HttpRequest('POST', `${this.baseUrl}/documents/upload/${projectId}`, formData, {
+      reportProgress: true,
+    });
+
+    this.http.request(req).subscribe({
+      next: (event) => {
+        if (event.type === HttpEventType.UploadProgress && event.total) {
+          progress$.next(Math.round(100 * event.loaded / event.total));
+        } else if (event.type === HttpEventType.Response) {
+          progress$.next(100);
+          progress$.complete();
+          response$.next(event.body as DocumentInfo);
+          response$.complete();
+        }
+      },
+      error: (err) => {
+        progress$.error(err);
+        response$.error(err);
+      },
+    });
+
+    return { progress$, response$ };
   }
 
   deleteDocument(documentId: string): Observable<void> {
