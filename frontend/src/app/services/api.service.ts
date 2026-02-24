@@ -321,6 +321,14 @@ export class ApiService {
     return this.http.get(`${this.baseUrl}/export/${projectId}/backup-download`, { responseType: 'blob' });
   }
 
+  clearBackupProgress(projectId: string): Observable<any> {
+    return this.http.delete(`${this.baseUrl}/export/${projectId}/backup-progress`);
+  }
+
+  clearWordProgress(projectId: string): Observable<any> {
+    return this.http.delete(`${this.baseUrl}/export/${projectId}/word-progress`);
+  }
+
   importBackup(workspaceId: string, file: File): Observable<any> {
     const formData = new FormData();
     formData.append('file', file);

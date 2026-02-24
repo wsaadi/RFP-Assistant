@@ -1,7 +1,8 @@
 """Export/Import API routes."""
+import asyncio
 import uuid
 import logging
-from typing import Dict
+from typing import Dict, Callable, Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -89,7 +90,6 @@ async def download_word(
     filename = result["filename"]
 
     _word_results.pop(pid, None)
-    _word_progress.pop(pid, None)
 
     return StreamingResponse(
         file_buffer,
@@ -110,9 +110,10 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
         }
 
     try:
-        async with async_session() as db:
-            _update("loading", 10, "Chargement des chapitres...")
+        _update("loading", 10, "Chargement des chapitres...")
+        await asyncio.sleep(0)
 
+        async with async_session() as db:
             result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
             project = result.scalar_one()
 
@@ -123,7 +124,8 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
             )
             all_chapters = chapters_result.scalars().all()
 
-            _update("building", 30, "Construction du document...")
+            _update("building", 25, "Construction du document...")
+            await asyncio.sleep(0)
 
             children_map = {}
             root_chapters = []
@@ -166,15 +168,28 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
 
             chapters_data = [build_chapter_data(c) for c in root_chapters]
 
-            _update("generating", 50, "Generation du document Word...")
-            file_stream = await RFPWordService.generate_full_document(
-                project_name=project.name,
-                client_name=project.client_name,
-                rfp_reference=project.rfp_reference,
-                chapters=chapters_data,
-            )
+        _update("generating", 40, "Generation du document Word...")
+        await asyncio.sleep(0)
+
+        # Run CPU-bound Word generation in thread pool
+        def _generate_word():
+            import asyncio as _asyncio
+            loop = _asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(RFPWordService.generate_full_document(
+                    project_name=project.name,
+                    client_name=project.client_name,
+                    rfp_reference=project.rfp_reference,
+                    chapters=chapters_data,
+                ))
+            finally:
+                loop.close()
+
+        file_stream = await asyncio.to_thread(_generate_word)
 
         _update("finalizing", 90, "Finalisation...")
+        await asyncio.sleep(0)
+
         word_bytes = file_stream.getvalue()
         _word_results[pid] = {"bytes": word_bytes, "filename": filename}
 
@@ -259,9 +274,8 @@ async def download_backup(
     zip_buffer.seek(0)
     filename = result["filename"]
 
-    # Clean up after download
+    # Clean up results after serving (progress cleaned up separately)
     _backup_results.pop(pid, None)
-    _backup_progress.pop(pid, None)
 
     return StreamingResponse(
         zip_buffer,
@@ -284,12 +298,21 @@ async def _run_backup_export(project_id: uuid.UUID, filename: str):
         }
 
     try:
-        async with async_session() as db:
-            _update("loading", 10, "Chargement des donnees du projet...")
-            zip_buffer = await ExportService.export_project(db, project_id)
-            _update("packaging", 80, "Compression des fichiers...")
+        _update("loading", 5, "Chargement des donnees du projet...")
+        await asyncio.sleep(0)  # Yield to event loop
 
-        # Store the result in memory for download
+        async with async_session() as db:
+            export_data, documents, images = await ExportService.collect_project_data(db, project_id)
+
+        _update("packaging", 30, "Preparation des fichiers...")
+        await asyncio.sleep(0)
+
+        # Run CPU-bound ZIP creation in thread pool to avoid blocking event loop
+        def _create_zip():
+            return ExportService.create_zip_archive(export_data, documents, images, _update)
+
+        zip_buffer = await asyncio.to_thread(_create_zip)
+
         zip_bytes = zip_buffer.getvalue()
         _backup_results[pid] = {
             "bytes": zip_bytes,
@@ -311,6 +334,30 @@ async def _run_backup_export(project_id: uuid.UUID, filename: str):
             "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
         }
+
+
+@router.delete("/{project_id}/backup-progress")
+async def clear_backup_progress(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Clear backup progress state after download is complete."""
+    pid = str(project_id)
+    _backup_progress.pop(pid, None)
+    _backup_results.pop(pid, None)
+    return {"cleared": True}
+
+
+@router.delete("/{project_id}/word-progress")
+async def clear_word_progress(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Clear word export progress state after download is complete."""
+    pid = str(project_id)
+    _word_progress.pop(pid, None)
+    _word_results.pop(pid, None)
+    return {"cleared": True}
 
 
 @router.post("/import/{workspace_id}")

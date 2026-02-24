@@ -6,7 +6,7 @@ import uuid
 import zipfile
 import shutil
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Callable, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -22,19 +22,13 @@ class ExportService:
     """Service for exporting and importing workspace/project data."""
 
     @staticmethod
-    async def export_project(
+    async def collect_project_data(
         db: AsyncSession, project_id: uuid.UUID
-    ) -> io.BytesIO:
-        """Export a complete project as a ZIP archive.
+    ) -> Tuple[dict, list, list]:
+        """Collect all project data from DB (async, non-blocking).
 
-        Includes:
-        - Project metadata
-        - All chapters with content
-        - All documents (original files + extracted data)
-        - All images
-        - Anonymization mappings
+        Returns (export_data_dict, documents_with_paths, images_with_paths).
         """
-        # Load project with all relations
         result = await db.execute(
             select(RFPProject).where(RFPProject.id == project_id)
         )
@@ -42,7 +36,6 @@ class ExportService:
         if not project:
             raise ValueError("Project not found")
 
-        # Load chapters
         result = await db.execute(
             select(Chapter)
             .where(Chapter.project_id == project_id)
@@ -50,19 +43,16 @@ class ExportService:
         )
         chapters = result.scalars().all()
 
-        # Load documents
         result = await db.execute(
             select(Document).where(Document.project_id == project_id)
         )
         documents = result.scalars().all()
 
-        # Load anonymization mappings
         result = await db.execute(
             select(AnonymizationMapping).where(AnonymizationMapping.project_id == project_id)
         )
         mappings = result.scalars().all()
 
-        # Load images
         doc_ids = [d.id for d in documents]
         images = []
         if doc_ids:
@@ -71,7 +61,6 @@ class ExportService:
             )
             images = result.scalars().all()
 
-        # Build export data
         export_data = {
             "version": "1.0",
             "exported_at": datetime.now(timezone.utc).isoformat(),
@@ -138,26 +127,64 @@ class ExportService:
             ],
         }
 
-        # Create ZIP archive
+        # Extract file paths (before DB session closes and ORM objects expire)
+        doc_paths = [
+            {"file_path": d.file_path, "original_filename": d.original_filename}
+            for d in documents
+        ]
+        img_paths = [
+            {"file_path": img.file_path, "stored_filename": img.stored_filename}
+            for img in images
+        ]
+
+        return export_data, doc_paths, img_paths
+
+    @staticmethod
+    def create_zip_archive(
+        export_data: dict,
+        doc_paths: list,
+        img_paths: list,
+        progress_callback: Optional[Callable] = None,
+    ) -> io.BytesIO:
+        """Create ZIP archive from collected data (sync, runs in thread pool).
+
+        progress_callback(step, progress_pct, message) if provided.
+        """
+        total_files = len(doc_paths) + len(img_paths)
+        processed = 0
+
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zf:
-            # Add metadata
             zf.writestr("project.json", json.dumps(export_data, ensure_ascii=False, indent=2))
 
-            # Add original document files
-            for doc in documents:
-                if doc.file_path and os.path.exists(doc.file_path):
-                    arcname = f"documents/{doc.original_filename}"
-                    zf.write(doc.file_path, arcname)
+            for doc in doc_paths:
+                if doc["file_path"] and os.path.exists(doc["file_path"]):
+                    arcname = f"documents/{doc['original_filename']}"
+                    zf.write(doc["file_path"], arcname)
+                processed += 1
+                if progress_callback and total_files > 0:
+                    pct = 30 + int(60 * processed / total_files)
+                    progress_callback("packaging", pct, f"Ajout des fichiers ({processed}/{total_files})...")
 
-            # Add images
-            for img in images:
-                if img.file_path and os.path.exists(img.file_path):
-                    arcname = f"images/{img.stored_filename}"
-                    zf.write(img.file_path, arcname)
+            for img in img_paths:
+                if img["file_path"] and os.path.exists(img["file_path"]):
+                    arcname = f"images/{img['stored_filename']}"
+                    zf.write(img["file_path"], arcname)
+                processed += 1
+                if progress_callback and total_files > 0:
+                    pct = 30 + int(60 * processed / total_files)
+                    progress_callback("packaging", pct, f"Ajout des fichiers ({processed}/{total_files})...")
 
         zip_buffer.seek(0)
         return zip_buffer
+
+    @staticmethod
+    async def export_project(
+        db: AsyncSession, project_id: uuid.UUID
+    ) -> io.BytesIO:
+        """Export a complete project as a ZIP archive (legacy method)."""
+        export_data, doc_paths, img_paths = await ExportService.collect_project_data(db, project_id)
+        return ExportService.create_zip_archive(export_data, doc_paths, img_paths)
 
     @staticmethod
     async def import_project(

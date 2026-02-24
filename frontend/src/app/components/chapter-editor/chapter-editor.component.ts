@@ -96,14 +96,18 @@ import { Chapter } from '../../models/report.model';
           </mat-card>
 
           <!-- AI progress bar -->
-          <div *ngIf="generating" class="ai-gen-progress">
+          <mat-card *ngIf="generating" class="ai-gen-progress">
             <div class="ai-gen-progress-header">
-              <mat-spinner diameter="18"></mat-spinner>
-              <span>{{ genProgress?.message || 'Generation IA en cours...' }}</span>
+              <mat-spinner diameter="20"></mat-spinner>
+              <h3>Generation IA en cours...</h3>
             </div>
             <mat-progress-bar [mode]="genProgress?.progress ? 'determinate' : 'indeterminate'" [value]="genProgress?.progress || 0" color="accent"></mat-progress-bar>
-            <div *ngIf="genProgress?.progress" class="ai-gen-pct">{{ genProgress?.progress }}%</div>
-          </div>
+            <div class="ai-gen-progress-details">
+              <span class="ai-gen-step">{{ genProgress?.step || 'starting' }}</span>
+              <span *ngIf="genProgress?.progress" class="ai-gen-pct">{{ genProgress?.progress }}%</span>
+            </div>
+            <p class="ai-gen-message">{{ genProgress?.message || 'Demarrage de la generation...' }}</p>
+          </mat-card>
 
           <!-- Content editor / preview -->
           <mat-card class="content-card">
@@ -235,8 +239,13 @@ import { Chapter } from '../../models/report.model';
     .word-count { color: #888; font-size: 13px; }
     .editor-mode-toggle .mat-button-toggle-label-content { display: flex; align-items: center; gap: 4px; font-size: 13px; }
     .editor-mode-toggle mat-icon { font-size: 18px; width: 18px; height: 18px; }
-    .ai-gen-progress { margin-bottom: 12px; padding: 12px 16px; background: #f3e5f5; border-radius: 8px; }
-    .ai-gen-progress-header { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 13px; color: #7b1fa2; font-weight: 500; }
+    .ai-gen-progress { padding: 20px; margin-bottom: 16px; border-left: 4px solid #7b1fa2; }
+    .ai-gen-progress-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .ai-gen-progress-header h3 { margin: 0; color: #7b1fa2; font-size: 15px; }
+    .ai-gen-progress-details { display: flex; justify-content: space-between; margin-top: 8px; font-size: 13px; }
+    .ai-gen-step { color: #7b1fa2; }
+    .ai-gen-pct { font-weight: bold; }
+    .ai-gen-message { margin: 8px 0 0 0; font-size: 13px; color: #666; }
     .rendered-content { padding: 20px; min-height: 300px; line-height: 1.7; font-size: 14px; color: #333; }
     .rendered-content h2, .rendered-content h3 { font-size: 17px; font-weight: 700; color: #1B3A5C; margin: 24px 0 10px 0; padding-bottom: 4px; border-bottom: 1px solid #e0e0e0; }
     .rendered-content h2:first-child, .rendered-content h3:first-child { margin-top: 0; }
