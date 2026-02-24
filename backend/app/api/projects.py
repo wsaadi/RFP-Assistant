@@ -313,24 +313,24 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            _update("searching", 10, "Recherche des documents d'appel d'offres...")
+            _update("searching", 10, "Chargement intégral des documents d'appel d'offres...")
 
-            old_rfp_chunks = VectorService.search(str(project_id), "exigences appel d'offres", top_k=20, category_filter="old_rfp")
-            new_rfp_chunks = VectorService.search(str(project_id), "exigences appel d'offres", top_k=20, category_filter="new_rfp")
+            # Load ALL chunks from DB (pre-anonymized) — no vector search limits
+            anon_old = await _get_all_chunks_anonymized_by_category(
+                db, project_id, DocumentCategory.OLD_RFP
+            )
+            anon_new = await _get_all_chunks_anonymized_by_category(
+                db, project_id, DocumentCategory.NEW_RFP
+            )
 
-            old_rfp_content = "\n\n".join([c["content"] for c in old_rfp_chunks])
-            new_rfp_content = "\n\n".join([c["content"] for c in new_rfp_chunks])
-
-            if not old_rfp_content or not new_rfp_content:
+            if not anon_old.strip() or not anon_new.strip():
                 _gap_analysis_progress[pid] = {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "Documents d'ancien et/ou de nouvel appel d'offres manquants",
                 }
                 return
 
-            _update("anonymizing", 20, "Anonymisation des documents...")
-            anon_old = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
-            anon_new = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
+            _update("anonymizing", 20, "Preparation de l'analyse...")
         # DB released
 
         # ── Phase 2: AI analysis (NO DB connection held) ──
@@ -1682,15 +1682,15 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # Check if project has new_response documents to use instead of chapters
-            _update("loading", 10, "Chargement de la réponse...")
-            new_response_chunks = VectorService.search(
-                str(project_id), "contenu réponse appel offres", top_k=50, category_filter="new_response"
+            # Load ALL response content (all documents, all sheets, all chunks)
+            # Uses pre-anonymized content from upload time — no re-anonymization needed
+            _update("loading", 10, "Chargement intégral de la réponse...")
+            anon_response = await _get_all_chunks_anonymized_by_category(
+                db, project_id, DocumentCategory.NEW_RESPONSE
             )
-            if new_response_chunks:
-                response_content = "\n\n".join([c["content"] for c in new_response_chunks])
-            else:
-                # Fallback: use chapters content (existing behaviour)
+
+            if not anon_response.strip():
+                # Fallback: use chapters content (not pre-anonymized)
                 chapters_result = await db.execute(
                     select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
                 )
@@ -1698,21 +1698,22 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
                 response_content = "\n\n".join([
                     f"## {c.title}\n{c.content}" for c in chapters if c.content
                 ])
+                anon_response = await AnonymizationService.anonymize_text(response_content, project_id, db)
 
-            _update("searching", 15, "Recherche des exigences du cahier des charges...")
-            new_rfp_chunks = VectorService.search(str(project_id), "exigences critères évaluation", top_k=25, category_filter="new_rfp")
-            rfp_requirements = "\n\n".join([c["content"] for c in new_rfp_chunks])
+            _update("searching", 15, "Chargement intégral du cahier des charges...")
+            # Load ALL RFP content (no vector search = no missed chunks)
+            anon_rfp = await _get_all_chunks_anonymized_by_category(
+                db, project_id, DocumentCategory.NEW_RFP
+            )
 
-            if not rfp_requirements:
+            if not anon_rfp.strip():
                 _compliance_progress[pid] = {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "Aucun document d'appel d'offres indexe",
                 }
                 return
 
-            _update("anonymizing", 25, "Anonymisation des contenus...")
-            anon_response = await AnonymizationService.anonymize_text(response_content, project_id, db)
-            anon_rfp = await AnonymizationService.anonymize_text(rfp_requirements, project_id, db)
+            _update("anonymizing", 25, "Preparation de l'analyse...")
         # DB released
 
         # ── Phase 2: AI analysis (NO DB connection held) ──
