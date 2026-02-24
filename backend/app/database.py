@@ -46,16 +46,23 @@ async def init_db():
         await conn.run_sync(Base.metadata.create_all)
 
     # ── Lightweight migrations for existing databases ──
-    async with engine.begin() as conn:
-        # Add 'new_response' value to the document_category enum if missing
+    # ALTER TYPE ... ADD VALUE cannot run inside a transaction in PostgreSQL,
+    # so we need a raw connection with autocommit for the enum update.
+    raw_conn = await engine.raw_connection()
+    try:
+        raw_conn.driver_connection.autocommit = True
+        cursor = raw_conn.driver_connection.cursor()
         try:
-            await conn.execute(text(
-                "ALTER TYPE document_category ADD VALUE IF NOT EXISTS 'new_response'"
-            ))
+            cursor.execute("ALTER TYPE document_category ADD VALUE IF NOT EXISTS 'new_response'")
         except Exception:
             logger.debug("document_category enum already has 'new_response' or ALTER TYPE not supported")
+        finally:
+            cursor.close()
+    finally:
+        raw_conn.close()
 
-        # Add enabled_categories column to rfp_projects if missing
+    # Add enabled_categories column (this can run in a normal transaction)
+    async with engine.begin() as conn:
         try:
             await conn.execute(text(
                 "ALTER TABLE rfp_projects ADD COLUMN IF NOT EXISTS "

@@ -221,9 +221,10 @@ async def upload_document(
     try:
         doc_category = DocumentCategory(category)
     except ValueError:
+        valid = ", ".join(c.value for c in DocumentCategory)
         raise HTTPException(
             status_code=400,
-            detail="Catégorie invalide. Valeurs: old_rfp, old_response, new_rfp",
+            detail=f"Catégorie invalide. Valeurs: {valid}",
         )
 
     # Read file content
