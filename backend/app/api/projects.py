@@ -1731,8 +1731,8 @@ async def fill_excel_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate a filled Excel file for a completion-type document (BPU, DQE, etc.)
-    by using pricing data from the old response and the original Excel template from the DCE."""
+    """Generate a filled Excel file for a completion-type document (BPU, DQE, conformité, etc.)
+    by using data from the old response and the original Excel template from the DCE."""
 
     # 1. Get the response document
     result = await db.execute(
@@ -1769,15 +1769,37 @@ async def fill_excel_document(
         if fname_lower and fname_lower in rfp_source_lower:
             excel_doc = doc
             break
-        # Fuzzy: check for BPU/DQE keywords
-        for kw in ["bpu", "bordereau", "dqe", "dpgf", "prix"]:
+        # Fuzzy: check for keywords in both title and filename
+        match_keywords = [
+            "bpu", "bordereau", "dqe", "dpgf", "prix",
+            "rgpd", "conformit", "gdpr", "grille", "questionnaire",
+            "annexe", "engagement", "qualit", "sécurit", "securit",
+            "environnement", "rse", "social", "audit",
+        ]
+        for kw in match_keywords:
             if kw in doc_title_lower and kw in fname_lower:
                 excel_doc = doc
                 break
         if excel_doc:
             break
 
-    # Fallback: just pick the first Excel file
+    # Fallback 1: match by title words (at least 2 words matching)
+    if not excel_doc:
+        title_words = [w for w in doc_title_lower.split() if len(w) > 3]
+        best_match = None
+        best_score = 0
+        for doc in all_dce_docs:
+            if doc.file_type.value not in ("xlsx", "xls"):
+                continue
+            fname_lower = (doc.original_filename or "").lower()
+            score = sum(1 for w in title_words if w in fname_lower)
+            if score >= 2 and score > best_score:
+                best_match = doc
+                best_score = score
+        if best_match:
+            excel_doc = best_match
+
+    # Fallback 2: just pick the first Excel file
     if not excel_doc:
         for doc in all_dce_docs:
             if doc.file_type.value in ("xlsx", "xls"):
@@ -1806,37 +1828,58 @@ async def fill_excel_document(
         _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
     )
 
-    # Also do a targeted vector search for pricing info
-    pricing_chunks = VectorService.search(
+    # Targeted vector search - adapt query based on document type
+    doc_title_for_search = resp_doc.title or ""
+    title_lower_for_search = doc_title_for_search.lower()
+    conformity_keywords = ["rgpd", "conformit", "gdpr", "protection des données",
+                           "questionnaire", "grille", "annexe", "déclaration",
+                           "engagement", "certification", "audit", "sécurité",
+                           "environnement", "rse", "social", "qualité"]
+    is_conformity_doc = any(kw in title_lower_for_search for kw in conformity_keywords)
+
+    if is_conformity_doc:
+        search_query = (
+            f"{doc_title_for_search} conformité RGPD protection données personnelles "
+            "politique sécurité mesures techniques organisationnelles DPO registre "
+            "sous-traitant transfert consentement droits personnes concernées"
+        )
+    else:
+        search_query = (
+            f"prix unitaire tarif {doc_title_for_search} BPU bordereau montant "
+            "coût forfait taux journalier"
+        )
+
+    relevant_chunks = VectorService.search(
         str(project_id),
-        f"prix unitaire tarif {resp_doc.title} BPU bordereau montant coût forfait taux journalier",
+        search_query,
         top_k=20,
         category_filter="old_response",
     )
-    pricing_context = "\n\n".join([
+    relevant_context = "\n\n".join([
         f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
-        for c in pricing_chunks
+        for c in relevant_chunks
     ])
 
-    old_response_with_pricing = anon_old_response
-    if pricing_context:
-        old_response_with_pricing = (
-            f"=== EXTRAITS PERTINENTS SUR LES PRIX ===\n{pricing_context}\n\n"
+    old_response_with_context = anon_old_response
+    if relevant_context:
+        label = "EXTRAITS PERTINENTS" if is_conformity_doc else "EXTRAITS PERTINENTS SUR LES PRIX"
+        old_response_with_context = (
+            f"=== {label} ===\n{relevant_context}\n\n"
             f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
         )
 
     # 6. Call AI to generate structured fill data
     logger.info(
-        "fill-excel %s: excel_structure=%d chars, old_response=%d chars, pricing_chunks=%d, new_rfp=%d chars",
-        resp_doc.title, len(excel_structure), len(old_response_with_pricing),
-        len(pricing_chunks), len(anon_new_rfp),
+        "fill-excel %s: excel_structure=%d chars, old_response=%d chars, relevant_chunks=%d, new_rfp=%d chars",
+        resp_doc.title, len(excel_structure), len(old_response_with_context),
+        len(relevant_chunks), len(anon_new_rfp),
     )
     ai_service = await _get_ai_service(project.workspace_id, db)
     fill_data = await ai_service.generate_excel_fill_data(
         document_title=resp_doc.title,
         excel_structure=excel_structure,
         new_rfp_content=anon_new_rfp,
-        old_response_content=old_response_with_pricing,
+        old_response_content=old_response_with_context,
     )
     logger.info("fill-excel %s: AI returned %d cell entries", resp_doc.title, len(fill_data))
 
