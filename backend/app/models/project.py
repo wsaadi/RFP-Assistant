@@ -77,6 +77,9 @@ class RFPProject(Base):
     compliance_results = relationship(
         "ComplianceResult", back_populates="project", cascade="all, delete-orphan",
     )
+    gap_analysis_results = relationship(
+        "GapAnalysisResult", back_populates="project", cascade="all, delete-orphan",
+    )
 
 
 class AnonymizationMapping(Base):
@@ -143,3 +146,24 @@ class ComplianceResult(Base):
     )
 
     project = relationship("RFPProject", back_populates="compliance_results")
+
+
+class GapAnalysisResult(Base):
+    __tablename__ = "gap_analysis_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rfp_projects.id", ondelete="CASCADE"), nullable=False
+    )
+    summary: Mapped[str] = mapped_column(Text, default="")
+    new_requirements: Mapped[dict] = mapped_column(JSON, default=list)
+    removed_requirements: Mapped[dict] = mapped_column(JSON, default=list)
+    modified_requirements: Mapped[dict] = mapped_column(JSON, default=list)
+    unchanged_requirements: Mapped[dict] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    project = relationship("RFPProject", back_populates="gap_analysis_results")

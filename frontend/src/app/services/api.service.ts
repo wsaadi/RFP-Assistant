@@ -159,6 +159,10 @@ export class ApiService {
   }
 
   // ── AI Operations ──
+  getGapAnalysis(projectId: string): Observable<{ analysis: GapAnalysis | null }> {
+    return this.http.get<{ analysis: GapAnalysis | null }>(`${this.baseUrl}/projects/${projectId}/gap-analysis`);
+  }
+
   analyzeGap(projectId: string): Observable<{ analysis: GapAnalysis }> {
     return this.http.post<{ analysis: GapAnalysis }>(`${this.baseUrl}/projects/${projectId}/gap-analysis`, {});
   }
@@ -285,8 +289,16 @@ export class ApiService {
     return this.http.post(`${this.baseUrl}/export/${projectId}/word`, {}, { responseType: 'blob' });
   }
 
-  exportBackup(projectId: string): Observable<Blob> {
-    return this.http.post(`${this.baseUrl}/export/${projectId}/backup`, {}, { responseType: 'blob' });
+  exportBackup(projectId: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/backup`, {});
+  }
+
+  getBackupStatus(projectId: string): Observable<{ status: string; step: string; progress: number; message: string }> {
+    return this.http.get<any>(`${this.baseUrl}/export/${projectId}/backup-status`);
+  }
+
+  downloadBackup(projectId: string): Observable<Blob> {
+    return this.http.get(`${this.baseUrl}/export/${projectId}/backup-download`, { responseType: 'blob' });
   }
 
   importBackup(workspaceId: string, file: File): Observable<any> {

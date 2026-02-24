@@ -1,6 +1,8 @@
 """Export/Import API routes."""
 import uuid
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
+import logging
+from typing import Dict
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -16,6 +18,11 @@ from ..services.anonymization_service import AnonymizationService
 from .deps import get_current_user
 
 router = APIRouter(prefix="/export", tags=["Export/Import"])
+logger = logging.getLogger(__name__)
+
+# In-memory progress tracking for backup export
+_backup_progress: Dict[str, dict] = {}
+_backup_results: Dict[str, dict] = {}  # Stores {bytes, filename} when done
 
 
 @router.post("/{project_id}/word")
@@ -105,26 +112,123 @@ async def export_word(
 @router.post("/{project_id}/backup")
 async def export_project_backup(
     project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Export complete project as a ZIP backup."""
-    try:
-        zip_buffer = await ExportService.export_project(db, project_id)
-    except ValueError as e:
-        raise HTTPException(status_code=404, detail=str(e))
+    """Launch backup export as a background task (returns immediately)."""
+    pid = str(project_id)
+
+    # Check if already running
+    existing = _backup_progress.get(pid)
+    if existing and existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Export deja en cours")
 
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
-    project = result.scalar_one()
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
 
     filename = f"backup_{project.name}_{project.rfp_reference or 'export'}.zip"
     filename = filename.replace(" ", "_").replace("/", "_")
+
+    _backup_progress[pid] = {
+        "status": "running",
+        "step": "starting",
+        "progress": 0,
+        "message": "Demarrage de l'export...",
+    }
+    # Clear any previous result
+    _backup_results.pop(pid, None)
+
+    background_tasks.add_task(_run_backup_export, project_id, filename)
+
+    return {"success": True, "message": "Export lance en arriere-plan"}
+
+
+@router.get("/{project_id}/backup-status")
+async def get_backup_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of the backup export."""
+    pid = str(project_id)
+    return _backup_progress.get(pid, {
+        "status": "idle",
+        "step": "idle",
+        "progress": 0,
+        "message": "",
+    })
+
+
+@router.get("/{project_id}/backup-download")
+async def download_backup(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Download the completed backup ZIP (once export is done)."""
+    pid = str(project_id)
+    result = _backup_results.get(pid)
+    if not result:
+        raise HTTPException(status_code=404, detail="Aucun backup disponible. Lancez d'abord l'export.")
+
+    import io
+    zip_buffer = io.BytesIO(result["bytes"])
+    zip_buffer.seek(0)
+    filename = result["filename"]
+
+    # Clean up after download
+    _backup_results.pop(pid, None)
+    _backup_progress.pop(pid, None)
 
     return StreamingResponse(
         zip_buffer,
         media_type="application/zip",
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
+
+
+async def _run_backup_export(project_id: uuid.UUID, filename: str):
+    """Background task for backup export."""
+    from ..database import async_session
+    pid = str(project_id)
+
+    def _update(step: str, progress: int, message: str):
+        _backup_progress[pid] = {
+            "status": "running",
+            "step": step,
+            "progress": progress,
+            "message": message,
+        }
+
+    try:
+        async with async_session() as db:
+            _update("loading", 10, "Chargement des donnees du projet...")
+            zip_buffer = await ExportService.export_project(db, project_id)
+            _update("packaging", 80, "Compression des fichiers...")
+
+        # Store the result in memory for download
+        zip_bytes = zip_buffer.getvalue()
+        _backup_results[pid] = {
+            "bytes": zip_bytes,
+            "filename": filename,
+        }
+
+        _backup_progress[pid] = {
+            "status": "completed",
+            "step": "done",
+            "progress": 100,
+            "message": f"Export termine ({len(zip_bytes) // 1024} KB)",
+        }
+
+    except Exception as e:
+        logger.exception("Backup export failed for project %s", project_id)
+        _backup_progress[pid] = {
+            "status": "error",
+            "step": "error",
+            "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        }
 
 
 @router.post("/import/{workspace_id}")
