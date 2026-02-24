@@ -128,8 +128,36 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
             </div>
 
             <div *ngFor="let cat of categories" class="doc-category">
-              <h4>{{ cat.label }}</h4>
+              <h4>{{ cat.label }}
+                <span class="doc-count" *ngIf="docsByCategory[cat.value]?.length">({{ docsByCategory[cat.value].length }})</span>
+              </h4>
               <mat-list>
+                <!-- Files currently uploading (shown immediately) -->
+                <div *ngFor="let up of getUploadingByCategory(cat.value)" class="doc-item-wrap uploading-item">
+                  <mat-list-item>
+                    <mat-icon matListItemIcon class="uploading-icon">cloud_upload</mat-icon>
+                    <span matListItemTitle>{{ up.filename }}</span>
+                    <span matListItemLine>
+                      <mat-chip class="proc-uploading" size="small" *ngIf="up.status === 'uploading'">
+                        Envoi {{ up.progress }}%
+                      </mat-chip>
+                      <mat-chip class="proc-processing" size="small" *ngIf="up.status === 'server_processing'">
+                        Traitement...
+                      </mat-chip>
+                      <mat-chip class="proc-failed" size="small" *ngIf="up.status === 'failed'">
+                        {{ up.error || 'Echec' }}
+                      </mat-chip>
+                    </span>
+                  </mat-list-item>
+                  <div class="doc-progress" *ngIf="up.status === 'uploading'">
+                    <mat-progress-bar mode="determinate" [value]="up.progress" color="accent"></mat-progress-bar>
+                  </div>
+                  <div class="doc-progress" *ngIf="up.status === 'server_processing'">
+                    <mat-progress-bar mode="indeterminate" color="primary"></mat-progress-bar>
+                  </div>
+                </div>
+
+                <!-- Already uploaded documents -->
                 <div *ngFor="let doc of docsByCategory[cat.value]" class="doc-item-wrap">
                   <mat-list-item>
                     <mat-icon matListItemIcon>{{ fileIcon(doc.file_type) }}</mat-icon>
@@ -145,9 +173,11 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     </span>
                     <button mat-icon-button matListItemMeta (click)="deleteDoc(doc.id)"><mat-icon>delete</mat-icon></button>
                   </mat-list-item>
+                  <!-- Processing progress bar with step details -->
                   <div *ngIf="getProgress(doc.id) as prog" class="doc-progress">
                     <div class="progress-info">
-                      <mat-spinner *ngIf="prog.progress > 0" diameter="16"></mat-spinner>
+                      <mat-spinner *ngIf="prog.progress > 0 && prog.step !== 'completed'" diameter="16"></mat-spinner>
+                      <mat-icon *ngIf="prog.step === 'completed'" class="progress-done-icon">check_circle</mat-icon>
                       <span class="progress-label">{{ prog.step_label }}</span>
                       <span class="progress-pct" *ngIf="prog.progress > 0">{{ prog.progress }}%</span>
                     </div>
@@ -156,9 +186,24 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       [value]="prog.progress"
                       [color]="prog.progress < 0 ? 'warn' : 'primary'">
                     </mat-progress-bar>
+                    <!-- Step indicators -->
+                    <div class="progress-steps" *ngIf="prog.progress > 0 && prog.step !== 'completed' && prog.step !== 'failed'">
+                      <span class="step-dot" [class.active]="prog.progress >= 10" [class.current]="prog.step === 'reading'" matTooltip="Lecture">1</span>
+                      <span class="step-line" [class.active]="prog.progress >= 30"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 30" [class.current]="prog.step === 'extracting_text'" matTooltip="Extraction texte">2</span>
+                      <span class="step-line" [class.active]="prog.progress >= 50"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 50" [class.current]="prog.step === 'extracting_images'" matTooltip="Extraction images">3</span>
+                      <span class="step-line" [class.active]="prog.progress >= 65"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 65" [class.current]="prog.step === 'chunking'" matTooltip="Decoupage">4</span>
+                      <span class="step-line" [class.active]="prog.progress >= 75"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 75" [class.current]="prog.step === 'anonymizing'" matTooltip="Anonymisation">5</span>
+                      <span class="step-line" [class.active]="prog.progress >= 90"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 90" [class.current]="prog.step === 'indexing'" matTooltip="Indexation">6</span>
+                    </div>
                   </div>
                 </div>
               </mat-list>
+              <p class="empty-category" *ngIf="!docsByCategory[cat.value]?.length && !getUploadingByCategory(cat.value).length">Aucun document</p>
             </div>
           </div>
         </mat-tab>
@@ -738,18 +783,31 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .stat-card strong { font-size: 24px; color: #1B3A5C; }
     .stat-card span { font-size: 12px; color: #888; }
     .tab-content { padding: 16px 0; }
-    .upload-categories { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 24px; }
+    .upload-categories { display: grid; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); gap: 16px; margin-bottom: 24px; }
     .upload-card { cursor: pointer; text-align: center; padding: 24px; border: 2px dashed #ccc; transition: border-color 0.2s; }
     .upload-card:hover { border-color: #2C5F8A; }
     .upload-card mat-icon { font-size: 36px; width: 36px; height: 36px; }
     .upload-card strong { display: block; margin: 8px 0 4px; }
     .upload-card span { font-size: 12px; color: #888; }
     .doc-category { margin-bottom: 16px; }
-    .doc-category h4 { color: #1B3A5C; }
+    .doc-category h4 { color: #1B3A5C; display: flex; align-items: center; gap: 6px; }
+    .doc-count { font-size: 13px; color: #888; font-weight: 400; }
+    .empty-category { color: #aaa; font-size: 13px; font-style: italic; margin: 4px 0 0 16px; }
     .proc-completed { background: #c8e6c9 !important; }
     .proc-processing { background: #fff3e0 !important; }
     .proc-pending { background: #e0e0e0 !important; }
     .proc-failed { background: #ffcdd2 !important; }
+    .proc-uploading { background: #e3f2fd !important; color: #1565c0 !important; }
+    .uploading-item { background: #f8fbff; }
+    .uploading-icon { color: #1976d2 !important; animation: pulse 1.5s ease-in-out infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    .progress-done-icon { color: #4caf50; font-size: 16px; width: 16px; height: 16px; }
+    .progress-steps { display: flex; align-items: center; gap: 0; margin-top: 6px; padding: 0 2px; }
+    .step-dot { width: 20px; height: 20px; border-radius: 50%; background: #e0e0e0; color: #999; font-size: 10px; display: flex; align-items: center; justify-content: center; font-weight: 600; transition: all 0.3s; flex-shrink: 0; }
+    .step-dot.active { background: #c8e6c9; color: #2e7d32; }
+    .step-dot.current { background: #1976d2; color: white; box-shadow: 0 0 0 3px rgba(25,118,210,0.25); }
+    .step-line { flex: 1; height: 2px; background: #e0e0e0; min-width: 8px; transition: background 0.3s; }
+    .step-line.active { background: #4caf50; }
     .chapter-actions { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; flex-wrap: wrap; }
     .spacer { flex: 1; }
     .ch-numbering { font-weight: bold; color: #2C5F8A; margin-right: 4px; }
@@ -975,6 +1033,9 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   groupedChapters: { document: ResponseDocument | null; chapters: Chapter[] }[] = [];
   docsByCategory: Record<string, DocumentInfo[]> = {};
 
+  // Track files being uploaded (shown immediately before server confirmation)
+  uploadingFiles: { id: string; filename: string; category: string; progress: number; status: 'uploading' | 'server_processing' | 'failed'; error?: string }[] = [];
+
   // Per-chapter AI state
   aiProcessing: Record<string, boolean> = {};
   aiProgress: Record<string, { status: string; step: string; progress: number; message: string }> = {};
@@ -1115,7 +1176,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   private startPolling(): void {
     if (this.pollSub) return;
-    this.pollSub = interval(2000).pipe(
+    this.pollSub = interval(1500).pipe(
       switchMap(() => this.api.getProcessingProgress(this.projectId))
     ).subscribe({
       next: (res) => {
@@ -1174,17 +1235,14 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   }
 
   onFileSelected(event: Event, category: string): void {
-    const files = (event.target as HTMLInputElement).files;
+    const input = event.target as HTMLInputElement;
+    const files = input.files;
     if (!files) return;
     for (let i = 0; i < files.length; i++) {
-      this.api.uploadDocument(this.projectId, files[i], category).subscribe({
-        next: () => {
-          this.snackBar.open(`${files[i].name} chargé`, 'OK', { duration: 2000 });
-          this.loadAll();
-        },
-        error: (err) => this.snackBar.open(err.error?.detail || 'Erreur upload', 'OK', { duration: 3000 }),
-      });
+      this._uploadFileWithProgress(files[i], category);
     }
+    // Reset input so re-selecting the same file works
+    input.value = '';
   }
 
   onDragOver(event: DragEvent): void {
@@ -1196,10 +1254,67 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     const files = event.dataTransfer?.files;
     if (!files) return;
     for (let i = 0; i < files.length; i++) {
-      this.api.uploadDocument(this.projectId, files[i], category).subscribe({
-        next: () => { this.snackBar.open(`${files[i].name} chargé`, 'OK', { duration: 2000 }); this.loadAll(); },
-      });
+      this._uploadFileWithProgress(files[i], category);
     }
+  }
+
+  private _uploadFileWithProgress(file: File, category: string): void {
+    const trackingId = 'upload_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+    const entry = { id: trackingId, filename: file.name, category, progress: 0, status: 'uploading' as const };
+    this.uploadingFiles = [...this.uploadingFiles, entry];
+
+    const { progress$, response$ } = this.api.uploadDocumentWithProgress(this.projectId, file, category);
+
+    progress$.subscribe({
+      next: (pct) => {
+        const idx = this.uploadingFiles.findIndex(f => f.id === trackingId);
+        if (idx >= 0) {
+          this.uploadingFiles[idx] = { ...this.uploadingFiles[idx], progress: pct };
+          this.uploadingFiles = [...this.uploadingFiles];
+        }
+      },
+    });
+
+    response$.subscribe({
+      next: () => {
+        // Upload done → file is now server-side, switch to "processing" state briefly
+        const idx = this.uploadingFiles.findIndex(f => f.id === trackingId);
+        if (idx >= 0) {
+          this.uploadingFiles[idx] = { ...this.uploadingFiles[idx], status: 'server_processing', progress: 100 };
+          this.uploadingFiles = [...this.uploadingFiles];
+        }
+        this.snackBar.open(`${file.name} envoyé`, 'OK', { duration: 2000 });
+        // Refresh document list so the real doc appears, then remove tracking entry
+        this.api.getDocuments(this.projectId).subscribe({
+          next: (d) => {
+            this.documents = d;
+            this._refreshDocsByCategory();
+            // Remove tracking entry now that the real doc is in the list
+            this.uploadingFiles = this.uploadingFiles.filter(f => f.id !== trackingId);
+            const hasProcessing = d.some(doc => doc.processing_status === 'pending' || doc.processing_status === 'processing');
+            if (hasProcessing) { this.startPolling(); }
+          },
+        });
+        // Also refresh stats
+        this.api.getStatistics(this.projectId).subscribe({ next: (s) => this.stats = s });
+      },
+      error: (err) => {
+        const idx = this.uploadingFiles.findIndex(f => f.id === trackingId);
+        if (idx >= 0) {
+          this.uploadingFiles[idx] = { ...this.uploadingFiles[idx], status: 'failed', error: err.error?.detail || 'Erreur upload' };
+          this.uploadingFiles = [...this.uploadingFiles];
+        }
+        this.snackBar.open(err.error?.detail || 'Erreur upload', 'OK', { duration: 3000 });
+        // Auto-remove failed entry after 5s
+        setTimeout(() => {
+          this.uploadingFiles = this.uploadingFiles.filter(f => f.id !== trackingId);
+        }, 5000);
+      },
+    });
+  }
+
+  getUploadingByCategory(category: string): typeof this.uploadingFiles {
+    return this.uploadingFiles.filter(f => f.category === category);
   }
 
   deleteDoc(docId: string): void {
