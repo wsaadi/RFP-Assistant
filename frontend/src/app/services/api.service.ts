@@ -229,8 +229,19 @@ export class ApiService {
     );
   }
 
+  getComplianceAnalysis(projectId: string): Observable<{ analysis: ComplianceAnalysis | null }> {
+    return this.http.get<{ analysis: ComplianceAnalysis | null }>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`);
+  }
+
   analyzeCompliance(projectId: string): Observable<{ analysis: ComplianceAnalysis }> {
     return this.http.post<{ analysis: ComplianceAnalysis }>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`, {});
+  }
+
+  generateRecommendationContent(projectId: string, recommendation: string, chapterId?: string): Observable<{ content: string }> {
+    return this.http.post<{ content: string }>(
+      `${this.baseUrl}/projects/${projectId}/compliance-analysis/generate-recommendation`,
+      { recommendation, chapter_id: chapterId }
+    );
   }
 
   addImprovementAxis(projectId: string, content: string, source: string = ''): Observable<any> {

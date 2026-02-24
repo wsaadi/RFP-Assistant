@@ -13,7 +13,7 @@ from sqlalchemy import select, func
 from ..database import get_db
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
-from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType
+from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType, ComplianceResult
 from ..models.document import Document, DocumentChunk, DocumentCategory
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
 from ..models.response_document import ResponseDocument, DocumentFormat, ContentType
@@ -1424,6 +1424,36 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
         }
 
 
+@router.get("/{project_id}/compliance-analysis")
+async def get_compliance_analysis(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the latest persisted compliance analysis for a project."""
+    result = await db.execute(
+        select(ComplianceResult)
+        .where(ComplianceResult.project_id == project_id)
+        .order_by(ComplianceResult.created_at.desc())
+        .limit(1)
+    )
+    cr = result.scalar_one_or_none()
+    if not cr:
+        return {"analysis": None}
+
+    return {
+        "analysis": {
+            "id": str(cr.id),
+            "score": cr.score,
+            "summary": cr.summary,
+            "covered_requirements": cr.covered_requirements or [],
+            "missing_elements": cr.missing_elements or [],
+            "recommendations": cr.recommendations or [],
+            "created_at": cr.created_at.isoformat() if cr.created_at else None,
+        }
+    }
+
+
 @router.post("/{project_id}/compliance-analysis")
 async def analyze_compliance(
     project_id: uuid.UUID,
@@ -1486,7 +1516,94 @@ async def analyze_compliance(
         logger.exception("Compliance analysis failed for project %s", project_id)
         raise HTTPException(status_code=500, detail=f"Erreur lors de l'analyse de conformité: {str(e)}")
 
+    # Persist the result
+    cr = ComplianceResult(
+        project_id=project_id,
+        score=analysis.get("score", 0),
+        summary=analysis.get("summary", ""),
+        covered_requirements=analysis.get("covered_requirements", []),
+        missing_elements=analysis.get("missing_elements", []),
+        recommendations=analysis.get("recommendations", []),
+    )
+    db.add(cr)
+    await db.commit()
+    await db.refresh(cr)
+
+    analysis["id"] = str(cr.id)
+    analysis["created_at"] = cr.created_at.isoformat() if cr.created_at else None
+
     return {"success": True, "analysis": analysis}
+
+
+@router.post("/{project_id}/compliance-analysis/generate-recommendation")
+async def generate_recommendation_content(
+    project_id: uuid.UUID,
+    request: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate chapter content addressing a specific compliance recommendation.
+
+    Body: {"recommendation": "the recommendation text", "chapter_id": "optional target chapter id"}
+    """
+    recommendation = request.get("recommendation", "").strip()
+    chapter_id = request.get("chapter_id")
+
+    if not recommendation:
+        raise HTTPException(status_code=400, detail="Recommendation manquante")
+
+    result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    ai_service = await _get_ai_service(project.workspace_id, db)
+
+    # Get RFP context
+    rfp_chunks = VectorService.search(
+        str(project_id), recommendation, top_k=5, category_filter="new_rfp"
+    )
+    rfp_context = "\n\n".join([c["content"] for c in rfp_chunks]) if rfp_chunks else ""
+
+    # Anonymize
+    anon_rec = await AnonymizationService.anonymize_text(recommendation, project_id, db)
+    anon_rfp = await AnonymizationService.anonymize_text(rfp_context, project_id, db) if rfp_context else ""
+
+    system_prompt = """Tu es un expert en réponse aux appels d'offres.
+À partir d'une recommandation issue d'une analyse de conformité, génère un contenu structuré
+qui répond à cette recommandation et comble la lacune identifiée.
+
+Rédige en français, de manière professionnelle et argumentée. Utilise du markdown
+(titres, listes, tableaux si pertinent). Le contenu doit être directement intégrable
+dans un mémoire de réponse."""
+
+    user_prompt = f"""RECOMMANDATION À TRAITER:
+{anon_rec}
+
+CONTEXTE DU CAHIER DES CHARGES:
+{anon_rfp[:5000] if anon_rfp else "(non disponible)"}
+
+Génère un contenu structuré (1-2 pages) qui répond à cette recommandation."""
+
+    try:
+        content = await ai_service.generate(system_prompt, user_prompt, max_tokens=4096)
+        content = await AnonymizationService.deanonymize_text(content, project_id, db)
+    except Exception as e:
+        logger.exception("Recommendation content generation failed")
+        raise HTTPException(status_code=500, detail=f"Erreur de génération: {str(e)}")
+
+    # If a target chapter is specified, append the content
+    if chapter_id:
+        ch_result = await db.execute(
+            select(Chapter).where(Chapter.id == uuid.UUID(chapter_id)).where(Chapter.project_id == project_id)
+        )
+        chapter = ch_result.scalar_one_or_none()
+        if chapter:
+            separator = "\n\n---\n\n" if chapter.content else ""
+            chapter.content = (chapter.content or "") + separator + content
+            await db.commit()
+
+    return {"content": content}
 
 
 @router.post("/{project_id}/improvement-axes")

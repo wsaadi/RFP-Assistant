@@ -3,7 +3,7 @@ import uuid
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text, Enum as SAEnum, Boolean
+from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text, Enum as SAEnum, Boolean, JSON
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -74,6 +74,9 @@ class RFPProject(Base):
         "ResponseDocument", back_populates="project", cascade="all, delete-orphan",
         order_by="ResponseDocument.order",
     )
+    compliance_results = relationship(
+        "ComplianceResult", back_populates="project", cascade="all, delete-orphan",
+    )
 
 
 class AnonymizationMapping(Base):
@@ -119,3 +122,24 @@ class AIConfig(Base):
         default=lambda: datetime.now(timezone.utc),
         onupdate=lambda: datetime.now(timezone.utc),
     )
+
+
+class ComplianceResult(Base):
+    __tablename__ = "compliance_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rfp_projects.id", ondelete="CASCADE"), nullable=False
+    )
+    score: Mapped[int] = mapped_column(Integer, default=0)
+    summary: Mapped[str] = mapped_column(Text, default="")
+    covered_requirements: Mapped[dict] = mapped_column(JSON, default=list)
+    missing_elements: Mapped[dict] = mapped_column(JSON, default=list)
+    recommendations: Mapped[dict] = mapped_column(JSON, default=list)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    project = relationship("RFPProject", back_populates="compliance_results")
