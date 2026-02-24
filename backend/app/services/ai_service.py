@@ -769,7 +769,13 @@ Enrichis et améliore ce contenu."""
     ) -> Dict:
         """Analyze exhaustiveness and compliance of the response."""
         system_prompt = """Tu es un expert en évaluation de réponses aux appels d'offres.
-Analyse si la réponse couvre toutes les exigences de l'appel d'offres.
+Analyse si la réponse couvre TOUTES les exigences de l'appel d'offres.
+
+IMPORTANT: Le contenu de la réponse peut provenir de plusieurs documents et de plusieurs feuilles Excel.
+Analyse l'INTÉGRALITÉ du contenu fourni. Les données peuvent couvrir des thèmes variés:
+RSE, développement durable, technique, qualité, sécurité, organisation, références, prix, etc.
+Ne marque PAS une exigence comme manquante si elle est couverte quelque part dans le contenu,
+même si l'information se trouve dans une section différente ou un onglet Excel séparé.
 
 Réponds au format JSON (sans markdown):
 {
@@ -781,14 +787,15 @@ Réponds au format JSON (sans markdown):
 }"""
 
         user_prompt = f"""EXIGENCES DE L'APPEL D'OFFRES:
-{rfp_requirements[:10000]}
+{rfp_requirements[:50000]}
 
 CONTENU DE LA RÉPONSE:
-{response_content[:10000]}
+{response_content[:50000]}
 
-Analyse l'exhaustivité et la conformité de cette réponse."""
+Analyse l'exhaustivité et la conformité de cette réponse.
+IMPORTANT: Analyse TOUT le contenu fourni, y compris les données RSE, qualité, environnement, et tout autre thème présent."""
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=6000)
+        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000)
         result = _parse_json_object(response)
         if result:
             return result

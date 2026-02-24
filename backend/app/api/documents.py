@@ -91,8 +91,8 @@ async def process_document_background(document_id: str, project_id: str):
                 text = ""
 
         elif file_type in (FileType.XLSX, FileType.XLS):
-            text = DocumentProcessor.extract_text_from_excel(file_content)
-            page_count = 1
+            text, pages_data = DocumentProcessor.extract_text_from_excel(file_content)
+            page_count = max(1, len(pages_data))
 
         if not text.strip():
             ProgressTracker.fail(document_id, "Aucun texte extrait du document")

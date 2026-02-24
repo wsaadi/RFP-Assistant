@@ -291,14 +291,20 @@ class DocumentProcessor:
         return images
 
     @staticmethod
-    def extract_text_from_excel(file_content: bytes) -> str:
-        """Extract text from Excel file."""
+    def extract_text_from_excel(file_content: bytes) -> tuple:
+        """Extract text from Excel file, returning full text and per-sheet pages_data.
+
+        Returns:
+            Tuple of (full_text, pages_data) where pages_data treats each sheet
+            as a page with the sheet name as section_title.
+        """
         wb = load_workbook(io.BytesIO(file_content), data_only=True)
         text_parts = []
+        pages_data = []
 
-        for sheet_name in wb.sheetnames:
+        for sheet_index, sheet_name in enumerate(wb.sheetnames):
             ws = wb[sheet_name]
-            text_parts.append(f"\n=== Feuille: {sheet_name} ===\n")
+            sheet_lines = []
 
             for row in ws.iter_rows(values_only=True):
                 row_texts = []
@@ -306,9 +312,20 @@ class DocumentProcessor:
                     if cell is not None:
                         row_texts.append(str(cell))
                 if row_texts:
-                    text_parts.append(" | ".join(row_texts))
+                    sheet_lines.append(" | ".join(row_texts))
 
-        return "\n".join(text_parts)
+            sheet_text = "\n".join(sheet_lines)
+            if sheet_text.strip():
+                text_parts.append(f"\n=== Feuille: {sheet_name} ===\n")
+                text_parts.append(sheet_text)
+                pages_data.append({
+                    "page_number": sheet_index,
+                    "text": sheet_text,
+                    "sections": [f"Feuille: {sheet_name}"],
+                })
+
+        full_text = "\n".join(text_parts)
+        return full_text, pages_data
 
     @staticmethod
     def create_chunks(
