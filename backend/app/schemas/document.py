@@ -55,6 +55,19 @@ class AnonymizationMappingOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class AnonymizationMappingCreate(BaseModel):
+    entity_type: str
+    original_value: str
+    anonymized_value: Optional[str] = None  # Auto-generated if omitted
+
+
+class AnonymizationMappingUpdate(BaseModel):
+    original_value: Optional[str] = None
+    anonymized_value: Optional[str] = None
+    entity_type: Optional[str] = None
+    is_active: Optional[bool] = None
+
+
 class SearchRequest(BaseModel):
     query: str
     category: Optional[str] = None

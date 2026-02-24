@@ -249,6 +249,26 @@ export class ApiService {
     return this.http.get<AnonymizationReport>(`${this.baseUrl}/projects/${projectId}/anonymization-report`);
   }
 
+  createAnonymizationMapping(projectId: string, data: { entity_type: string; original_value: string; anonymized_value?: string }): Observable<AnonymizationMapping> {
+    return this.http.post<AnonymizationMapping>(`${this.baseUrl}/projects/${projectId}/anonymization-mappings`, data);
+  }
+
+  updateAnonymizationMapping(projectId: string, mappingId: string, data: { original_value?: string; anonymized_value?: string; entity_type?: string; is_active?: boolean }): Observable<AnonymizationMapping> {
+    return this.http.put<AnonymizationMapping>(`${this.baseUrl}/projects/${projectId}/anonymization-mappings/${mappingId}`, data);
+  }
+
+  deleteAnonymizationMapping(projectId: string, mappingId: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/projects/${projectId}/anonymization-mappings/${mappingId}`);
+  }
+
+  reAnonymizeProject(projectId: string): Observable<{ updated_chunks: number; updated_chapters: number }> {
+    return this.http.post<{ updated_chunks: number; updated_chapters: number }>(`${this.baseUrl}/projects/${projectId}/re-anonymize`, {});
+  }
+
+  getChapterAnonymizedContent(projectId: string, chapterId: string): Observable<{ anonymized_content: string }> {
+    return this.http.get<{ anonymized_content: string }>(`${this.baseUrl}/projects/${projectId}/chapters/${chapterId}/anonymized-content`);
+  }
+
   // ── Export/Import ──
   exportWord(projectId: string): Observable<Blob> {
     return this.http.post(`${this.baseUrl}/export/${projectId}/word`, {}, { responseType: 'blob' });

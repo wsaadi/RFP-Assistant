@@ -13,7 +13,7 @@ from sqlalchemy import select, func
 from ..database import get_db
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
-from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus
+from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType
 from ..models.document import Document, DocumentChunk, DocumentCategory
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
 from ..models.response_document import ResponseDocument, DocumentFormat, ContentType
@@ -22,7 +22,10 @@ from ..schemas.project import (
     ImprovementAxisRequest, GapAnalysisRequest,
     GenerateStructureRequest, PrefillRequest, ComplianceAnalysisRequest,
 )
-from ..schemas.document import StatisticsOut, AnonymizationMappingOut, AnonymizationReportOut, AnonymizationEntityGroup
+from ..schemas.document import (
+    StatisticsOut, AnonymizationMappingOut, AnonymizationReportOut, AnonymizationEntityGroup,
+    AnonymizationMappingCreate, AnonymizationMappingUpdate,
+)
 from ..schemas.response_document import ResponseDocumentOut, ResponseDocumentUpdate, BulkUpdateSelectionRequest
 from ..services.ai_service import MistralAIService
 from ..services.vector_service import VectorService
@@ -1669,6 +1672,227 @@ async def get_anonymization_report(
         sample_before=sample_before,
         sample_after=sample_after,
     )
+
+
+# ── Anonymization Mapping CRUD ──────────────────────────────────────
+
+@router.post("/{project_id}/anonymization-mappings", response_model=AnonymizationMappingOut, status_code=201)
+async def create_anonymization_mapping(
+    project_id: uuid.UUID,
+    request: AnonymizationMappingCreate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Create a new anonymization mapping manually."""
+    from ..services.anonymization_service import ENTITY_PREFIXES
+    from collections import defaultdict
+
+    # Validate entity type
+    try:
+        entity_type = EntityType(request.entity_type)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"Type d'entité invalide: {request.entity_type}")
+
+    # Check for duplicate original_value
+    existing = await db.execute(
+        select(AnonymizationMapping)
+        .where(AnonymizationMapping.project_id == project_id)
+        .where(AnonymizationMapping.original_value == request.original_value)
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Cette valeur originale existe déjà dans les mappings")
+
+    # Auto-generate placeholder if not provided
+    anonymized_value = request.anonymized_value
+    if not anonymized_value:
+        # Count existing mappings of this type to generate next placeholder
+        count_result = await db.execute(
+            select(func.count())
+            .where(AnonymizationMapping.project_id == project_id)
+            .where(AnonymizationMapping.entity_type == entity_type)
+        )
+        count = count_result.scalar() or 0
+        prefix = ENTITY_PREFIXES.get(entity_type, "ENTITE")
+        anonymized_value = f"[{prefix}_{count + 1}]"
+
+    mapping = AnonymizationMapping(
+        project_id=project_id,
+        entity_type=entity_type,
+        original_value=request.original_value,
+        anonymized_value=anonymized_value,
+    )
+    db.add(mapping)
+    await db.commit()
+    await db.refresh(mapping)
+
+    return AnonymizationMappingOut(
+        id=str(mapping.id),
+        entity_type=mapping.entity_type.value,
+        original_value=mapping.original_value,
+        anonymized_value=mapping.anonymized_value,
+        is_active=mapping.is_active,
+    )
+
+
+@router.put("/{project_id}/anonymization-mappings/{mapping_id}", response_model=AnonymizationMappingOut)
+async def update_anonymization_mapping(
+    project_id: uuid.UUID,
+    mapping_id: uuid.UUID,
+    request: AnonymizationMappingUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an existing anonymization mapping."""
+    result = await db.execute(
+        select(AnonymizationMapping)
+        .where(AnonymizationMapping.id == mapping_id)
+        .where(AnonymizationMapping.project_id == project_id)
+    )
+    mapping = result.scalar_one_or_none()
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Mapping non trouvé")
+
+    if request.original_value is not None:
+        mapping.original_value = request.original_value
+    if request.anonymized_value is not None:
+        mapping.anonymized_value = request.anonymized_value
+    if request.entity_type is not None:
+        try:
+            mapping.entity_type = EntityType(request.entity_type)
+        except ValueError:
+            raise HTTPException(status_code=400, detail=f"Type d'entité invalide: {request.entity_type}")
+    if request.is_active is not None:
+        mapping.is_active = request.is_active
+
+    await db.commit()
+    await db.refresh(mapping)
+
+    return AnonymizationMappingOut(
+        id=str(mapping.id),
+        entity_type=mapping.entity_type.value,
+        original_value=mapping.original_value,
+        anonymized_value=mapping.anonymized_value,
+        is_active=mapping.is_active,
+    )
+
+
+@router.delete("/{project_id}/anonymization-mappings/{mapping_id}", status_code=204)
+async def delete_anonymization_mapping(
+    project_id: uuid.UUID,
+    mapping_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an anonymization mapping."""
+    result = await db.execute(
+        select(AnonymizationMapping)
+        .where(AnonymizationMapping.id == mapping_id)
+        .where(AnonymizationMapping.project_id == project_id)
+    )
+    mapping = result.scalar_one_or_none()
+    if not mapping:
+        raise HTTPException(status_code=404, detail="Mapping non trouvé")
+
+    await db.delete(mapping)
+    await db.commit()
+
+
+@router.post("/{project_id}/re-anonymize")
+async def re_anonymize_project(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-anonymize all document chunks and chapter content using current active mappings.
+
+    Applies all active mappings (including manually added ones) to existing content.
+    """
+    # Get all active mappings sorted by length (longest first to avoid partial replacements)
+    result = await db.execute(
+        select(AnonymizationMapping)
+        .where(AnonymizationMapping.project_id == project_id)
+        .where(AnonymizationMapping.is_active == True)
+    )
+    mappings = result.scalars().all()
+    mappings_sorted = sorted(mappings, key=lambda m: len(m.original_value), reverse=True)
+
+    if not mappings_sorted:
+        return {"updated_chunks": 0, "updated_chapters": 0}
+
+    def apply_mappings(text: str) -> str:
+        """Apply all mappings to a text, longest match first."""
+        result_text = text
+        for m in mappings_sorted:
+            result_text = result_text.replace(m.original_value, m.anonymized_value)
+        return result_text
+
+    # Re-anonymize document chunks
+    chunks_result = await db.execute(
+        select(DocumentChunk)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.project_id == project_id)
+    )
+    chunks = chunks_result.scalars().all()
+    updated_chunks = 0
+    for chunk in chunks:
+        if chunk.content:
+            new_anon = apply_mappings(chunk.content)
+            if new_anon != chunk.anonymized_content:
+                chunk.anonymized_content = new_anon
+                updated_chunks += 1
+
+    # Re-anonymize chapter content (store anonymized version)
+    chapters_result = await db.execute(
+        select(Chapter).where(Chapter.project_id == project_id)
+    )
+    chapters = chapters_result.scalars().all()
+    updated_chapters = 0
+    for ch in chapters:
+        if ch.content:
+            new_anon = apply_mappings(ch.content)
+            if new_anon != ch.anonymized_content:
+                ch.anonymized_content = new_anon
+                updated_chapters += 1
+
+    await db.commit()
+
+    return {"updated_chunks": updated_chunks, "updated_chapters": updated_chapters}
+
+
+@router.get("/{project_id}/chapters/{chapter_id}/anonymized-content")
+async def get_chapter_anonymized_content(
+    project_id: uuid.UUID,
+    chapter_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the anonymized version of a chapter's content (what the AI sees)."""
+    result = await db.execute(
+        select(Chapter)
+        .where(Chapter.id == chapter_id)
+        .where(Chapter.project_id == project_id)
+    )
+    chapter = result.scalar_one_or_none()
+    if not chapter:
+        raise HTTPException(status_code=404, detail="Chapitre non trouvé")
+
+    if not chapter.content:
+        return {"anonymized_content": ""}
+
+    # Apply all active mappings to get the anonymized version
+    mappings_result = await db.execute(
+        select(AnonymizationMapping)
+        .where(AnonymizationMapping.project_id == project_id)
+        .where(AnonymizationMapping.is_active == True)
+    )
+    mappings = mappings_result.scalars().all()
+    mappings_sorted = sorted(mappings, key=lambda m: len(m.original_value), reverse=True)
+
+    anonymized = chapter.content
+    for m in mappings_sorted:
+        anonymized = anonymized.replace(m.original_value, m.anonymized_value)
+
+    return {"anonymized_content": anonymized}
 
 
 # ── Fill Excel endpoint ─────────────────────────────────────────────
