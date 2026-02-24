@@ -453,6 +453,8 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 "formulaire", "cerfa",
                 "a completer", "à compléter",
                 "a remplir", "à remplir",
+                "grille", "questionnaire",
+                "annexe conformit", "annexe rgpd",
             ]
 
             def _is_truly_redaction(rd) -> bool:
@@ -1025,6 +1027,8 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
                     "a completer", "à compléter",
                     "a remplir", "à remplir",
                     "cadre de réponse", "cadre de reponse",
+                    "grille", "questionnaire",
+                    "annexe conformit", "annexe rgpd",
                 ]
                 is_clearly_completion = (
                     doc_format == DocumentFormat.XLSX
