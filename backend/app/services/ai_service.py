@@ -900,53 +900,91 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
         new_rfp_content: str,
         old_response_content: str = "",
     ) -> List[Dict]:
-        """Generate structured JSON data to fill an Excel BPU/DQE from old response pricing.
+        """Generate structured JSON data to fill an Excel document from old response data.
 
         Returns a list of dicts: [{"sheet": str, "cell": str, "value": str|number}, ...]
         """
+        # Detect document type to adapt the prompt
+        title_lower = document_title.lower()
+        is_conformity = any(kw in title_lower for kw in [
+            "rgpd", "conformit", "gdpr", "protection des données",
+            "questionnaire", "grille", "annexe", "déclaration",
+            "engagement", "certification", "audit", "sécurité",
+            "environnement", "rse", "social", "qualité",
+        ])
+        is_pricing = any(kw in title_lower for kw in [
+            "bpu", "bordereau", "dqe", "dpgf", "prix", "tarif", "chiffrage",
+        ])
+
+        if is_conformity and not is_pricing:
+            doc_type_desc = "documents de conformité, questionnaires et grilles de réponse"
+            fill_rules = """## Règles STRICTES:
+1. Tu DOIS remplir TOUTES les cellules vides qui attendent une réponse du candidat
+2. Pour les colonnes "Réponse", "Conformité", "Conforme", réponds par "Oui", "Non", "Partiel" ou "N/A" selon le contexte
+3. Pour les colonnes "Commentaire", "Détail", "Description", "Mesures", fournis une réponse détaillée et pertinente
+4. Reprends les informations de l'ancienne réponse quand elles existent
+5. Si tu ne trouves pas l'information dans l'ancienne réponse, génère une réponse professionnelle basée sur le contexte de l'appel d'offres
+6. Ne modifie PAS les cellules d'en-tête, de titre, de numérotation ou de structure
+7. Ne remplis QUE les cellules qui sont vides (marquées "(vide)") et qui attendent une valeur du candidat
+8. Pour les textes, utilise des chaînes de caractères claires et professionnelles"""
+        else:
+            doc_type_desc = "Bordereaux de Prix Unitaires (BPU), DQE et DPGF"
+            fill_rules = """## Règles STRICTES:
+1. Tu DOIS reprendre les informations de l'ancienne réponse quand elles existent (prix, textes, données entreprise, réponses, etc.)
+2. Si une information n'existe pas dans l'ancienne réponse, mets la valeur "[A COMPLÉTER]"
+3. Ne modifie PAS les cellules d'en-tête, de titre ou de structure (lignes d'entête, titres de colonnes)
+4. Ne remplis QUE les cellules qui sont vides ou qui attendent une valeur du candidat
+5. Pour les prix, utilise des NOMBRES (pas de texte) : 150.00, pas "150,00 €"
+6. Pour les textes (désignations, observations), utilise des chaînes de caractères"""
+
         system_prompt = f"""Tu es un expert senior en réponse aux appels d'offres, spécialisé dans le remplissage
-de Bordereaux de Prix Unitaires (BPU), DQE et DPGF.
+de {doc_type_desc}.
 
 Le document à compléter est: **{document_title}**
 
 ## Ta mission:
 Tu dois générer les VALEURS EXACTES à inscrire dans chaque cellule de l'Excel,
-en te basant sur l'ancienne réponse qui contient les tarifs/prix déjà pratiqués.
+en te basant sur l'ancienne réponse et le contenu de l'appel d'offres.
 
-## Règles STRICTES:
-1. Tu DOIS reprendre les prix de l'ancienne réponse quand ils existent
-2. Si un prix n'existe pas dans l'ancienne réponse, mets la valeur "[A COMPLÉTER]"
-3. Ne modifie PAS les cellules d'en-tête, de titre ou de structure (lignes d'entête, titres de colonnes)
-4. Ne remplis QUE les cellules qui sont vides ou qui attendent une valeur du candidat
-5. Pour les prix, utilise des NOMBRES (pas de texte) : 150.00, pas "150,00 €"
-6. Pour les textes (désignations, observations), utilise des chaînes de caractères
+{fill_rules}
 
 ## Format de sortie OBLIGATOIRE:
 Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
 [
-  {{"sheet": "Nom de l'onglet", "cell": "B5", "value": 150.00}},
-  {{"sheet": "Nom de l'onglet", "cell": "C5", "value": "Forfait"}},
+  {{"sheet": "Nom de l'onglet", "cell": "B5", "value": "Oui"}},
+  {{"sheet": "Nom de l'onglet", "cell": "C5", "value": "Mesure mise en place..."}},
   ...
 ]
 
+IMPORTANT: Tu DOIS générer une entrée pour CHAQUE cellule vide qui attend une réponse du candidat.
+Analyse bien la structure de l'Excel pour identifier les colonnes de réponse.
 Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie."""
 
-        # Put pricing context FIRST so it's most prominent, then Excel structure, then RFP
+        # Put context FIRST so it's most prominent, then Excel structure, then RFP
         parts = []
         if old_response_content:
             parts.append(
-                f"⚠️ ANCIENNE RÉPONSE (CONTIENT LES TARIFS/PRIX À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
+                f"⚠️ ANCIENNE RÉPONSE (CONTIENT LES INFORMATIONS À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
             )
         parts.append(f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure[:40000]}")
         parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:20000]}")
 
         user_prompt = "\n\n---\n\n".join(parts)
-        user_prompt += (
-            f"\n\n⚠️ RAPPEL IMPORTANT: Génère le JSON de remplissage pour le document '{document_title}'. "
-            "Tu DOIS reprendre TOUS les tarifs/prix de l'ancienne réponse ci-dessus. "
-            "Chaque cellule de prix vide doit être remplie avec le tarif correspondant de l'ancienne réponse. "
-            "Retourne UNIQUEMENT le JSON."
-        )
+        if is_conformity and not is_pricing:
+            user_prompt += (
+                f"\n\n⚠️ RAPPEL IMPORTANT: Génère le JSON de remplissage pour le document '{document_title}'. "
+                "Ce document est un questionnaire/grille de conformité. "
+                "Tu DOIS remplir TOUTES les cellules vides qui attendent une réponse (colonnes Réponse, Commentaire, Détail, etc.). "
+                "Pour chaque question/exigence, fournis une réponse appropriée (Oui/Non/Partiel + commentaire si nécessaire). "
+                "Retourne UNIQUEMENT le JSON."
+            )
+        else:
+            user_prompt += (
+                f"\n\n⚠️ RAPPEL IMPORTANT: Génère le JSON de remplissage pour le document '{document_title}'. "
+                "Tu DOIS reprendre TOUTES les informations de l'ancienne réponse ci-dessus (prix, textes, réponses, données). "
+                "Chaque cellule vide doit être remplie avec l'information correspondante de l'ancienne réponse. "
+                "Retourne UNIQUEMENT le JSON."
+            )
 
         raw = await self.generate(system_prompt, user_prompt, temperature=0.1, max_tokens=32000)
 

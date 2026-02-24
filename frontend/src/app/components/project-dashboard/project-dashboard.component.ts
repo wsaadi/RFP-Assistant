@@ -281,7 +281,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                         *ngIf="rd.expected_format === 'xlsx' || rd.expected_format === 'xls'"
                         [disabled]="rd._fillingExcel"
                         (click)="fillAndDownloadExcel(rd)"
-                        matTooltip="Remplir l'Excel avec les tarifs de l'ancienne reponse et telecharger">
+                        matTooltip="Remplir l'Excel avec les informations de l'ancienne reponse et telecharger">
                         <mat-spinner *ngIf="rd._fillingExcel" diameter="16"></mat-spinner>
                         <mat-icon *ngIf="!rd._fillingExcel">download</mat-icon>
                         {{ rd._fillingExcel ? 'Generation en cours...' : 'Telecharger Excel rempli' }}
@@ -1560,7 +1560,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   fillAndDownloadExcel(rd: any): void {
     rd._fillingExcel = true;
-    this.snackBar.open('Generation de l\'Excel en cours (tarifs de l\'ancienne reponse)...', '', { duration: 60000 });
+    this.snackBar.open('Generation de l\'Excel en cours (informations de l\'ancienne reponse)...', '', { duration: 60000 });
     this.api.fillExcelDocument(this.projectId, rd.id).subscribe({
       next: (blob: Blob) => {
         rd._fillingExcel = false;
