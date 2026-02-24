@@ -44,11 +44,11 @@ import { Chapter } from '../../models/report.model';
           <mat-form-field appearance="outline" class="status-select">
             <mat-label>Statut</mat-label>
             <mat-select [(value)]="chapter.status" (selectionChange)="updateStatus()">
-              <mat-option value="not_started">Non commencé</mat-option>
+              <mat-option value="not_started">Non commence</mat-option>
               <mat-option value="in_progress">En cours</mat-option>
-              <mat-option value="completed">Terminé</mat-option>
-              <mat-option value="needs_review">À relire</mat-option>
-              <mat-option value="validated">Validé</mat-option>
+              <mat-option value="completed">Termine</mat-option>
+              <mat-option value="needs_review">A relire</mat-option>
+              <mat-option value="validated">Valide</mat-option>
             </mat-select>
           </mat-form-field>
           <button mat-raised-button color="primary" (click)="saveContent()" [disabled]="saving">
@@ -69,28 +69,28 @@ import { Chapter } from '../../models/report.model';
           <!-- AI Actions -->
           <div class="ai-actions">
             <button mat-raised-button color="primary" (click)="generateContent('generate')" [disabled]="generating"
-              matTooltip="Générer le contenu en se basant sur l'AO et l'ancienne réponse">
+              matTooltip="Generer le contenu en se basant sur l'AO et l'ancienne reponse">
               <mat-spinner *ngIf="generating" diameter="18"></mat-spinner>
-              <mat-icon *ngIf="!generating">auto_fix_high</mat-icon> Générer
+              <mat-icon *ngIf="!generating">auto_fix_high</mat-icon> Generer
             </button>
             <button mat-raised-button color="accent" (click)="generateContent('enrich')" [disabled]="generating || !chapter.content"
               matTooltip="Enrichir le contenu existant">
               <mat-icon>auto_awesome</mat-icon> Enrichir
             </button>
             <button mat-raised-button (click)="showCustomPrompt = !showCustomPrompt"
-              matTooltip="Instruction personnalisée à l'IA">
+              matTooltip="Instruction personnalisee a l'IA">
               <mat-icon>chat</mat-icon> Prompt libre
             </button>
           </div>
 
           <mat-card *ngIf="showCustomPrompt" class="custom-prompt-card">
             <mat-form-field appearance="outline" class="full-width">
-              <mat-label>Instruction à l'IA</mat-label>
+              <mat-label>Instruction a l'IA</mat-label>
               <textarea matInput [(ngModel)]="customPrompt" rows="3"
-                placeholder="Ex: Ajoute plus de détails sur la méthodologie de test..."></textarea>
+                placeholder="Ex: Ajoute plus de details sur la methodologie de test..."></textarea>
             </mat-form-field>
             <button mat-raised-button color="primary" (click)="generateContent('custom')" [disabled]="!customPrompt || generating">
-              Exécuter
+              Executer
             </button>
           </mat-card>
 
@@ -111,9 +111,12 @@ import { Chapter } from '../../models/report.model';
                 <span class="word-count" *ngIf="chapter.content">
                   {{ chapter.content.split(' ').length }} mots - ~{{ Math.ceil(chapter.content.split(' ').length / 300) }} page(s)
                 </span>
-                <mat-button-toggle-group [(value)]="editorMode" class="editor-mode-toggle">
+                <mat-button-toggle-group [(value)]="editorMode" (change)="onModeChange($event.value)" class="editor-mode-toggle">
                   <mat-button-toggle value="edit"><mat-icon>edit</mat-icon> Editer</mat-button-toggle>
                   <mat-button-toggle value="preview"><mat-icon>visibility</mat-icon> Apercu</mat-button-toggle>
+                  <mat-button-toggle value="anonymized" matTooltip="Vue anonymisee : ce que l'IA voit">
+                    <mat-icon>security</mat-icon> Anonymise
+                  </mat-button-toggle>
                 </mat-button-toggle-group>
               </div>
             </div>
@@ -121,20 +124,37 @@ import { Chapter } from '../../models/report.model';
             <!-- Edit mode -->
             <mat-form-field *ngIf="editorMode === 'edit'" appearance="outline" class="full-width">
               <textarea matInput [(ngModel)]="chapter.content" rows="25"
-                placeholder="Rédigez le contenu de ce chapitre..."></textarea>
+                placeholder="Redigez le contenu de ce chapitre..."></textarea>
             </mat-form-field>
 
-            <!-- Preview mode -->
+            <!-- Preview mode (reconciled - real values) -->
             <div *ngIf="editorMode === 'preview' && chapter.content"
               class="rendered-content" [innerHTML]="renderMarkdown(chapter.content)"></div>
             <p *ngIf="editorMode === 'preview' && !chapter.content" class="empty-preview">
               Aucun contenu. Utilisez le mode Editer ou les outils IA pour generer du contenu.
             </p>
+
+            <!-- Anonymized mode (what the AI sees) -->
+            <div *ngIf="editorMode === 'anonymized'" class="anon-view-container">
+              <div class="anon-view-banner">
+                <mat-icon>security</mat-icon>
+                <span>Vue anonymisee - C'est ce que l'IA voit. Les donnees sensibles sont remplacees par des placeholders.</span>
+              </div>
+              <div *ngIf="loadingAnonymized" class="anon-loading">
+                <mat-spinner diameter="24"></mat-spinner>
+                <span>Chargement de la vue anonymisee...</span>
+              </div>
+              <div *ngIf="!loadingAnonymized && anonymizedContent"
+                class="rendered-content anon-rendered" [innerHTML]="renderMarkdown(anonymizedContent)"></div>
+              <p *ngIf="!loadingAnonymized && !anonymizedContent" class="empty-preview">
+                Aucun contenu a anonymiser.
+              </p>
+            </div>
           </mat-card>
 
           <!-- Source references -->
           <mat-card *ngIf="chapter.source_references?.length" class="refs-card">
-            <h4><mat-icon>link</mat-icon> Sources utilisées</h4>
+            <h4><mat-icon>link</mat-icon> Sources utilisees</h4>
             <div *ngFor="let ref of chapter.source_references" class="ref-item">
               <mat-icon>description</mat-icon>
               <span>{{ ref.document }} - p.{{ ref.page }} (pertinence: {{ (ref.score * 100).toFixed(0) }}%)</span>
@@ -168,7 +188,7 @@ import { Chapter } from '../../models/report.model';
 
           <!-- Improvement axes -->
           <mat-card *ngIf="chapter.improvement_axes?.length" class="axes-card">
-            <h4><mat-icon>trending_up</mat-icon> Axes d'amélioration</h4>
+            <h4><mat-icon>trending_up</mat-icon> Axes d'amelioration</h4>
             <div *ngFor="let axis of chapter.improvement_axes" class="axis-item">
               <p>{{ axis.content || axis }}</p>
             </div>
@@ -207,7 +227,7 @@ import { Chapter } from '../../models/report.model';
     .ai-actions { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; }
     .custom-prompt-card { padding: 16px; margin-bottom: 12px; }
     .content-card { padding: 16px; }
-    .content-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+    .content-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; flex-wrap: wrap; gap: 8px; }
     .content-header h3 { margin: 0; }
     .content-header-right { display: flex; align-items: center; gap: 16px; }
     .word-count { color: #888; font-size: 13px; }
@@ -258,6 +278,14 @@ import { Chapter } from '../../models/report.model';
     .status-chip-needs_review { background: #fff3e0 !important; }
     .status-chip-validated { background: #b2dfdb !important; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
+
+    /* Anonymized view */
+    .anon-view-container { min-height: 300px; }
+    .anon-view-banner { display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 6px; margin-bottom: 12px; font-size: 13px; color: #2e7d32; }
+    .anon-view-banner mat-icon { font-size: 20px; width: 20px; height: 20px; }
+    .anon-loading { display: flex; align-items: center; gap: 12px; padding: 24px; color: #666; font-size: 14px; }
+    .anon-rendered { background: #f9fbe7; border: 1px dashed #c5e1a5; border-radius: 6px; }
+
     @media (max-width: 960px) { .editor-layout { grid-template-columns: 1fr; } }
   `],
 })
@@ -271,9 +299,14 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
   showCustomPrompt = false;
   customPrompt = '';
   newNote = '';
-  editorMode: 'edit' | 'preview' = 'preview';
+  editorMode: 'edit' | 'preview' | 'anonymized' = 'preview';
   Math = Math;
   renderMarkdown = renderMarkdown;
+
+  // Anonymized view state
+  anonymizedContent = '';
+  loadingAnonymized = false;
+
   private paramSub?: Subscription;
 
   constructor(
@@ -283,7 +316,6 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
   ) {}
 
   ngOnInit(): void {
-    // Subscribe to route param changes so navigation to sub-chapters reloads the editor
     this.paramSub = this.route.paramMap.subscribe(params => {
       this.projectId = params.get('projectId') || '';
       const newChapterId = params.get('chapterId') || '';
@@ -303,9 +335,31 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
 
   loadChapter(): void {
     this.loading = true;
+    this.anonymizedContent = '';
     this.api.getChapter(this.chapterId).subscribe({
       next: (ch) => { this.chapter = ch; this.loading = false; },
       error: () => { this.loading = false; },
+    });
+  }
+
+  onModeChange(mode: string): void {
+    if (mode === 'anonymized' && this.projectId && this.chapterId) {
+      this.loadAnonymizedContent();
+    }
+  }
+
+  loadAnonymizedContent(): void {
+    this.loadingAnonymized = true;
+    this.api.getChapterAnonymizedContent(this.projectId, this.chapterId).subscribe({
+      next: (res) => {
+        this.anonymizedContent = res.anonymized_content;
+        this.loadingAnonymized = false;
+      },
+      error: () => {
+        this.anonymizedContent = '';
+        this.loadingAnonymized = false;
+        this.snackBar.open('Erreur lors du chargement de la vue anonymisee', 'OK', { duration: 3000 });
+      },
     });
   }
 
@@ -314,7 +368,7 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
     this.saving = true;
     this.api.updateChapter(this.chapterId, { content: this.chapter.content, status: this.chapter.status }).subscribe({
       next: () => {
-        this.snackBar.open('Contenu sauvegardé', 'OK', { duration: 2000 });
+        this.snackBar.open('Contenu sauvegarde', 'OK', { duration: 2000 });
         this.saving = false;
       },
       error: () => { this.saving = false; },
@@ -333,13 +387,13 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
         if (this.chapter) {
           this.chapter.content = res.content;
         }
-        this.snackBar.open('Contenu généré', 'OK', { duration: 2000 });
+        this.snackBar.open('Contenu genere', 'OK', { duration: 2000 });
         this.generating = false;
         this.showCustomPrompt = false;
         this.customPrompt = '';
       },
       error: (err) => {
-        this.snackBar.open(err.error?.detail || 'Erreur de génération', 'OK', { duration: 5000 });
+        this.snackBar.open(err.error?.detail || 'Erreur de generation', 'OK', { duration: 5000 });
         this.generating = false;
       },
     });
@@ -353,15 +407,15 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
           this.chapter.notes = res.notes;
         }
         this.newNote = '';
-        this.snackBar.open('Note ajoutée', 'OK', { duration: 1500 });
+        this.snackBar.open('Note ajoutee', 'OK', { duration: 1500 });
       },
     });
   }
 
   statusLabel(status: string): string {
     const labels: Record<string, string> = {
-      not_started: 'Non commencé', in_progress: 'En cours', completed: 'Terminé',
-      needs_review: 'À relire', validated: 'Validé',
+      not_started: 'Non commence', in_progress: 'En cours', completed: 'Termine',
+      needs_review: 'A relire', validated: 'Valide',
     };
     return labels[status] || status;
   }
@@ -371,7 +425,7 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
       chapter: 'Chapitre',
       sub_chapter: 'Sous-chapitre',
       annexe: 'Annexe',
-      document_to_provide: 'Document à fournir',
+      document_to_provide: 'Document a fournir',
     };
     return labels[type] || type;
   }
