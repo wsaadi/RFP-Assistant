@@ -291,7 +291,10 @@ async def get_gap_analysis_status(
 
 
 async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
-    """Background task for gap analysis."""
+    """Background task for gap analysis.
+
+    DB connections are released during the slow AI call to minimize pool pressure.
+    """
     from ..database import async_session
     pid = str(project_id)
 
@@ -302,6 +305,7 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
         }
 
     try:
+        # ── Phase 1: Load config + anonymize (short DB session) ──
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
@@ -323,11 +327,15 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
             _update("anonymizing", 20, "Anonymisation des documents...")
             anon_old = await AnonymizationService.anonymize_text(old_rfp_content, project_id, db)
             anon_new = await AnonymizationService.anonymize_text(new_rfp_content, project_id, db)
+        # DB released
 
-            _update("analyzing", 40, "Analyse IA des ecarts en cours...")
-            analysis = await ai_service.analyze_gap(anon_old, anon_new)
+        # ── Phase 2: AI analysis (NO DB connection held) ──
+        _update("analyzing", 40, "Analyse IA des ecarts en cours...")
+        analysis = await ai_service.analyze_gap(anon_old, anon_new)
 
-            _update("deanonymizing", 75, "Deanonymisation des resultats...")
+        # ── Phase 3: Deanonymize + save (short DB session) ──
+        _update("deanonymizing", 75, "Deanonymisation des resultats...")
+        async with async_session() as db:
             for key in ["summary"]:
                 if key in analysis and isinstance(analysis[key], str):
                     analysis[key] = await AnonymizationService.deanonymize_text(analysis[key], project_id, db)
@@ -1055,7 +1063,10 @@ async def get_detect_status(
 
 
 async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID):
-    """Background task: analyze RFP to detect expected deliverables."""
+    """Background task: analyze RFP to detect expected deliverables.
+
+    DB connections are released during the slow AI call to minimize pool pressure.
+    """
     from ..database import async_session
     pid = str(project_id)
 
@@ -1066,6 +1077,7 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
         }
 
     try:
+        # ── Phase 1: Load anonymized chunks (short DB session) ──
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
@@ -1083,40 +1095,39 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
             anon_old_response = await _get_all_chunks_anonymized_by_category(
                 db, project_id, DocumentCategory.OLD_RESPONSE
             )
+        # DB released
 
-            _update("analyzing", 20, "Analyse IA des livrables attendus...")
-            detect_cb = _make_stream_progress_callback(
-                pid, "analyzing", 20, 80, "Detection des livrables", max_tokens=8000,
-            )
-            # Reuse the same progress dict (not _generation_progress) — update reference
-            # We need the callback to update _detect_progress, not _generation_progress
-            import time
-            t0 = time.monotonic()
+        # ── Phase 2: AI detection (NO DB connection held) ──
+        _update("analyzing", 20, "Analyse IA des livrables attendus...")
+        import time
+        t0 = time.monotonic()
 
-            async def _on_detect_progress(token_count: int, char_count: int):
-                elapsed = int(time.monotonic() - t0)
-                ratio = min(token_count / 8000, 0.95)
-                pct = 20 + int(60 * ratio)
-                _detect_progress[pid] = {
-                    "status": "running", "step": "analyzing", "progress": pct,
-                    "message": f"Analyse IA — {token_count} tokens ({char_count:,} car.) — {elapsed}s",
-                }
+        async def _on_detect_progress(token_count: int, char_count: int):
+            elapsed = int(time.monotonic() - t0)
+            ratio = min(token_count / 8000, 0.95)
+            pct = 20 + int(60 * ratio)
+            _detect_progress[pid] = {
+                "status": "running", "step": "analyzing", "progress": pct,
+                "message": f"Analyse IA — {token_count} tokens ({char_count:,} car.) — {elapsed}s",
+            }
 
-            deliverables = await ai_service.detect_deliverables(
-                new_rfp_content=anon_new_rfp,
-                old_response_content=anon_old_response,
-                on_progress=_on_detect_progress,
-            )
+        deliverables = await ai_service.detect_deliverables(
+            new_rfp_content=anon_new_rfp,
+            old_response_content=anon_old_response,
+            on_progress=_on_detect_progress,
+        )
 
-            if not deliverables:
-                _detect_progress[pid] = {
-                    "status": "error", "step": "error", "progress": 0,
-                    "message": "L'IA n'a pas detecte de livrables. Reessayez.",
-                }
-                return
+        if not deliverables:
+            _detect_progress[pid] = {
+                "status": "error", "step": "error", "progress": 0,
+                "message": "L'IA n'a pas detecte de livrables. Reessayez.",
+            }
+            return
 
-            _update("saving", 85, f"{len(deliverables)} livrable(s) detecte(s), enregistrement...")
+        # ── Phase 3: Save results (short DB session) ──
+        _update("saving", 85, f"{len(deliverables)} livrable(s) detecte(s), enregistrement...")
 
+        async with async_session() as db:
             # Remove old response documents (re-detection replaces previous)
             old_docs = await db.execute(
                 select(ResponseDocument).where(ResponseDocument.project_id == project_id)
@@ -1155,8 +1166,6 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
                 )
 
                 if is_clearly_completion:
-                    # Force COMPLETION for xlsx or docs with completion keywords,
-                    # even if AI said "redaction" (common misclassification)
                     ct = ContentType.COMPLETION
                     if raw_content_type == "redaction":
                         logger.warning(
@@ -1417,7 +1426,10 @@ async def get_fill_status(
 
 
 async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID):
-    """Background task: auto-fill completion-type documents (BPU, DQE, forms, etc.)."""
+    """Background task: auto-fill completion-type documents (BPU, DQE, forms, etc.).
+
+    DB connections are released during the slow AI calls to minimize pool pressure.
+    """
     from ..database import async_session
     pid = str(project_id)
 
@@ -1428,12 +1440,12 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
         }
 
     try:
+        # ── Phase 1: Load all data (short DB session) ──
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
             _update("loading", 5, "Chargement des documents à compléter...")
 
-            # Get completion-type documents
             result = await db.execute(
                 select(ResponseDocument)
                 .where(ResponseDocument.project_id == project_id)
@@ -1452,15 +1464,20 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 }
                 return
 
+            # Capture plain data (detach from session)
+            docs_data = [
+                {"id": doc.id, "title": doc.title, "description": doc.description,
+                 "expected_format": doc.expected_format.value}
+                for doc in comp_docs
+            ]
+
             _update("loading", 10, f"{total} document(s) à compléter...")
 
-            # Load RFP and old response content in parallel
             anon_new_rfp, anon_old_response = await asyncio.gather(
                 _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
                 _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
             )
 
-            # Also gather any already-generated chapter content for context
             chapters_result = await db.execute(
                 select(Chapter)
                 .where(Chapter.project_id == project_id)
@@ -1472,60 +1489,63 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 f"## {ch.title}\n{ch.content[:2000]}"
                 for ch in existing_chapters[:10]
             ])
+        # DB released
 
-            import time
-            filled_count = 0
+        import time
+        combined_context = anon_old_response
+        if chapter_context:
+            combined_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
 
-            # Pre-compute shared context once (instead of per-doc)
-            combined_context = anon_old_response
-            if chapter_context:
-                combined_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
+        # ── Phase 2: Parallel AI generation (NO DB connection held) ──
+        sem = asyncio.Semaphore(3)
+        _fill_done = 0
 
-            sem = asyncio.Semaphore(3)
-            _fill_done = 0
+        async def _fill_one_doc(idx, doc_data):
+            nonlocal _fill_done
+            t0_doc = time.monotonic()
 
-            async def _fill_one_doc(idx, doc):
-                nonlocal _fill_done
-                t0_doc = time.monotonic()
+            async def _on_fill_progress(token_count: int, char_count: int,
+                                        _t0=t0_doc, _title=doc_data["title"]):
+                elapsed = int(time.monotonic() - _t0)
+                ratio = min(token_count / 8000, 0.95)
+                pct = 10 + int(85 * (_fill_done + ratio) / total)
+                _fill_progress[pid] = {
+                    "status": "running", "step": "filling", "progress": pct,
+                    "message": f"Documents en parallele ({_fill_done + 1}/{total}): "
+                               f"{_title} — {token_count} tokens — {elapsed}s",
+                }
 
-                async def _on_fill_progress(token_count: int, char_count: int,
-                                            _t0=t0_doc, _title=doc.title):
-                    elapsed = int(time.monotonic() - _t0)
-                    ratio = min(token_count / 8000, 0.95)
-                    pct = 10 + int(85 * (_fill_done + ratio) / total)
-                    _fill_progress[pid] = {
-                        "status": "running", "step": "filling", "progress": pct,
-                        "message": f"Documents en parallele ({_fill_done + 1}/{total}): "
-                                   f"{_title} — {token_count} tokens — {elapsed}s",
-                    }
+            async with sem:
+                fill_content = await ai_service.generate_fill_content(
+                    document_title=doc_data["title"],
+                    document_description=doc_data["description"],
+                    expected_format=doc_data["expected_format"],
+                    new_rfp_content=anon_new_rfp,
+                    old_response_content=combined_context,
+                    on_progress=_on_fill_progress,
+                )
+                _fill_done += 1
+                return (doc_data["id"], fill_content)
 
-                async with sem:
-                    fill_content = await ai_service.generate_fill_content(
-                        document_title=doc.title,
-                        document_description=doc.description,
-                        expected_format=doc.expected_format.value,
-                        new_rfp_content=anon_new_rfp,
-                        old_response_content=combined_context,
-                        on_progress=_on_fill_progress,
-                    )
-                    deanon = await AnonymizationService.deanonymize_text(
-                        fill_content, project_id, db
-                    )
-                    _fill_done += 1
-                    return (doc, deanon)
+        _update("filling", 10, f"Remplissage parallele de {total} document(s)...")
 
-            _update("filling", 10, f"Remplissage parallele de {total} document(s)...")
+        results = await asyncio.gather(*[
+            _fill_one_doc(idx, doc_data) for idx, doc_data in enumerate(docs_data)
+        ])
 
-            results = await asyncio.gather(*[
-                _fill_one_doc(idx, doc) for idx, doc in enumerate(comp_docs)
-            ])
-
-            for doc, content in results:
-                doc.fill_content = content
+        # ── Phase 3: Deanonymize + save (short DB session) ──
+        _update("saving", 96, "Deanonymisation et enregistrement...")
+        filled_count = 0
+        async with async_session() as db:
+            for doc_id, raw_content in results:
+                deanon = await AnonymizationService.deanonymize_text(raw_content, project_id, db)
+                doc_result = await db.execute(
+                    select(ResponseDocument).where(ResponseDocument.id == doc_id)
+                )
+                doc = doc_result.scalar_one()
+                doc.fill_content = deanon
                 doc.fill_status = "completed"
                 filled_count += 1
-
-            _update("saving", 96, "Enregistrement...")
             await db.commit()
 
         _fill_progress[pid] = {
@@ -1625,7 +1645,10 @@ async def get_compliance_analysis_status(
 
 
 async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
-    """Background task for compliance analysis."""
+    """Background task for compliance analysis.
+
+    DB connections are released during the slow AI call to minimize pool pressure.
+    """
     from ..database import async_session
     pid = str(project_id)
 
@@ -1636,6 +1659,7 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
         }
 
     try:
+        # ── Phase 1: Load data + anonymize (short DB session) ──
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
@@ -1662,11 +1686,15 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
             _update("anonymizing", 25, "Anonymisation des contenus...")
             anon_response = await AnonymizationService.anonymize_text(response_content, project_id, db)
             anon_rfp = await AnonymizationService.anonymize_text(rfp_requirements, project_id, db)
+        # DB released
 
-            _update("analyzing", 40, "Analyse IA de la conformite en cours...")
-            analysis = await ai_service.analyze_compliance(anon_response, anon_rfp)
+        # ── Phase 2: AI analysis (NO DB connection held) ──
+        _update("analyzing", 40, "Analyse IA de la conformite en cours...")
+        analysis = await ai_service.analyze_compliance(anon_response, anon_rfp)
 
-            _update("deanonymizing", 75, "Deanonymisation des resultats...")
+        # ── Phase 3: Deanonymize + save (short DB session) ──
+        _update("deanonymizing", 75, "Deanonymisation des resultats...")
+        async with async_session() as db:
             for req in analysis.get("covered_requirements", []):
                 for key in ("requirement", "comment"):
                     if key in req and req[key]:
