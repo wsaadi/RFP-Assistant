@@ -29,9 +29,14 @@ MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
 
 async def process_document_background(document_id: str, project_id: str):
-    """Background task to process an uploaded document."""
-    async with async_session() as db:
-        try:
+    """Background task to process an uploaded document.
+
+    Splits DB usage into short sessions: one to load metadata and mark processing,
+    file I/O and parsing happen without DB, then a final session for saves.
+    """
+    try:
+        # ── Phase 1: Load document metadata + mark processing (short DB session) ──
+        async with async_session() as db:
             result = await db.execute(select(Document).where(Document.id == uuid.UUID(document_id)))
             document = result.scalar_one_or_none()
             if not document:
@@ -41,67 +46,75 @@ async def process_document_background(document_id: str, project_id: str):
             document.processing_status = ProcessingStatus.PROCESSING
             await db.commit()
 
-            # Read file content
-            with open(document.file_path, "rb") as f:
-                file_content = f.read()
+            # Capture data needed for file processing
+            file_path = document.file_path
+            file_type = document.file_type
+            original_filename = document.original_filename
+            category_value = document.category.value
+        # DB released
 
-            # Extract text based on file type
-            text = ""
-            pages_data = None
-            images_data = []
+        # ── Phase 2: File I/O + text extraction + chunking (NO DB held) ──
+        with open(file_path, "rb") as f:
+            file_content = f.read()
 
-            ProgressTracker.update(document_id, "extracting_text")
+        text = ""
+        pages_data = None
+        images_data = []
+        page_count = None
 
-            if document.file_type == FileType.PDF:
-                text, page_count, pages_data = DocumentProcessor.extract_text_from_pdf(file_content)
-                document.page_count = page_count
+        ProgressTracker.update(document_id, "extracting_text")
+
+        if file_type == FileType.PDF:
+            text, page_count, pages_data = DocumentProcessor.extract_text_from_pdf(file_content)
+            ProgressTracker.update(document_id, "extracting_images")
+            images_data = DocumentProcessor.extract_images_from_pdf(file_content, document_id)
+
+        elif file_type == FileType.DOC:
+            try:
+                docx_content = DocumentProcessor.convert_doc_to_docx(file_content)
+                text, sections = DocumentProcessor.extract_text_from_docx(docx_content)
+                page_count = max(1, len(text.split()) // 300)
                 ProgressTracker.update(document_id, "extracting_images")
-                images_data = DocumentProcessor.extract_images_from_pdf(file_content, document_id)
+                images_data = DocumentProcessor.extract_images_from_docx(docx_content, document_id)
+            except Exception as doc_err:
+                print(f"DOC conversion/parsing failed: {doc_err}")
+                text = ""
 
-            elif document.file_type == FileType.DOC:
-                # Convert .doc to .docx via LibreOffice, then process as DOCX
-                try:
-                    docx_content = DocumentProcessor.convert_doc_to_docx(file_content)
-                    text, sections = DocumentProcessor.extract_text_from_docx(docx_content)
-                    document.page_count = max(1, len(text.split()) // 300)
-                    ProgressTracker.update(document_id, "extracting_images")
-                    images_data = DocumentProcessor.extract_images_from_docx(docx_content, document_id)
-                except Exception as doc_err:
-                    print(f"DOC conversion/parsing failed: {doc_err}")
-                    text = ""
+        elif file_type == FileType.DOCX:
+            try:
+                text, sections = DocumentProcessor.extract_text_from_docx(file_content)
+                page_count = max(1, len(text.split()) // 300)
+                ProgressTracker.update(document_id, "extracting_images")
+                images_data = DocumentProcessor.extract_images_from_docx(file_content, document_id)
+            except (ValueError, Exception) as docx_err:
+                print(f"DOCX parsing failed: {docx_err}")
+                text = ""
 
-            elif document.file_type == FileType.DOCX:
-                try:
-                    text, sections = DocumentProcessor.extract_text_from_docx(file_content)
-                    document.page_count = max(1, len(text.split()) // 300)
-                    ProgressTracker.update(document_id, "extracting_images")
-                    images_data = DocumentProcessor.extract_images_from_docx(file_content, document_id)
-                except (ValueError, Exception) as docx_err:
-                    print(f"DOCX parsing failed: {docx_err}")
-                    text = ""
+        elif file_type in (FileType.XLSX, FileType.XLS):
+            text = DocumentProcessor.extract_text_from_excel(file_content)
+            page_count = 1
 
-            elif document.file_type in (FileType.XLSX, FileType.XLS):
-                text = DocumentProcessor.extract_text_from_excel(file_content)
-                document.page_count = 1
-
-            if not text.strip():
-                ProgressTracker.fail(document_id, "Aucun texte extrait du document")
-                document.processing_status = ProcessingStatus.FAILED
+        if not text.strip():
+            ProgressTracker.fail(document_id, "Aucun texte extrait du document")
+            async with async_session() as db:
+                result = await db.execute(select(Document).where(Document.id == uuid.UUID(document_id)))
+                doc = result.scalar_one()
+                doc.processing_status = ProcessingStatus.FAILED
                 await db.commit()
-                return
+            return
 
-            # Create chunks
-            ProgressTracker.update(document_id, "chunking")
-            chunks = DocumentProcessor.create_chunks(
-                text=text,
-                document_id=document_id,
-                document_name=document.original_filename,
-                category=document.category.value,
-                pages_data=pages_data,
-            )
+        ProgressTracker.update(document_id, "chunking")
+        chunks = DocumentProcessor.create_chunks(
+            text=text,
+            document_id=document_id,
+            document_name=original_filename,
+            category=category_value,
+            pages_data=pages_data,
+        )
 
-            # Anonymize chunks in batch (single NER pass + single DB round-trip)
-            ProgressTracker.update(document_id, "anonymizing")
+        # ── Phase 3: Anonymize + save everything (DB session for writes) ──
+        ProgressTracker.update(document_id, "anonymizing")
+        async with async_session() as db:
             chunk_texts = [c["content"] for c in chunks]
             anonymized_texts = await AnonymizationService.anonymize_chunks_batch(
                 chunk_texts, uuid.UUID(project_id), db
@@ -121,7 +134,7 @@ async def process_document_background(document_id: str, project_id: str):
                 )
                 db.add(db_chunk)
 
-            # Index anonymized chunks in vector DB
+            # Index anonymized chunks in vector DB (no DB needed, but fast)
             ProgressTracker.update(document_id, "indexing")
             vector_chunks = [
                 {
@@ -153,41 +166,28 @@ async def process_document_background(document_id: str, project_id: str):
                 )
                 db.add(db_image)
 
-            # Try to describe images with AI if config available
-            try:
-                config_result = await db.execute(
-                    select(AIConfig)
-                    .join(RFPProject, RFPProject.workspace_id == AIConfig.workspace_id)
-                    .where(RFPProject.id == uuid.UUID(project_id))
-                )
-                ai_config = config_result.scalar_one_or_none()
-                if ai_config and ai_config.mistral_api_key_encrypted:
-                    ai_service = MistralAIService.from_config(ai_config, ai_config.mistral_api_key_encrypted)
-                    for db_image_obj in []:  # Skip for now, can be enabled later
-                        desc = await ai_service.describe_image(
-                            db_image_obj.stored_filename, db_image_obj.context
-                        )
-                        db_image_obj.description = desc.get("description", "")
-                        db_image_obj.tags = desc.get("tags", [])
-            except Exception:
-                pass
-
+            # Update document stats
+            result = await db.execute(select(Document).where(Document.id == uuid.UUID(document_id)))
+            document = result.scalar_one()
+            if page_count is not None:
+                document.page_count = page_count
             document.chunk_count = len(chunks)
             document.processing_status = ProcessingStatus.COMPLETED
             ProgressTracker.update(document_id, "completed")
             await db.commit()
 
-        except Exception as e:
-            print(f"Error processing document {document_id}: {e}")
-            ProgressTracker.fail(document_id, str(e))
-            try:
+    except Exception as e:
+        print(f"Error processing document {document_id}: {e}")
+        ProgressTracker.fail(document_id, str(e))
+        try:
+            async with async_session() as db:
                 result = await db.execute(select(Document).where(Document.id == uuid.UUID(document_id)))
                 document = result.scalar_one_or_none()
                 if document:
                     document.processing_status = ProcessingStatus.FAILED
                     await db.commit()
-            except Exception:
-                pass
+        except Exception:
+            pass
 
 
 @router.post("/upload/{project_id}", response_model=DocumentOut)
