@@ -13,7 +13,7 @@ from sqlalchemy import select, func
 from ..database import get_db
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
-from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType, ComplianceResult
+from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType, ComplianceResult, GapAnalysisResult
 from ..models.document import Document, DocumentChunk, DocumentCategory
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
 from ..models.response_document import ResponseDocument, DocumentFormat, ContentType
@@ -217,6 +217,36 @@ async def delete_project(
 
 # ── AI-powered features ──
 
+@router.get("/{project_id}/gap-analysis")
+async def get_gap_analysis(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get the latest persisted gap analysis for a project."""
+    result = await db.execute(
+        select(GapAnalysisResult)
+        .where(GapAnalysisResult.project_id == project_id)
+        .order_by(GapAnalysisResult.created_at.desc())
+        .limit(1)
+    )
+    gr = result.scalar_one_or_none()
+    if not gr:
+        return {"analysis": None}
+
+    return {
+        "analysis": {
+            "id": str(gr.id),
+            "summary": gr.summary,
+            "new_requirements": gr.new_requirements or [],
+            "removed_requirements": gr.removed_requirements or [],
+            "modified_requirements": gr.modified_requirements or [],
+            "unchanged_requirements": gr.unchanged_requirements or [],
+            "created_at": gr.created_at.isoformat() if gr.created_at else None,
+        }
+    }
+
+
 @router.post("/{project_id}/gap-analysis")
 async def analyze_gap(
     project_id: uuid.UUID,
@@ -254,6 +284,28 @@ async def analyze_gap(
     for key in ["summary"]:
         if key in analysis and isinstance(analysis[key], str):
             analysis[key] = await AnonymizationService.deanonymize_text(analysis[key], project_id, db)
+    # Deanonymize nested fields
+    for req_list_key in ["new_requirements", "removed_requirements", "modified_requirements", "unchanged_requirements"]:
+        for req in analysis.get(req_list_key, []):
+            for field in ["title", "description", "old_description", "new_description", "impact"]:
+                if field in req and req[field]:
+                    req[field] = await AnonymizationService.deanonymize_text(req[field], project_id, db)
+
+    # Persist the result
+    gr = GapAnalysisResult(
+        project_id=project_id,
+        summary=analysis.get("summary", ""),
+        new_requirements=analysis.get("new_requirements", []),
+        removed_requirements=analysis.get("removed_requirements", []),
+        modified_requirements=analysis.get("modified_requirements", []),
+        unchanged_requirements=analysis.get("unchanged_requirements", []),
+    )
+    db.add(gr)
+    await db.commit()
+    await db.refresh(gr)
+
+    analysis["id"] = str(gr.id)
+    analysis["created_at"] = gr.created_at.isoformat() if gr.created_at else None
 
     return {"success": True, "analysis": analysis}
 
@@ -764,16 +816,21 @@ async def get_prefill_status(
 
 
 async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_ids: list[str]):
-    """Background task for pre-filling chapters from old response."""
+    """Background task for pre-filling chapters from old response.
+
+    Processes chapters sequentially and saves each one immediately
+    so partial results are preserved if something fails.
+    """
     from ..database import async_session
     pid = str(project_id)
 
-    def _update(step: str, progress: int, message: str):
+    def _update(step: str, progress: int, message: str, prefilled_count: int = 0):
         _prefill_progress[pid] = {
             "status": "running",
             "step": step,
             "progress": progress,
             "message": message,
+            "prefilled_count": prefilled_count,
         }
 
     try:
@@ -809,27 +866,27 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
 
             prefilled = 0
             skipped = 0
-            sem = asyncio.Semaphore(3)  # Limit concurrent AI calls
-            _done_count = 0
 
-            async def _prefill_one(idx, chapter):
-                nonlocal _done_count
+            # Process chapters sequentially to avoid DB session concurrency issues
+            # and save each chapter immediately for incremental persistence
+            for idx, chapter in enumerate(to_prefill):
+                try:
+                    progress = 10 + int(85 * (idx + 1) / total)
+                    _update("prefilling", progress,
+                            f"Chapitre {idx + 1}/{total}: {chapter.title[:60]}...",
+                            prefilled_count=prefilled)
 
-                # Search old response for relevant content (sync, fast)
-                search_query = f"{chapter.title} {chapter.description}"
-                old_response_chunks = VectorService.search(
-                    str(project_id), search_query, top_k=5, category_filter="old_response"
-                )
+                    # Search old response for relevant content (sync, fast)
+                    search_query = f"{chapter.title} {chapter.description}"
+                    old_response_chunks = VectorService.search(
+                        str(project_id), search_query, top_k=5, category_filter="old_response"
+                    )
 
-                if not old_response_chunks:
-                    return (chapter, None, None)  # skipped
+                    if not old_response_chunks:
+                        skipped += 1
+                        continue
 
-                old_content = "\n\n".join([c["content"] for c in old_response_chunks])
-
-                async with sem:
-                    _done_count += 1
-                    _update("prefilling", 10 + int(85 * _done_count / total),
-                            f"Chapitres en parallele ({_done_count}/{total}): {chapter.title[:60]}...")
+                    old_content = "\n\n".join([c["content"] for c in old_response_chunks])
 
                     anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
 
@@ -840,30 +897,25 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                         old_response_content=anon_content,
                     )
 
-                    deanonn = await AnonymizationService.deanonymize_text(content, project_id, db)
+                    deanon = await AnonymizationService.deanonymize_text(content, project_id, db)
                     refs = [
                         {"document": c["document_name"], "page": c["page_number"], "score": c["score"]}
                         for c in old_response_chunks[:3]
                     ]
-                    return (chapter, deanonn, refs)
 
-            results = await asyncio.gather(*[
-                _prefill_one(idx, ch) for idx, ch in enumerate(to_prefill)
-            ])
-
-            # Apply results to chapter objects
-            for chapter, content, refs in results:
-                if content is None:
-                    skipped += 1
-                else:
-                    chapter.content = content
+                    # Save immediately after each chapter
+                    chapter.content = deanon
                     chapter.is_prefilled = True
                     chapter.status = ChapterStatus.IN_PROGRESS
                     chapter.source_references = refs
+                    await db.commit()
                     prefilled += 1
 
-            _update("saving", 95, "Enregistrement en base...")
-            await db.commit()
+                except Exception as ch_err:
+                    logger.warning("Prefill failed for chapter %s: %s", chapter.title, str(ch_err)[:200])
+                    skipped += 1
+                    # Continue with next chapter instead of failing completely
+                    continue
 
         _prefill_progress[pid] = {
             "status": "completed",

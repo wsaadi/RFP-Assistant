@@ -57,6 +57,25 @@ class RFPWordService:
         normal.paragraph_format.space_after = Pt(6)
         normal.paragraph_format.line_spacing = 1.15
 
+        # List styles
+        try:
+            list_bullet = styles["List Bullet"]
+            list_bullet.font.size = Pt(11)
+            list_bullet.font.name = "Calibri"
+            list_bullet.paragraph_format.space_after = Pt(3)
+            list_bullet.paragraph_format.space_before = Pt(1)
+        except KeyError:
+            pass
+
+        try:
+            list_number = styles["List Number"]
+            list_number.font.size = Pt(11)
+            list_number.font.name = "Calibri"
+            list_number.paragraph_format.space_after = Pt(3)
+            list_number.paragraph_format.space_before = Pt(1)
+        except KeyError:
+            pass
+
     @staticmethod
     def add_cover_page(doc: Document, project_name: str, client_name: str,
                        rfp_reference: str, company_name: str = ""):
@@ -159,30 +178,89 @@ class RFPWordService:
         doc.add_page_break()
 
     @staticmethod
-    def add_chapter_content(doc: Document, title: str, content: str,
+    def _add_inline_formatting(paragraph, text: str):
+        """Parse inline markdown (bold, italic) and add formatted runs to a paragraph."""
+        # Pattern to match **bold**, *italic*, ***bold italic***
+        parts = re.split(r'(\*{1,3}[^*]+?\*{1,3})', text)
+        for part in parts:
+            if not part:
+                continue
+            if part.startswith('***') and part.endswith('***'):
+                run = paragraph.add_run(part[3:-3])
+                run.bold = True
+                run.italic = True
+            elif part.startswith('**') and part.endswith('**'):
+                run = paragraph.add_run(part[2:-2])
+                run.bold = True
+            elif part.startswith('*') and part.endswith('*') and len(part) > 2:
+                run = paragraph.add_run(part[1:-1])
+                run.italic = True
+            else:
+                paragraph.add_run(part)
+
+    @classmethod
+    def _add_markdown_table(cls, doc: Document, lines: List[str]):
+        """Parse a markdown table and add it to the document."""
+        # Filter out separator lines (|---|---|)
+        data_lines = []
+        for line in lines:
+            stripped = line.strip().strip('|')
+            if stripped and not re.match(r'^[\s\-:|]+$', stripped):
+                data_lines.append(line)
+
+        if not data_lines:
+            return
+
+        # Parse cells
+        rows_data = []
+        for line in data_lines:
+            cells = [c.strip() for c in line.strip().strip('|').split('|')]
+            rows_data.append(cells)
+
+        if not rows_data:
+            return
+
+        num_cols = max(len(row) for row in rows_data)
+        num_rows = len(rows_data)
+
+        table = doc.add_table(rows=num_rows, cols=num_cols)
+        table.style = 'Table Grid'
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+
+        for r_idx, row_data in enumerate(rows_data):
+            for c_idx, cell_text in enumerate(row_data):
+                if c_idx < num_cols:
+                    cell = table.rows[r_idx].cells[c_idx]
+                    cell.text = ''
+                    p = cell.paragraphs[0]
+                    cls._add_inline_formatting(p, cell_text)
+                    # Bold header row
+                    if r_idx == 0:
+                        for run in p.runs:
+                            run.bold = True
+                            run.font.size = Pt(10)
+
+        # Style header row with background
+        if rows_data:
+            for cell in table.rows[0].cells:
+                shading_elm = parse_xml(f'<w:shd {nsdecls("w")} w:fill="1B3A5C"/>')
+                cell._tc.get_or_add_tcPr().append(shading_elm)
+                for p in cell.paragraphs:
+                    for run in p.runs:
+                        run.font.color.rgb = RGBColor(0xFF, 0xFF, 0xFF)
+
+        doc.add_paragraph()  # spacing after table
+
+    @classmethod
+    def add_chapter_content(cls, doc: Document, title: str, content: str,
                             numbering: str, level: int = 1,
                             images: Optional[List[dict]] = None):
-        """Add a chapter with content and optional images."""
+        """Add a chapter with content parsed from markdown."""
         heading_text = f"{numbering} {title}" if numbering else title
         doc.add_heading(heading_text, level=min(level, 3))
 
         if content and content.strip():
-            # Parse content into paragraphs
-            paragraphs = content.split("\n\n")
-            for para_text in paragraphs:
-                para_text = para_text.strip()
-                if not para_text:
-                    continue
-
-                # Handle sub-paragraphs (single newlines)
-                lines = para_text.split("\n")
-                for line in lines:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    p = doc.add_paragraph()
-                    p.paragraph_format.first_line_indent = Cm(0.5)
-                    p.add_run(line)
+            cls._parse_markdown_to_docx(doc, content, base_heading_level=min(level + 1, 3))
         else:
             p = doc.add_paragraph("[Section à compléter]")
             p.runs[0].italic = True
@@ -209,6 +287,104 @@ class RFPWordService:
                             run.font.size = Pt(9)
                     except Exception as e:
                         print(f"Error adding image: {e}")
+
+    @classmethod
+    def _parse_markdown_to_docx(cls, doc: Document, content: str, base_heading_level: int = 2):
+        """Parse markdown content and add properly formatted elements to the Word document.
+
+        Handles: headings (##), bold/italic, bullet lists (- *), numbered lists (1.),
+        tables (|...|), horizontal rules (---), and regular paragraphs.
+        """
+        lines = content.split('\n')
+        i = 0
+
+        while i < len(lines):
+            line = lines[i]
+            stripped = line.strip()
+
+            # Skip empty lines
+            if not stripped:
+                i += 1
+                continue
+
+            # Horizontal rule
+            if re.match(r'^-{3,}$|^\*{3,}$|^_{3,}$', stripped):
+                # Add a thin horizontal line
+                p = doc.add_paragraph()
+                p.paragraph_format.space_before = Pt(6)
+                p.paragraph_format.space_after = Pt(6)
+                pPr = p._p.get_or_add_pPr()
+                pBdr = parse_xml(
+                    f'<w:pBdr {nsdecls("w")}>'
+                    f'  <w:bottom w:val="single" w:sz="4" w:space="1" w:color="CCCCCC"/>'
+                    f'</w:pBdr>'
+                )
+                pPr.append(pBdr)
+                i += 1
+                continue
+
+            # Markdown headings (## Title)
+            heading_match = re.match(r'^(#{1,6})\s+(.*)', stripped)
+            if heading_match:
+                hashes = heading_match.group(1)
+                heading_text = heading_match.group(2).strip()
+                md_level = len(hashes)
+                # Map markdown level: ## -> base, ### -> base+1, etc.
+                doc_level = min(base_heading_level + md_level - 2, 4)
+                doc_level = max(1, doc_level)
+                h = doc.add_heading(level=min(doc_level, 3))
+                cls._add_inline_formatting(h, heading_text)
+                i += 1
+                continue
+
+            # Table (lines starting with |)
+            if stripped.startswith('|'):
+                table_lines = []
+                while i < len(lines) and lines[i].strip().startswith('|'):
+                    table_lines.append(lines[i])
+                    i += 1
+                cls._add_markdown_table(doc, table_lines)
+                continue
+
+            # Bullet list (- item or * item)
+            if re.match(r'^[\-\*]\s+', stripped):
+                while i < len(lines) and re.match(r'^\s*[\-\*]\s+', lines[i]):
+                    item_text = re.sub(r'^\s*[\-\*]\s+', '', lines[i]).strip()
+                    p = doc.add_paragraph(style='List Bullet')
+                    cls._add_inline_formatting(p, item_text)
+                    i += 1
+                continue
+
+            # Numbered list (1. item)
+            if re.match(r'^\d+[\.\)]\s+', stripped):
+                while i < len(lines) and re.match(r'^\s*\d+[\.\)]\s+', lines[i]):
+                    item_text = re.sub(r'^\s*\d+[\.\)]\s+', '', lines[i]).strip()
+                    p = doc.add_paragraph(style='List Number')
+                    cls._add_inline_formatting(p, item_text)
+                    i += 1
+                continue
+
+            # Regular paragraph - collect consecutive non-special lines
+            para_lines = []
+            while i < len(lines):
+                l = lines[i].strip()
+                if not l:
+                    i += 1
+                    break
+                # Stop if next line is a special element
+                if (re.match(r'^#{1,6}\s+', l) or
+                    re.match(r'^[\-\*]\s+', l) or
+                    re.match(r'^\d+[\.\)]\s+', l) or
+                    l.startswith('|') or
+                    re.match(r'^-{3,}$|^\*{3,}$|^_{3,}$', l)):
+                    break
+                para_lines.append(lines[i].strip())
+                i += 1
+
+            if para_lines:
+                para_text = ' '.join(para_lines)
+                p = doc.add_paragraph()
+                cls._add_inline_formatting(p, para_text)
 
     @classmethod
     async def generate_full_document(

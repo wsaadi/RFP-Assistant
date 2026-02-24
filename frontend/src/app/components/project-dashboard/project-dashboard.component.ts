@@ -47,14 +47,30 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           <button mat-raised-button (click)="exportWord()" matTooltip="Exporter en Word">
             <mat-icon>file_download</mat-icon> DOCX
           </button>
-          <button mat-raised-button (click)="exportBackup()" matTooltip="Sauvegarder le projet">
-            <mat-icon>save</mat-icon> Backup
+          <button mat-raised-button (click)="exportBackup()" [disabled]="exportingBackup" matTooltip="Sauvegarder le projet">
+            <mat-spinner *ngIf="exportingBackup" diameter="18"></mat-spinner>
+            <mat-icon *ngIf="!exportingBackup">save</mat-icon>
+            {{ exportingBackup ? 'Export...' : 'Backup' }}
           </button>
           <button mat-raised-button color="accent" [routerLink]="['/project', projectId, 'preview']">
             <mat-icon>visibility</mat-icon> Aperçu
           </button>
         </div>
       </div>
+
+      <!-- Backup progress -->
+      <mat-card *ngIf="backupProgress && backupProgress.status === 'running'" class="gen-progress-card backup-progress-card">
+        <div class="gen-progress-header">
+          <mat-spinner diameter="20" class="spin-icon"></mat-spinner>
+          <h3>Export backup en cours...</h3>
+        </div>
+        <mat-progress-bar mode="determinate" [value]="backupProgress.progress"></mat-progress-bar>
+        <div class="gen-progress-details">
+          <span class="gen-step">{{ backupProgress.step }}</span>
+          <span class="gen-pct">{{ backupProgress.progress }}%</span>
+        </div>
+        <p class="gen-message">{{ backupProgress.message }}</p>
+      </mat-card>
 
       <!-- Quick stats -->
       <div class="stats-row" *ngIf="stats">
@@ -869,6 +885,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .doc-group-count { font-size: 12px; color: #888; margin-left: auto; }
     .prefill-progress-card { border-left-color: #7b1fa2; }
     .prefill-progress-card .gen-progress-header h3 { color: #7b1fa2; }
+    .backup-progress-card { border-left-color: #00695c; }
+    .backup-progress-card .gen-progress-header h3 { color: #00695c; }
+    .backup-progress-card .spin-icon { color: #00695c; }
     .prefill-step { color: #7b1fa2 !important; }
     .prefill-progress-card .spin-icon { color: #7b1fa2; }
     @keyframes spin { 100% { transform: rotate(360deg); } }
@@ -997,6 +1016,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.stopPrefillPolling();
     this.stopDetectPolling();
     this.stopFillPolling();
+    this.stopBackupPolling();
   }
 
   loadAll(): void {
@@ -1730,17 +1750,64 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
+  exportingBackup = false;
+  backupProgress: { status: string; step: string; progress: number; message: string } | null = null;
+  private backupPollSub: Subscription | null = null;
+
   exportBackup(): void {
+    this.exportingBackup = true;
+    this.backupProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de l\'export...' };
     this.api.exportBackup(this.projectId).subscribe({
-      next: (blob) => {
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `backup_${this.project?.name || 'export'}.zip`;
-        a.click();
-        window.URL.revokeObjectURL(url);
+      next: () => {
+        this.startBackupPolling();
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur export', 'OK', { duration: 5000 });
+        this.exportingBackup = false;
+        this.backupProgress = null;
       },
     });
+  }
+
+  private startBackupPolling(): void {
+    this.stopBackupPolling();
+    this.backupPollSub = timer(1000, 1500).pipe(
+      switchMap(() => this.api.getBackupStatus(this.projectId))
+    ).subscribe({
+      next: (status) => {
+        this.backupProgress = status;
+        if (status.status === 'completed') {
+          this.stopBackupPolling();
+          this.api.downloadBackup(this.projectId).subscribe({
+            next: (blob) => {
+              const url = window.URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `backup_${this.project?.name || 'export'}.zip`;
+              a.click();
+              window.URL.revokeObjectURL(url);
+              this.exportingBackup = false;
+              this.backupProgress = null;
+              this.snackBar.open('Backup telecharge', 'OK', { duration: 3000 });
+            },
+            error: () => {
+              this.exportingBackup = false;
+              this.backupProgress = null;
+              this.snackBar.open('Erreur telechargement backup', 'OK', { duration: 5000 });
+            },
+          });
+        } else if (status.status === 'error') {
+          this.stopBackupPolling();
+          this.exportingBackup = false;
+          this.snackBar.open(status.message || 'Erreur export', 'OK', { duration: 5000 });
+        }
+      },
+    });
+  }
+
+  private stopBackupPolling(): void {
+    this.backupPollSub?.unsubscribe();
+    this.backupPollSub = null;
   }
 
   formatSize(bytes: number): string {

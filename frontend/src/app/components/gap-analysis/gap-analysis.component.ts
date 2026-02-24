@@ -26,12 +26,21 @@ import { GapAnalysis } from '../../models/report.model';
         </button>
       </div>
 
+      <div *ngIf="loadingExisting" class="loading-container">
+        <mat-spinner diameter="30"></mat-spinner>
+        <p>Chargement de l'analyse precedente...</p>
+      </div>
+
       <div *ngIf="analyzing" class="loading-container">
         <mat-spinner diameter="40"></mat-spinner>
         <p>Analyse en cours... Comparaison de l'ancien et du nouvel AO</p>
       </div>
 
       <div *ngIf="analysis" class="analysis-results">
+        <div *ngIf="analysis.created_at" class="analysis-timestamp">
+          <mat-icon>schedule</mat-icon>
+          Derniere analyse : {{ analysis.created_at | date:'medium' }}
+        </div>
         <mat-card class="summary-card">
           <h3>Résumé</h3>
           <p>{{ analysis.summary }}</p>
@@ -108,18 +117,33 @@ import { GapAnalysis } from '../../models/report.model';
     .priority-medium { background: #fff3e0 !important; }
     .priority-low { background: #e8f5e9 !important; }
     .error-card { padding: 24px; display: flex; align-items: center; gap: 12px; color: #c62828; }
+    .analysis-timestamp { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #888; margin-bottom: 16px; }
+    .analysis-timestamp mat-icon { font-size: 18px; width: 18px; height: 18px; }
   `],
 })
 export class GapAnalysisComponent implements OnInit {
   projectId = '';
   analysis: GapAnalysis | null = null;
   analyzing = false;
+  loadingExisting = false;
   error = '';
 
   constructor(private route: ActivatedRoute, private api: ApiService) {}
 
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
+    this.loadExisting();
+  }
+
+  loadExisting(): void {
+    this.loadingExisting = true;
+    this.api.getGapAnalysis(this.projectId).subscribe({
+      next: (res) => {
+        this.analysis = res.analysis;
+        this.loadingExisting = false;
+      },
+      error: () => { this.loadingExisting = false; },
+    });
   }
 
   runAnalysis(): void {
