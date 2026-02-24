@@ -102,7 +102,7 @@ import { Chapter } from '../../models/report.model';
               <span>{{ genProgress?.message || 'Generation IA en cours...' }}</span>
             </div>
             <mat-progress-bar [mode]="genProgress?.progress ? 'determinate' : 'indeterminate'" [value]="genProgress?.progress || 0" color="accent"></mat-progress-bar>
-            <div *ngIf="genProgress?.progress" class="ai-gen-pct">{{ genProgress.progress }}%</div>
+            <div *ngIf="genProgress?.progress" class="ai-gen-pct">{{ genProgress?.progress }}%</div>
           </div>
 
           <!-- Content editor / preview -->
