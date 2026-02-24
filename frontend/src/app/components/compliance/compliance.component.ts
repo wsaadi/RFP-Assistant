@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
@@ -11,6 +11,8 @@ import { MatListModule } from '@angular/material/list';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDividerModule } from '@angular/material/divider';
+import { Subscription, timer } from 'rxjs';
+import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { ComplianceAnalysis, Chapter } from '../../models/report.model';
 import { renderMarkdown } from '../../services/markdown.service';
@@ -42,16 +44,21 @@ import { renderMarkdown } from '../../services/markdown.service';
         <span>Chargement de l'analyse precedente...</span>
       </div>
 
-      <mat-card *ngIf="analyzing" class="progress-card">
+      <!-- Progress bar -->
+      <mat-card *ngIf="analyzing && analysisProgress" class="progress-card">
         <div class="progress-header">
           <mat-spinner diameter="20"></mat-spinner>
           <h3>Analyse de conformite en cours...</h3>
         </div>
-        <mat-progress-bar mode="indeterminate" color="primary"></mat-progress-bar>
-        <p class="progress-detail">L'IA analyse l'exhaustivite de votre reponse par rapport au cahier des charges. Cela peut prendre quelques instants.</p>
+        <mat-progress-bar mode="determinate" [value]="analysisProgress.progress"></mat-progress-bar>
+        <div class="progress-details">
+          <span class="progress-step">{{ analysisProgress.step }}</span>
+          <span class="progress-pct">{{ analysisProgress.progress }}%</span>
+        </div>
+        <p class="progress-message">{{ analysisProgress.message }}</p>
       </mat-card>
 
-      <div *ngIf="analysis" class="analysis-results">
+      <div *ngIf="analysis && !analyzing" class="analysis-results">
         <!-- Timestamp -->
         <div *ngIf="analysis.created_at" class="analysis-timestamp">
           <mat-icon>schedule</mat-icon>
@@ -153,7 +160,10 @@ import { renderMarkdown } from '../../services/markdown.service';
     .progress-card { padding: 24px; margin-bottom: 16px; border-left: 4px solid #1976d2; }
     .progress-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
     .progress-header h3 { margin: 0; color: #1976d2; font-size: 15px; }
-    .progress-detail { margin: 12px 0 0 0; font-size: 13px; color: #666; }
+    .progress-details { display: flex; justify-content: space-between; margin-top: 8px; font-size: 13px; }
+    .progress-step { color: #1976d2; }
+    .progress-pct { font-weight: bold; }
+    .progress-message { margin: 8px 0 0 0; font-size: 13px; color: #666; }
     .score-card { display: flex; align-items: center; gap: 24px; padding: 32px; margin-bottom: 16px; }
     .score-circle { width: 100px; height: 100px; border-radius: 50%; display: flex; flex-direction: column; justify-content: center; align-items: center; }
     .score-circle.high { background: #e8f5e9; border: 4px solid #4caf50; }
@@ -172,15 +182,12 @@ import { renderMarkdown } from '../../services/markdown.service';
     .cov-chip-complete { background: #e8f5e9 !important; }
     .cov-chip-partial { background: #fff3e0 !important; }
     .cov-chip-missing { background: #ffebee !important; }
-
-    /* Recommendations */
     .recommendations-card { padding: 20px; }
     .recommendation-item { padding: 12px 0; }
     .rec-header { display: flex; align-items: flex-start; gap: 10px; }
     .rec-icon { color: #1976d2; margin-top: 2px; flex-shrink: 0; }
     .rec-text { flex: 1; font-size: 14px; line-height: 1.5; }
     .rec-header button { flex-shrink: 0; }
-
     .generated-content { margin: 12px 0 12px 34px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
     .generated-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #e3f2fd; font-size: 13px; font-weight: 500; color: #1565c0; }
     .generated-header span { flex: 1; }
@@ -191,7 +198,6 @@ import { renderMarkdown } from '../../services/markdown.service';
     .generated-body ul, .generated-body ol { margin: 4px 0 10px 0; padding-left: 24px; }
     .generated-body li { margin-bottom: 4px; }
     .generated-body strong { color: #1B3A5C; }
-
     .empty-card { padding: 32px; display: flex; align-items: center; gap: 16px; }
     .empty-card mat-icon { font-size: 40px; width: 40px; height: 40px; color: #bdbdbd; }
     .empty-card h3 { margin: 0 0 4px; color: #1B3A5C; }
@@ -199,7 +205,7 @@ import { renderMarkdown } from '../../services/markdown.service';
     .error-card { padding: 24px; display: flex; align-items: center; gap: 12px; color: #c62828; }
   `],
 })
-export class ComplianceComponent implements OnInit {
+export class ComplianceComponent implements OnInit, OnDestroy {
   projectId = '';
   analysis: ComplianceAnalysis | null = null;
   analyzing = false;
@@ -208,6 +214,8 @@ export class ComplianceComponent implements OnInit {
   generatingRec: number | null = null;
   generatedContents: Record<number, string> = {};
   renderMarkdown = renderMarkdown;
+  analysisProgress: { status: string; step: string; progress: number; message: string } | null = null;
+  private pollSub: Subscription | null = null;
 
   get scoreClass(): string {
     if (!this.analysis) return '';
@@ -225,6 +233,20 @@ export class ComplianceComponent implements OnInit {
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
     this.loadExisting();
+    // Resume polling if analysis was already running
+    this.api.getComplianceAnalysisStatus(this.projectId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.analyzing = true;
+          this.analysisProgress = status;
+          this.startPolling();
+        }
+      },
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.stopPolling();
   }
 
   loadExisting(): void {
@@ -242,10 +264,45 @@ export class ComplianceComponent implements OnInit {
     this.analyzing = true;
     this.error = '';
     this.generatedContents = {};
+    this.analysisProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement...' };
     this.api.analyzeCompliance(this.projectId).subscribe({
-      next: (res) => { this.analysis = res.analysis; this.analyzing = false; },
-      error: (err) => { this.error = err.error?.detail || 'Erreur'; this.analyzing = false; },
+      next: () => {
+        this.startPolling();
+      },
+      error: (err) => {
+        this.error = err.error?.detail || 'Erreur';
+        this.analyzing = false;
+        this.analysisProgress = null;
+      },
     });
+  }
+
+  private startPolling(): void {
+    this.stopPolling();
+    this.pollSub = timer(1000, 1500).pipe(
+      switchMap(() => this.api.getComplianceAnalysisStatus(this.projectId))
+    ).subscribe({
+      next: (status) => {
+        this.analysisProgress = status;
+        if (status.status === 'completed') {
+          this.stopPolling();
+          this.analyzing = false;
+          this.analysisProgress = null;
+          this.snackBar.open('Analyse de conformite terminee', 'OK', { duration: 3000 });
+          this.loadExisting();
+        } else if (status.status === 'error') {
+          this.stopPolling();
+          this.analyzing = false;
+          this.error = status.message;
+          this.analysisProgress = null;
+        }
+      },
+    });
+  }
+
+  private stopPolling(): void {
+    this.pollSub?.unsubscribe();
+    this.pollSub = null;
   }
 
   generateRecommendation(index: number, recommendation: string): void {

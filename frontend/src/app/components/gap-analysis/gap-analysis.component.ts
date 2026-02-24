@@ -1,19 +1,23 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatExpansionModule } from '@angular/material/expansion';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { Subscription, timer } from 'rxjs';
+import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { GapAnalysis } from '../../models/report.model';
 
 @Component({
   selector: 'app-gap-analysis',
   standalone: true,
-  imports: [CommonModule, RouterLink, MatCardModule, MatButtonModule, MatIconModule, MatProgressSpinnerModule, MatChipsModule, MatExpansionModule],
+  imports: [CommonModule, RouterLink, MatCardModule, MatButtonModule, MatIconModule, MatProgressSpinnerModule, MatProgressBarModule, MatChipsModule, MatExpansionModule, MatSnackBarModule],
   template: `
     <div class="page-container">
       <div class="page-header">
@@ -31,12 +35,20 @@ import { GapAnalysis } from '../../models/report.model';
         <p>Chargement de l'analyse precedente...</p>
       </div>
 
-      <div *ngIf="analyzing" class="loading-container">
-        <mat-spinner diameter="40"></mat-spinner>
-        <p>Analyse en cours... Comparaison de l'ancien et du nouvel AO</p>
-      </div>
+      <mat-card *ngIf="analyzing && analysisProgress" class="progress-card">
+        <div class="progress-header">
+          <mat-spinner diameter="20"></mat-spinner>
+          <h3>Analyse des ecarts en cours...</h3>
+        </div>
+        <mat-progress-bar mode="determinate" [value]="analysisProgress.progress"></mat-progress-bar>
+        <div class="progress-details">
+          <span class="progress-step">{{ analysisProgress.step }}</span>
+          <span class="progress-pct">{{ analysisProgress.progress }}%</span>
+        </div>
+        <p class="progress-message">{{ analysisProgress.message }}</p>
+      </mat-card>
 
-      <div *ngIf="analysis" class="analysis-results">
+      <div *ngIf="analysis && !analyzing" class="analysis-results">
         <div *ngIf="analysis.created_at" class="analysis-timestamp">
           <mat-icon>schedule</mat-icon>
           Derniere analyse : {{ analysis.created_at | date:'medium' }}
@@ -103,6 +115,13 @@ import { GapAnalysis } from '../../models/report.model';
     .page-header h1 { flex: 1; margin: 0; color: #1B3A5C; }
     .loading-container { text-align: center; padding: 48px; }
     .loading-container p { color: #666; margin-top: 16px; }
+    .progress-card { padding: 24px; margin-bottom: 16px; border-left: 4px solid #1976d2; }
+    .progress-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .progress-header h3 { margin: 0; color: #1976d2; font-size: 15px; }
+    .progress-details { display: flex; justify-content: space-between; margin-top: 8px; font-size: 13px; }
+    .progress-step { color: #1976d2; }
+    .progress-pct { font-weight: bold; }
+    .progress-message { margin: 8px 0 0 0; font-size: 13px; color: #666; }
     .summary-card { padding: 24px; margin-bottom: 16px; background: #e3f2fd; }
     .results-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
     .result-section { padding: 16px; }
@@ -121,18 +140,34 @@ import { GapAnalysis } from '../../models/report.model';
     .analysis-timestamp mat-icon { font-size: 18px; width: 18px; height: 18px; }
   `],
 })
-export class GapAnalysisComponent implements OnInit {
+export class GapAnalysisComponent implements OnInit, OnDestroy {
   projectId = '';
   analysis: GapAnalysis | null = null;
   analyzing = false;
   loadingExisting = false;
   error = '';
+  analysisProgress: { status: string; step: string; progress: number; message: string } | null = null;
+  private pollSub: Subscription | null = null;
 
-  constructor(private route: ActivatedRoute, private api: ApiService) {}
+  constructor(private route: ActivatedRoute, private api: ApiService, private snackBar: MatSnackBar) {}
 
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
     this.loadExisting();
+    // Resume polling if analysis was already running
+    this.api.getGapAnalysisStatus(this.projectId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.analyzing = true;
+          this.analysisProgress = status;
+          this.startPolling();
+        }
+      },
+    });
+  }
+
+  ngOnDestroy(): void {
+    this.stopPolling();
   }
 
   loadExisting(): void {
@@ -149,9 +184,44 @@ export class GapAnalysisComponent implements OnInit {
   runAnalysis(): void {
     this.analyzing = true;
     this.error = '';
+    this.analysisProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement...' };
     this.api.analyzeGap(this.projectId).subscribe({
-      next: (res) => { this.analysis = res.analysis; this.analyzing = false; },
-      error: (err) => { this.error = err.error?.detail || 'Erreur d\'analyse'; this.analyzing = false; },
+      next: () => {
+        this.startPolling();
+      },
+      error: (err) => {
+        this.error = err.error?.detail || 'Erreur d\'analyse';
+        this.analyzing = false;
+        this.analysisProgress = null;
+      },
     });
+  }
+
+  private startPolling(): void {
+    this.stopPolling();
+    this.pollSub = timer(1000, 1500).pipe(
+      switchMap(() => this.api.getGapAnalysisStatus(this.projectId))
+    ).subscribe({
+      next: (status) => {
+        this.analysisProgress = status;
+        if (status.status === 'completed') {
+          this.stopPolling();
+          this.analyzing = false;
+          this.analysisProgress = null;
+          this.snackBar.open('Analyse des ecarts terminee', 'OK', { duration: 3000 });
+          this.loadExisting();
+        } else if (status.status === 'error') {
+          this.stopPolling();
+          this.analyzing = false;
+          this.error = status.message;
+          this.analysisProgress = null;
+        }
+      },
+    });
+  }
+
+  private stopPolling(): void {
+    this.pollSub?.unsubscribe();
+    this.pollSub = null;
   }
 }

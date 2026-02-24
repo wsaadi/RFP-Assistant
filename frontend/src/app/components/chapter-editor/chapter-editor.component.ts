@@ -2,7 +2,8 @@ import { Component, OnInit, OnDestroy, ViewEncapsulation } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
-import { Subscription } from 'rxjs';
+import { Subscription, timer } from 'rxjs';
+import { switchMap } from 'rxjs/operators';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
@@ -98,9 +99,10 @@ import { Chapter } from '../../models/report.model';
           <div *ngIf="generating" class="ai-gen-progress">
             <div class="ai-gen-progress-header">
               <mat-spinner diameter="18"></mat-spinner>
-              <span>Generation IA en cours...</span>
+              <span>{{ genProgress?.message || 'Generation IA en cours...' }}</span>
             </div>
-            <mat-progress-bar mode="indeterminate" color="accent"></mat-progress-bar>
+            <mat-progress-bar [mode]="genProgress?.progress ? 'determinate' : 'indeterminate'" [value]="genProgress?.progress || 0" color="accent"></mat-progress-bar>
+            <div *ngIf="genProgress?.progress" class="ai-gen-pct">{{ genProgress.progress }}%</div>
           </div>
 
           <!-- Content editor / preview -->
@@ -296,6 +298,8 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
   loading = true;
   saving = false;
   generating = false;
+  genProgress: { status: string; step: string; progress: number; message: string } | null = null;
+  private genPollSub: Subscription | null = null;
   showCustomPrompt = false;
   customPrompt = '';
   newNote = '';
@@ -322,15 +326,31 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
       if (newChapterId !== this.chapterId) {
         this.chapterId = newChapterId;
         this.loadChapter();
+        this.checkRunningGeneration();
       } else if (!this.chapterId) {
         this.chapterId = newChapterId;
         this.loadChapter();
+        this.checkRunningGeneration();
       }
     });
   }
 
   ngOnDestroy(): void {
     this.paramSub?.unsubscribe();
+    this.stopGenPolling();
+  }
+
+  private checkRunningGeneration(): void {
+    if (!this.chapterId) return;
+    this.api.getChapterGenStatus(this.chapterId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.generating = true;
+          this.genProgress = status;
+          this.startGenPolling();
+        }
+      },
+    });
   }
 
   loadChapter(): void {
@@ -382,21 +402,47 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
 
   generateContent(action: string): void {
     this.generating = true;
+    this.genProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de la generation...' };
     this.api.generateChapterContent(this.chapterId, action, this.customPrompt).subscribe({
-      next: (res) => {
-        if (this.chapter) {
-          this.chapter.content = res.content;
-        }
-        this.snackBar.open('Contenu genere', 'OK', { duration: 2000 });
-        this.generating = false;
+      next: () => {
         this.showCustomPrompt = false;
         this.customPrompt = '';
+        this.startGenPolling();
       },
       error: (err) => {
         this.snackBar.open(err.error?.detail || 'Erreur de generation', 'OK', { duration: 5000 });
         this.generating = false;
+        this.genProgress = null;
       },
     });
+  }
+
+  private startGenPolling(): void {
+    this.stopGenPolling();
+    this.genPollSub = timer(1000, 1500).pipe(
+      switchMap(() => this.api.getChapterGenStatus(this.chapterId))
+    ).subscribe({
+      next: (status) => {
+        this.genProgress = status;
+        if (status.status === 'completed') {
+          this.stopGenPolling();
+          this.generating = false;
+          this.genProgress = null;
+          this.snackBar.open('Contenu genere', 'OK', { duration: 2000 });
+          this.loadChapter();
+        } else if (status.status === 'error') {
+          this.stopGenPolling();
+          this.generating = false;
+          this.snackBar.open(status.message || 'Erreur de generation', 'OK', { duration: 5000 });
+          this.genProgress = null;
+        }
+      },
+    });
+  }
+
+  private stopGenPolling(): void {
+    this.genPollSub?.unsubscribe();
+    this.genPollSub = null;
   }
 
   addNote(): void {
