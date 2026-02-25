@@ -42,3 +42,7 @@ class WorkspaceOut(BaseModel):
 class AddMemberRequest(BaseModel):
     user_id: str
     role: str = "editor"
+
+
+class UpdateMemberRequest(BaseModel):
+    role: str

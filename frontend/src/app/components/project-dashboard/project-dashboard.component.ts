@@ -20,8 +20,9 @@ import { MatDialogModule } from '@angular/material/dialog';
 import { Subscription, interval, timer, forkJoin } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { renderMarkdown } from '../../services/markdown.service';
-import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus, DetectDeliverablesStatus, FillDeliverablesStatus, ResponseDocument } from '../../models/report.model';
+import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus, DetectDeliverablesStatus, FillDeliverablesStatus, ResponseDocument, UserInfo } from '../../models/report.model';
 
 @Component({
   selector: 'app-project-dashboard',
@@ -762,6 +763,69 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
             </mat-card>
           </div>
         </mat-tab>
+
+        <mat-tab label="Membres">
+          <div class="tab-content">
+            <!-- Add member form -->
+            <mat-card class="add-member-card" *ngIf="showAddProjectMember">
+              <h3>Ajouter un membre au projet</h3>
+              <div class="add-member-form">
+                <mat-form-field appearance="outline" class="member-select-field">
+                  <mat-label>Utilisateur</mat-label>
+                  <mat-select [(value)]="newProjectMemberUserId">
+                    <mat-option *ngFor="let u of availableProjectUsers" [value]="u.id">
+                      {{ u.full_name }} ({{ u.username }})
+                    </mat-option>
+                  </mat-select>
+                </mat-form-field>
+                <mat-form-field appearance="outline" class="role-select-field">
+                  <mat-label>Role</mat-label>
+                  <mat-select [(value)]="newProjectMemberRole">
+                    <mat-option value="owner">Proprietaire</mat-option>
+                    <mat-option value="editor">Editeur</mat-option>
+                    <mat-option value="viewer">Lecteur</mat-option>
+                  </mat-select>
+                </mat-form-field>
+                <button mat-raised-button color="primary" (click)="addProjectMember()" [disabled]="!newProjectMemberUserId">
+                  <mat-icon>person_add</mat-icon> Ajouter
+                </button>
+                <button mat-button (click)="showAddProjectMember = false">Annuler</button>
+              </div>
+            </mat-card>
+
+            <button mat-raised-button color="primary" (click)="openAddProjectMember()" *ngIf="!showAddProjectMember" style="margin-bottom:16px">
+              <mat-icon>person_add</mat-icon> Ajouter un membre
+            </button>
+
+            <div class="member-source-info" *ngIf="projectMembers.length > 0 && projectMembers[0].source === 'workspace'">
+              <mat-icon>info</mat-icon>
+              <span>Ces membres sont herites de l'espace de travail. Ajoutez des membres specifiques au projet pour personnaliser l'acces.</span>
+            </div>
+
+            <mat-list class="members-list">
+              <mat-list-item *ngFor="let m of projectMembers" class="member-item">
+                <mat-icon matListItemIcon>person</mat-icon>
+                <span matListItemTitle>{{ m.full_name }} ({{ m.username }})</span>
+                <span matListItemLine>{{ m.email }} <mat-chip *ngIf="m.source === 'workspace'" class="inherited-chip">Espace de travail</mat-chip></span>
+                <div class="member-actions" *ngIf="m.source === 'project'">
+                  <mat-form-field appearance="outline" class="role-inline-field">
+                    <mat-select [value]="m.role" (selectionChange)="changeProjectMemberRole(m, $event.value)">
+                      <mat-option value="owner">Proprietaire</mat-option>
+                      <mat-option value="editor">Editeur</mat-option>
+                      <mat-option value="viewer">Lecteur</mat-option>
+                    </mat-select>
+                  </mat-form-field>
+                  <button mat-icon-button color="warn" (click)="removeProjectMember(m)" matTooltip="Retirer du projet">
+                    <mat-icon>person_remove</mat-icon>
+                  </button>
+                </div>
+                <div class="member-actions" *ngIf="m.source === 'workspace'">
+                  <span class="role-badge">{{ m.role }}</span>
+                </div>
+              </mat-list-item>
+            </mat-list>
+          </div>
+        </mat-tab>
       </mat-tab-group>
     </div>
 
@@ -997,6 +1061,21 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .doc-selector-info strong { display: block; font-size: 13px; color: #1B3A5C; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .doc-selector-desc { display: block; font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .doc-selector-chapters { font-size: 11px !important; }
+
+    /* Project Members */
+    .add-member-card { padding: 24px; margin-bottom: 16px; }
+    .add-member-card h3 { margin-top: 0; color: #1B3A5C; }
+    .add-member-form { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+    .member-select-field { flex: 1; min-width: 250px; }
+    .role-select-field { width: 160px; }
+    .members-list .member-item { border-bottom: 1px solid #f0f0f0; }
+    .member-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+    .role-inline-field { width: 140px; font-size: 13px; }
+    .role-inline-field ::ng-deep .mat-mdc-form-field-subscript-wrapper { display: none; }
+    .role-badge { background: #e8eaf6; color: #3f51b5; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
+    .inherited-chip { font-size: 10px !important; height: 20px !important; min-height: 20px !important; }
+    .member-source-info { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: #e3f2fd; border-radius: 8px; margin-bottom: 16px; font-size: 13px; color: #1565c0; }
+    .member-source-info mat-icon { font-size: 20px; width: 20px; height: 20px; }
   `],
 })
 export class ProjectDashboardComponent implements OnInit, OnDestroy {
@@ -1043,6 +1122,14 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   aiPromptVisible: Record<string, boolean> = {};
   aiPromptText: Record<string, string> = {};
 
+  // Project members
+  projectMembers: any[] = [];
+  showAddProjectMember = false;
+  newProjectMemberUserId = '';
+  newProjectMemberRole = 'editor';
+  availableProjectUsers: UserInfo[] = [];
+  isAdmin = false;
+
   allCategories = [
     { value: 'old_rfp', label: 'Ancien AO', desc: 'Documents de l\'ancien appel d\'offres', icon: 'history', color: '#1976d2' },
     { value: 'old_response', label: 'Ancienne Réponse', desc: 'Réponse à l\'ancien AO', icon: 'reply', color: '#388e3c' },
@@ -1054,9 +1141,12 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   constructor(
     private route: ActivatedRoute,
     private api: ApiService,
+    private authService: AuthService,
     private snackBar: MatSnackBar,
     private router: Router,
-  ) {}
+  ) {
+    this.isAdmin = this.authService.isAdmin();
+  }
 
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
@@ -1169,6 +1259,10 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     });
     this.api.getStatistics(this.projectId).subscribe({
       next: (s) => this.stats = s,
+      error: () => {},
+    });
+    this.api.getProjectMembers(this.projectId).subscribe({
+      next: (m) => this.projectMembers = m,
       error: () => {},
     });
     this.loadResponseDocuments();
@@ -2148,5 +2242,54 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       other: 'insert_drive_file',
     };
     return icons[format] || 'insert_drive_file';
+  }
+
+  // ── Project member management ──
+
+  openAddProjectMember(): void {
+    this.showAddProjectMember = true;
+    this.newProjectMemberUserId = '';
+    this.newProjectMemberRole = 'editor';
+    if (this.isAdmin) {
+      this.api.getUsers().subscribe({
+        next: (users) => {
+          const memberUserIds = new Set(this.projectMembers.map((m: any) => m.user_id));
+          this.availableProjectUsers = users.filter(u => !memberUserIds.has(u.id) && u.is_active);
+        },
+      });
+    }
+  }
+
+  addProjectMember(): void {
+    if (!this.newProjectMemberUserId) return;
+    this.api.addProjectMember(this.projectId, this.newProjectMemberUserId, this.newProjectMemberRole).subscribe({
+      next: () => {
+        this.snackBar.open('Membre ajoute au projet', 'OK', { duration: 2000 });
+        this.showAddProjectMember = false;
+        this.api.getProjectMembers(this.projectId).subscribe({ next: (m) => this.projectMembers = m });
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
+    });
+  }
+
+  changeProjectMemberRole(member: any, newRole: string): void {
+    this.api.updateProjectMemberRole(this.projectId, member.user_id, newRole).subscribe({
+      next: () => {
+        member.role = newRole;
+        this.snackBar.open('Role mis a jour', 'OK', { duration: 2000 });
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
+    });
+  }
+
+  removeProjectMember(member: any): void {
+    if (!confirm(`Retirer ${member.full_name} de ce projet ?`)) return;
+    this.api.removeProjectMember(this.projectId, member.user_id).subscribe({
+      next: () => {
+        this.snackBar.open('Membre retire du projet', 'OK', { duration: 2000 });
+        this.api.getProjectMembers(this.projectId).subscribe({ next: (m) => this.projectMembers = m });
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
+    });
   }
 }

@@ -14,10 +14,11 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatCheckboxModule } from '@angular/material/checkbox';
+import { MatSelectModule } from '@angular/material/select';
 import { Router } from '@angular/router';
 import { ApiService } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
-import { Workspace, RFPProject, WorkspaceMember } from '../../models/report.model';
+import { Workspace, RFPProject, WorkspaceMember, UserInfo } from '../../models/report.model';
 
 @Component({
   selector: 'app-workspace-detail',
@@ -26,7 +27,7 @@ import { Workspace, RFPProject, WorkspaceMember } from '../../models/report.mode
     CommonModule, FormsModule, RouterLink,
     MatCardModule, MatButtonModule, MatIconModule, MatInputModule,
     MatTabsModule, MatChipsModule, MatProgressSpinnerModule, MatListModule, MatSnackBarModule,
-    MatMenuModule, MatTooltipModule, MatCheckboxModule,
+    MatMenuModule, MatTooltipModule, MatCheckboxModule, MatSelectModule,
   ],
   template: `
     <div class="page-container" *ngIf="workspace">
@@ -184,15 +185,63 @@ import { Workspace, RFPProject, WorkspaceMember } from '../../models/report.mode
           </div>
         </mat-tab>
 
-        <mat-tab label="Membres">
+        <mat-tab label="Membres ({{ members.length }})">
           <div class="tab-content">
-            <mat-list>
-              <mat-list-item *ngFor="let m of members">
+            <!-- Add member form -->
+            <mat-card class="add-member-card" *ngIf="showAddMember">
+              <h3>Ajouter un membre</h3>
+              <div class="add-member-form">
+                <mat-form-field appearance="outline" class="member-select-field">
+                  <mat-label>Utilisateur</mat-label>
+                  <mat-select [(value)]="newMemberUserId">
+                    <mat-option *ngFor="let u of availableUsers" [value]="u.id">
+                      {{ u.full_name }} ({{ u.username }})
+                    </mat-option>
+                  </mat-select>
+                </mat-form-field>
+                <mat-form-field appearance="outline" class="role-select-field">
+                  <mat-label>Role</mat-label>
+                  <mat-select [(value)]="newMemberRole">
+                    <mat-option value="owner">Proprietaire</mat-option>
+                    <mat-option value="editor">Editeur</mat-option>
+                    <mat-option value="viewer">Lecteur</mat-option>
+                  </mat-select>
+                </mat-form-field>
+                <button mat-raised-button color="primary" (click)="addMember()" [disabled]="!newMemberUserId">
+                  <mat-icon>person_add</mat-icon> Ajouter
+                </button>
+                <button mat-button (click)="showAddMember = false">Annuler</button>
+              </div>
+            </mat-card>
+
+            <button mat-raised-button color="primary" (click)="openAddMember()" *ngIf="!showAddMember" style="margin-bottom:16px">
+              <mat-icon>person_add</mat-icon> Ajouter un membre
+            </button>
+
+            <mat-list class="members-list">
+              <mat-list-item *ngFor="let m of members" class="member-item">
                 <mat-icon matListItemIcon>person</mat-icon>
                 <span matListItemTitle>{{ m.full_name }} ({{ m.username }})</span>
-                <span matListItemLine>{{ m.email }} - {{ m.role }}</span>
+                <span matListItemLine>{{ m.email }}</span>
+                <div class="member-actions">
+                  <mat-form-field appearance="outline" class="role-inline-field">
+                    <mat-select [value]="m.role" (selectionChange)="changeMemberRole(m, $event.value)">
+                      <mat-option value="owner">Proprietaire</mat-option>
+                      <mat-option value="editor">Editeur</mat-option>
+                      <mat-option value="viewer">Lecteur</mat-option>
+                    </mat-select>
+                  </mat-form-field>
+                  <button mat-icon-button color="warn" (click)="removeMember(m)" matTooltip="Retirer ce membre">
+                    <mat-icon>person_remove</mat-icon>
+                  </button>
+                </div>
               </mat-list-item>
             </mat-list>
+
+            <mat-card *ngIf="members.length === 0" class="empty-state">
+              <mat-icon>group</mat-icon>
+              <p>Aucun membre.</p>
+            </mat-card>
           </div>
         </mat-tab>
       </mat-tab-group>
@@ -239,6 +288,15 @@ import { Workspace, RFPProject, WorkspaceMember } from '../../models/report.mode
     .empty-state { text-align: center; padding: 48px; color: #888; }
     .empty-state mat-icon { font-size: 64px; width: 64px; height: 64px; color: #ccc; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
+    .add-member-card { padding: 24px; margin-bottom: 16px; }
+    .add-member-card h3 { margin-top: 0; color: #1B3A5C; }
+    .add-member-form { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+    .member-select-field { flex: 1; min-width: 250px; }
+    .role-select-field { width: 160px; }
+    .members-list .member-item { border-bottom: 1px solid #f0f0f0; }
+    .member-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+    .role-inline-field { width: 140px; font-size: 13px; }
+    .role-inline-field ::ng-deep .mat-mdc-form-field-subscript-wrapper { display: none; }
   `],
 })
 export class WorkspaceDetailComponent implements OnInit {
@@ -260,6 +318,12 @@ export class WorkspaceDetailComponent implements OnInit {
   editWsName = '';
   editWsDescription = '';
   editingProject: { id: string; name: string; description: string; client_name: string; rfp_reference: string; deadline: string } | null = null;
+
+  // Member management
+  showAddMember = false;
+  newMemberUserId = '';
+  newMemberRole = 'editor';
+  availableUsers: UserInfo[] = [];
 
   constructor(
     private route: ActivatedRoute,
@@ -413,6 +477,56 @@ export class WorkspaceDetailComponent implements OnInit {
         this.loadData();
       },
       error: (err) => this.snackBar.open(err.error?.detail || 'Erreur de suppression', 'OK', { duration: 3000 }),
+    });
+  }
+
+  // ── Member management ──
+
+  openAddMember(): void {
+    this.showAddMember = true;
+    this.newMemberUserId = '';
+    this.newMemberRole = 'editor';
+    // Load users not already members
+    if (this.isAdmin) {
+      this.api.getUsers().subscribe({
+        next: (users) => {
+          const memberUserIds = new Set(this.members.map(m => m.user_id));
+          this.availableUsers = users.filter(u => !memberUserIds.has(u.id) && u.is_active);
+        },
+      });
+    }
+  }
+
+  addMember(): void {
+    if (!this.newMemberUserId) return;
+    this.api.addWorkspaceMember(this.workspaceId, this.newMemberUserId, this.newMemberRole).subscribe({
+      next: () => {
+        this.snackBar.open('Membre ajoute', 'OK', { duration: 2000 });
+        this.showAddMember = false;
+        this.loadData();
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
+    });
+  }
+
+  changeMemberRole(member: WorkspaceMember, newRole: string): void {
+    this.api.updateWorkspaceMemberRole(this.workspaceId, member.user_id, newRole).subscribe({
+      next: () => {
+        member.role = newRole;
+        this.snackBar.open('Role mis a jour', 'OK', { duration: 2000 });
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
+    });
+  }
+
+  removeMember(member: WorkspaceMember): void {
+    if (!confirm(`Retirer ${member.full_name} de ce workspace ?`)) return;
+    this.api.removeWorkspaceMember(this.workspaceId, member.user_id).subscribe({
+      next: () => {
+        this.snackBar.open('Membre retire', 'OK', { duration: 2000 });
+        this.loadData();
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
     });
   }
 }

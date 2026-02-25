@@ -117,6 +117,16 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
           <span class="unresolved-count" *ngIf="unresolvedCount > 0">{{ unresolvedCount }} a completer</span>
         </h2>
         <div class="section-actions">
+          <button mat-raised-button (click)="consolidateMappings()" [disabled]="consolidating"
+            matTooltip="Fusionner les doublons : meme entite sous plusieurs slugs">
+            <mat-spinner *ngIf="consolidating" diameter="18"></mat-spinner>
+            <mat-icon *ngIf="!consolidating">merge_type</mat-icon> Consolider les doublons
+          </button>
+          <button mat-raised-button color="primary" (click)="resolveOrphansAI()" [disabled]="resolvingOrphans || unresolvedCount === 0"
+            matTooltip="L'IA analyse le contexte des secrets orphelins et propose une correspondance">
+            <mat-spinner *ngIf="resolvingOrphans" diameter="18"></mat-spinner>
+            <mat-icon *ngIf="!resolvingOrphans">auto_fix_high</mat-icon> Resoudre par IA
+          </button>
           <button mat-raised-button color="accent" (click)="reAnonymize()" [disabled]="reAnonymizing"
             matTooltip="Re-appliquer tous les mappings actifs sur les documents et chapitres">
             <mat-spinner *ngIf="reAnonymizing" diameter="18"></mat-spinner>
@@ -336,6 +346,8 @@ export class StatisticsComponent implements OnInit {
   loading = false;
   error = '';
   reAnonymizing = false;
+  resolvingOrphans = false;
+  consolidating = false;
   addingMapping = false;
   mappingColumns = ['original', 'anonymized', 'active', 'actions'];
 
@@ -475,6 +487,48 @@ export class StatisticsComponent implements OnInit {
       error: (err) => {
         this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
         this.reAnonymizing = false;
+      },
+    });
+  }
+
+  resolveOrphansAI(): void {
+    if (!confirm('Lancer l\'analyse IA pour identifier les secrets orphelins ? L\'IA va analyser le contexte et proposer des correspondances.')) return;
+    this.resolvingOrphans = true;
+    this.api.resolveOrphansWithAI(this.projectId).subscribe({
+      next: (res) => {
+        const highConf = res.suggestions.filter((s: any) => s.confidence === 'high').length;
+        const medConf = res.suggestions.filter((s: any) => s.confidence === 'medium').length;
+        this.snackBar.open(
+          `Analyse IA terminee : ${res.resolved} secret(s) resolus (${highConf} haute confiance, ${medConf} moyenne)`,
+          'OK', { duration: 6000 }
+        );
+        this.resolvingOrphans = false;
+        this.loadAnonReport();
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur lors de l\'analyse IA', 'OK', { duration: 5000 });
+        this.resolvingOrphans = false;
+      },
+    });
+  }
+
+  consolidateMappings(): void {
+    if (!confirm('Consolider les doublons ? Les mappings identiques seront fusionnes sous un seul slug et le contenu mis a jour.')) return;
+    this.consolidating = true;
+    this.api.consolidateMappings(this.projectId).subscribe({
+      next: (res) => {
+        if (res.merged === 0) {
+          this.snackBar.open('Aucun doublon detecte', 'OK', { duration: 3000 });
+        } else {
+          const details = res.groups.map((g: any) => `${g.original_value}: ${g.merged_from.join(', ')} -> ${g.canonical}`).join('; ');
+          this.snackBar.open(`${res.merged} doublon(s) fusionnes. ${details}`, 'OK', { duration: 8000 });
+        }
+        this.consolidating = false;
+        this.loadAnonReport();
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
+        this.consolidating = false;
       },
     });
   }

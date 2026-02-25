@@ -54,6 +54,10 @@ export class ApiService {
     return this.http.post(`${this.baseUrl}/workspaces/${workspaceId}/members`, { user_id: userId, role });
   }
 
+  updateWorkspaceMemberRole(workspaceId: string, userId: string, role: string): Observable<WorkspaceMember> {
+    return this.http.put<WorkspaceMember>(`${this.baseUrl}/workspaces/${workspaceId}/members/${userId}`, { role });
+  }
+
   removeWorkspaceMember(workspaceId: string, userId: string): Observable<void> {
     return this.http.delete<void>(`${this.baseUrl}/workspaces/${workspaceId}/members/${userId}`);
   }
@@ -77,6 +81,23 @@ export class ApiService {
 
   deleteProject(id: string): Observable<void> {
     return this.http.delete<void>(`${this.baseUrl}/projects/${id}`);
+  }
+
+  // ── Project Members ──
+  getProjectMembers(projectId: string): Observable<any[]> {
+    return this.http.get<any[]>(`${this.baseUrl}/projects/${projectId}/members`);
+  }
+
+  addProjectMember(projectId: string, userId: string, role: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/projects/${projectId}/members`, { user_id: userId, role });
+  }
+
+  updateProjectMemberRole(projectId: string, userId: string, role: string): Observable<any> {
+    return this.http.put(`${this.baseUrl}/projects/${projectId}/members/${userId}`, { role });
+  }
+
+  removeProjectMember(projectId: string, userId: string): Observable<void> {
+    return this.http.delete<void>(`${this.baseUrl}/projects/${projectId}/members/${userId}`);
   }
 
   // ── Documents ──
@@ -330,6 +351,14 @@ export class ApiService {
 
   reAnonymizeProject(projectId: string): Observable<{ updated_chunks: number; updated_chapters: number; registered_orphans: number }> {
     return this.http.post<{ updated_chunks: number; updated_chapters: number; registered_orphans: number }>(`${this.baseUrl}/projects/${projectId}/re-anonymize`, {});
+  }
+
+  resolveOrphansWithAI(projectId: string): Observable<{ resolved: number; suggestions: any[] }> {
+    return this.http.post<{ resolved: number; suggestions: any[] }>(`${this.baseUrl}/projects/${projectId}/resolve-orphans-ai`, {});
+  }
+
+  consolidateMappings(projectId: string): Observable<{ merged: number; groups: any[] }> {
+    return this.http.post<{ merged: number; groups: any[] }>(`${this.baseUrl}/projects/${projectId}/consolidate-mappings`, {});
   }
 
   getChapterAnonymizedContent(projectId: string, chapterId: string): Observable<{ anonymized_content: string }> {
