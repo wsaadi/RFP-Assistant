@@ -2259,7 +2259,7 @@ async def create_anonymization_mapping(
         .where(AnonymizationMapping.project_id == project_id)
         .where(AnonymizationMapping.original_value == request.original_value)
     )
-    if existing.scalar_one_or_none():
+    if existing.scalars().first():
         raise HTTPException(status_code=409, detail="Cette valeur originale existe déjà dans les mappings")
 
     # Auto-generate placeholder if not provided
@@ -2448,7 +2448,7 @@ async def re_anonymize_project(
                 .where(AnonymizationMapping.project_id == project_id)
                 .where(AnonymizationMapping.anonymized_value == token)
             )
-            if existing.scalar_one_or_none() is not None:
+            if existing.scalars().first() is not None:
                 continue
 
             new_mapping = AnonymizationMapping(

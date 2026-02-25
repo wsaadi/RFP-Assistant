@@ -401,7 +401,7 @@ class AnonymizationService:
                 .where(AnonymizationMapping.project_id == project_id)
                 .where(AnonymizationMapping.anonymized_value == token)
             )
-            if existing.scalar_one_or_none() is not None:
+            if existing.scalars().first() is not None:
                 continue
 
             new_mapping = AnonymizationMapping(
