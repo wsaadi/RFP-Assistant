@@ -397,16 +397,32 @@ async def _get_all_chunks_anonymized_by_category(
     Uses anonymized_content already computed at upload time, avoiding
     redundant GLiNER inference."""
     result = await db.execute(
-        select(DocumentChunk)
+        select(DocumentChunk, Document.original_filename)
         .join(Document, Document.id == DocumentChunk.document_id)
         .where(Document.project_id == project_id)
         .where(Document.category == category)
         .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
     )
-    chunks = result.scalars().all()
-    return "\n\n".join([
-        (c.anonymized_content or c.content) for c in chunks if (c.anonymized_content or c.content).strip()
-    ])
+    rows = result.all()
+    parts = []
+    current_doc = None
+    current_section = None
+    for chunk, doc_name in rows:
+        text = (chunk.anonymized_content or chunk.content or "").strip()
+        if not text:
+            continue
+        # Add document header when switching to a new document
+        if doc_name != current_doc:
+            current_doc = doc_name
+            current_section = None
+            parts.append(f"\n\n=== DOCUMENT: {doc_name} ===\n")
+        # Add section header when switching to a new section
+        section = chunk.section_title or ""
+        if section and section != current_section:
+            current_section = section
+            parts.append(f"\n--- {section} ---\n")
+        parts.append(text)
+    return "\n\n".join(parts)
 
 
 @router.post("/{project_id}/generate-structure")
@@ -1724,11 +1740,11 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
         _update("deanonymizing", 75, "Deanonymisation des resultats...")
         async with async_session() as db:
             for req in analysis.get("covered_requirements", []):
-                for key in ("requirement", "comment"):
+                for key in ("requirement", "comment", "source_rfp", "source_response"):
                     if key in req and req[key]:
                         req[key] = await AnonymizationService.deanonymize_text(req[key], project_id, db)
             for elem in analysis.get("missing_elements", []):
-                for key in ("requirement", "description"):
+                for key in ("requirement", "description", "source_rfp"):
                     if key in elem and elem[key]:
                         elem[key] = await AnonymizationService.deanonymize_text(elem[key], project_id, db)
             for i, rec in enumerate(analysis.get("recommendations", [])):
@@ -1831,6 +1847,195 @@ Génère un contenu structuré (1-2 pages) qui répond à cette recommandation."
             await db.commit()
 
     return {"content": content}
+
+
+@router.get("/{project_id}/compliance-analysis/export-pdf")
+async def export_compliance_pdf(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export the latest compliance analysis as a PDF document."""
+    import fitz  # PyMuPDF
+
+    result = await db.execute(
+        select(ComplianceResult)
+        .where(ComplianceResult.project_id == project_id)
+        .order_by(ComplianceResult.created_at.desc())
+        .limit(1)
+    )
+    cr = result.scalar_one_or_none()
+    if not cr:
+        raise HTTPException(status_code=404, detail="Aucune analyse de conformite disponible")
+
+    # Also fetch project name for the header
+    proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = proj_result.scalar_one_or_none()
+    project_name = project.name if project else "Projet"
+
+    # Build PDF with PyMuPDF
+    doc = fitz.open()
+
+    MARGIN = 50
+    PAGE_W, PAGE_H = fitz.paper_size("a4")
+    TEXT_W = PAGE_W - 2 * MARGIN
+    Y_BOTTOM = PAGE_H - MARGIN
+
+    # Colors as RGB tuples (0-1 range)
+    COL_TITLE = (0.0, 0.0, 0.5)
+    COL_GREEN = (0.13, 0.55, 0.13)
+    COL_ORANGE = (0.85, 0.55, 0.0)
+    COL_RED = (0.8, 0.1, 0.1)
+    COL_GRAY = (0.4, 0.4, 0.4)
+    COL_BLACK = (0.0, 0.0, 0.0)
+    COL_LIGHTGRAY = (0.88, 0.88, 0.88)
+    COL_STEEL = (0.27, 0.51, 0.71)
+
+    coverage_colors = {"complete": COL_GREEN, "partial": COL_ORANGE, "missing": COL_RED}
+    coverage_labels = {"complete": "Complet", "partial": "Partiel", "missing": "Manquant"}
+
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    y = MARGIN
+
+    def _new_page():
+        nonlocal page, y
+        page = doc.new_page(width=PAGE_W, height=PAGE_H)
+        y = MARGIN
+
+    def _check_space(needed: float):
+        nonlocal y
+        if y + needed > Y_BOTTOM:
+            _new_page()
+
+    def _write(text: str, fontsize: float = 10, color=COL_BLACK, bold: bool = False, indent: float = 0, max_width: float = 0):
+        nonlocal y
+        fontname = "helv" if not bold else "hebo"
+        w = max_width or (TEXT_W - indent)
+        # Wrap long text
+        lines = []
+        for paragraph in text.split("\n"):
+            if not paragraph.strip():
+                lines.append("")
+                continue
+            words = paragraph.split()
+            current_line = ""
+            for word in words:
+                test = f"{current_line} {word}".strip()
+                tw = fitz.get_text_length(test, fontname=fontname, fontsize=fontsize)
+                if tw > w and current_line:
+                    lines.append(current_line)
+                    current_line = word
+                else:
+                    current_line = test
+            if current_line:
+                lines.append(current_line)
+
+        line_h = fontsize * 1.4
+        for line in lines:
+            _check_space(line_h)
+            page.insert_text(
+                fitz.Point(MARGIN + indent, y + fontsize),
+                line, fontsize=fontsize, fontname=fontname, color=color,
+            )
+            y += line_h
+
+    # ── Title ──
+    _write(f"Analyse de Conformite", fontsize=18, color=COL_TITLE, bold=True)
+    _write(f"{project_name}", fontsize=12, color=COL_GRAY)
+    if cr.created_at:
+        _write(f"Date: {cr.created_at.strftime('%d/%m/%Y %H:%M')}", fontsize=9, color=COL_GRAY)
+    y += 10
+
+    # ── Score ──
+    score = cr.score or 0
+    score_color = COL_GREEN if score >= 80 else COL_ORANGE if score >= 50 else COL_RED
+    _check_space(40)
+    page.insert_text(fitz.Point(MARGIN, y + 24), f"{score}/100", fontsize=24, fontname="hebo", color=score_color)
+    page.insert_text(fitz.Point(MARGIN + 100, y + 14), "Score de conformite", fontsize=12, fontname="hebo", color=COL_TITLE)
+    y += 35
+
+    # Score bar
+    _check_space(15)
+    bar_w = TEXT_W
+    bar_h = 8
+    page.draw_rect(fitz.Rect(MARGIN, y, MARGIN + bar_w, y + bar_h), color=None, fill=COL_LIGHTGRAY)
+    fill_w = bar_w * score / 100
+    page.draw_rect(fitz.Rect(MARGIN, y, MARGIN + fill_w, y + bar_h), color=None, fill=score_color)
+    y += bar_h + 10
+
+    # Summary
+    if cr.summary:
+        _write(cr.summary, fontsize=10, color=COL_GRAY)
+    y += 15
+
+    # ── Covered requirements ──
+    reqs = cr.covered_requirements or []
+    if reqs:
+        _write(f"Exigences couvertes ({len(reqs)})", fontsize=14, color=COL_TITLE, bold=True)
+        y += 5
+        for req in reqs:
+            coverage = req.get("coverage", "missing")
+            cov_label = coverage_labels.get(coverage, coverage)
+            cov_color = coverage_colors.get(coverage, COL_BLACK)
+
+            _check_space(50)
+            # Requirement title with coverage badge
+            _write(f"[{cov_label}] {req.get('requirement', '')}", fontsize=10, bold=True, indent=10, color=cov_color)
+
+            # Comment
+            comment = req.get("comment", "")
+            if comment:
+                _write(comment, fontsize=9, color=COL_GRAY, indent=20)
+
+            # Sources
+            src_rfp = req.get("source_rfp", "")
+            src_resp = req.get("source_response", "")
+            if src_rfp or src_resp:
+                sources = []
+                if src_rfp:
+                    sources.append(f"AO: {src_rfp}")
+                if src_resp:
+                    sources.append(f"Reponse: {src_resp}")
+                _write(" | ".join(sources), fontsize=8, color=COL_STEEL, indent=20)
+            y += 5
+
+    # ── Missing elements ──
+    missing = cr.missing_elements or []
+    if missing:
+        y += 10
+        _write(f"Elements manquants ({len(missing)})", fontsize=14, color=COL_RED, bold=True)
+        y += 5
+        for elem in missing:
+            _check_space(40)
+            _write(f"- {elem.get('requirement', '')}", fontsize=10, bold=True, indent=10, color=COL_RED)
+            desc = elem.get("description", "")
+            if desc:
+                _write(desc, fontsize=9, color=COL_GRAY, indent=20)
+            src_rfp = elem.get("source_rfp", "")
+            if src_rfp:
+                _write(f"AO: {src_rfp}", fontsize=8, color=COL_STEEL, indent=20)
+            y += 5
+
+    # ── Recommendations ──
+    recs = cr.recommendations or []
+    if recs:
+        y += 10
+        _write(f"Recommandations ({len(recs)})", fontsize=14, color=COL_TITLE, bold=True)
+        y += 5
+        for i, rec in enumerate(recs, 1):
+            _check_space(30)
+            _write(f"{i}. {rec}", fontsize=10, indent=10)
+            y += 3
+
+    # Save to bytes
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="conformite_{project_name}.pdf"'},
+    )
 
 
 @router.post("/{project_id}/improvement-axes")

@@ -36,6 +36,11 @@ import { renderMarkdown } from '../../services/markdown.service';
           <mat-icon *ngIf="!analyzing">fact_check</mat-icon>
           {{ analysis ? 'Relancer' : 'Analyser' }}
         </button>
+        <button mat-raised-button *ngIf="analysis && !analyzing" (click)="exportPdf()" [disabled]="exportingPdf">
+          <mat-spinner *ngIf="exportingPdf" diameter="18"></mat-spinner>
+          <mat-icon *ngIf="!exportingPdf">picture_as_pdf</mat-icon>
+          Exporter PDF
+        </button>
       </div>
 
       <!-- Loading existing analysis -->
@@ -80,31 +85,46 @@ import { renderMarkdown } from '../../services/markdown.service';
 
         <!-- Covered requirements -->
         <mat-card class="section-card">
-          <h3><mat-icon>check_circle</mat-icon> Exigences couvertes</h3>
-          <mat-list>
-            <mat-list-item *ngFor="let req of analysis.covered_requirements">
-              <mat-icon matListItemIcon [class]="'coverage-' + req.coverage">
-                {{ req.coverage === 'complete' ? 'check_circle' : req.coverage === 'partial' ? 'remove_circle' : 'cancel' }}
-              </mat-icon>
-              <span matListItemTitle>{{ req.requirement }}</span>
-              <span matListItemLine>
+          <h3><mat-icon>check_circle</mat-icon> Exigences couvertes ({{ analysis.covered_requirements.length }})</h3>
+          <div class="req-list">
+            <div *ngFor="let req of analysis.covered_requirements" class="req-item" [class]="'req-border-' + req.coverage">
+              <div class="req-header">
+                <mat-icon [class]="'coverage-' + req.coverage">
+                  {{ req.coverage === 'complete' ? 'check_circle' : req.coverage === 'partial' ? 'remove_circle' : 'cancel' }}
+                </mat-icon>
+                <span class="req-title">{{ req.requirement }}</span>
                 <mat-chip [class]="'cov-chip-' + req.coverage" size="small">{{ coverageLabel(req.coverage) }}</mat-chip>
-                {{ req.comment }}
-              </span>
-            </mat-list-item>
-          </mat-list>
+              </div>
+              <p class="req-comment" *ngIf="req.comment">{{ req.comment }}</p>
+              <div class="req-sources" *ngIf="req.source_rfp || req.source_response">
+                <span class="source-tag source-rfp" *ngIf="req.source_rfp" matTooltip="Document de l'appel d'offres">
+                  <mat-icon>description</mat-icon> AO: {{ req.source_rfp }}
+                </span>
+                <span class="source-tag source-response" *ngIf="req.source_response" matTooltip="Document de notre reponse">
+                  <mat-icon>task</mat-icon> Reponse: {{ req.source_response }}
+                </span>
+              </div>
+            </div>
+          </div>
         </mat-card>
 
         <!-- Missing elements -->
         <mat-card *ngIf="analysis.missing_elements?.length" class="section-card missing">
-          <h3><mat-icon>warning</mat-icon> Elements manquants</h3>
-          <mat-list>
-            <mat-list-item *ngFor="let item of analysis.missing_elements">
-              <mat-icon matListItemIcon color="warn">error_outline</mat-icon>
-              <span matListItemTitle>{{ item.requirement }}</span>
-              <span matListItemLine>{{ item.description }}</span>
-            </mat-list-item>
-          </mat-list>
+          <h3><mat-icon>warning</mat-icon> Elements manquants ({{ analysis.missing_elements.length }})</h3>
+          <div class="req-list">
+            <div *ngFor="let item of analysis.missing_elements" class="req-item req-border-missing">
+              <div class="req-header">
+                <mat-icon class="coverage-missing">error_outline</mat-icon>
+                <span class="req-title">{{ item.requirement }}</span>
+              </div>
+              <p class="req-comment">{{ item.description }}</p>
+              <div class="req-sources" *ngIf="item.source_rfp">
+                <span class="source-tag source-rfp" matTooltip="Document de l'appel d'offres">
+                  <mat-icon>description</mat-icon> AO: {{ item.source_rfp }}
+                </span>
+              </div>
+            </div>
+          </div>
         </mat-card>
 
         <!-- Recommendations with generate buttons -->
@@ -173,8 +193,8 @@ import { renderMarkdown } from '../../services/markdown.service';
     .score-label { font-size: 14px; color: #888; }
     .score-details { flex: 1; }
     .score-details h2 { margin: 0 0 8px; }
-    .section-card { padding: 16px; margin-bottom: 16px; }
-    .section-card h3 { display: flex; align-items: center; gap: 8px; color: #1B3A5C; }
+    .section-card { padding: 20px; margin-bottom: 16px; }
+    .section-card h3 { display: flex; align-items: center; gap: 8px; color: #1B3A5C; margin-bottom: 16px; }
     .missing h3 { color: #c62828; }
     .coverage-complete { color: #4caf50; }
     .coverage-partial { color: #ff9800; }
@@ -182,6 +202,21 @@ import { renderMarkdown } from '../../services/markdown.service';
     .cov-chip-complete { background: #e8f5e9 !important; }
     .cov-chip-partial { background: #fff3e0 !important; }
     .cov-chip-missing { background: #ffebee !important; }
+    .req-list { display: flex; flex-direction: column; gap: 12px; }
+    .req-item { padding: 14px 16px; border-radius: 8px; background: #fafafa; border-left: 4px solid #e0e0e0; }
+    .req-border-complete { border-left-color: #4caf50; }
+    .req-border-partial { border-left-color: #ff9800; }
+    .req-border-missing { border-left-color: #f44336; }
+    .req-header { display: flex; align-items: flex-start; gap: 10px; }
+    .req-header mat-icon { flex-shrink: 0; margin-top: 2px; }
+    .req-title { flex: 1; font-weight: 500; font-size: 14px; color: #1B3A5C; line-height: 1.5; }
+    .req-header mat-chip { flex-shrink: 0; }
+    .req-comment { margin: 8px 0 0 34px; font-size: 13px; color: #555; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+    .req-sources { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0 0 34px; }
+    .source-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 3px 10px; border-radius: 12px; }
+    .source-tag mat-icon { font-size: 14px; width: 14px; height: 14px; }
+    .source-rfp { background: #e3f2fd; color: #1565c0; }
+    .source-response { background: #f3e5f5; color: #7b1fa2; }
     .recommendations-card { padding: 20px; }
     .recommendation-item { padding: 12px 0; }
     .rec-header { display: flex; align-items: flex-start; gap: 10px; }
@@ -215,6 +250,7 @@ export class ComplianceComponent implements OnInit, OnDestroy {
   generatedContents: Record<number, string> = {};
   renderMarkdown = renderMarkdown;
   analysisProgress: { status: string; step: string; progress: number; message: string } | null = null;
+  exportingPdf = false;
   private pollSub: Subscription | null = null;
 
   get scoreClass(): string {
@@ -329,5 +365,25 @@ export class ComplianceComponent implements OnInit, OnDestroy {
   coverageLabel(coverage: string): string {
     const labels: Record<string, string> = { complete: 'Complet', partial: 'Partiel', missing: 'Manquant' };
     return labels[coverage] || coverage;
+  }
+
+  exportPdf(): void {
+    this.exportingPdf = true;
+    this.api.exportCompliancePdf(this.projectId).subscribe({
+      next: (blob) => {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `conformite_${new Date().toISOString().slice(0, 10)}.pdf`;
+        a.click();
+        window.URL.revokeObjectURL(url);
+        this.exportingPdf = false;
+        this.snackBar.open('PDF exporte', 'OK', { duration: 2000 });
+      },
+      error: (err) => {
+        this.exportingPdf = false;
+        this.snackBar.open(err.error?.detail || 'Erreur export PDF', 'OK', { duration: 3000 });
+      },
+    });
   }
 }
