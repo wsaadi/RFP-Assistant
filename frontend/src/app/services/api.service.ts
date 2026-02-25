@@ -328,8 +328,8 @@ export class ApiService {
     return this.http.delete<void>(`${this.baseUrl}/projects/${projectId}/anonymization-mappings/${mappingId}`);
   }
 
-  reAnonymizeProject(projectId: string): Observable<{ updated_chunks: number; updated_chapters: number }> {
-    return this.http.post<{ updated_chunks: number; updated_chapters: number }>(`${this.baseUrl}/projects/${projectId}/re-anonymize`, {});
+  reAnonymizeProject(projectId: string): Observable<{ updated_chunks: number; updated_chapters: number; registered_orphans: number }> {
+    return this.http.post<{ updated_chunks: number; updated_chapters: number; registered_orphans: number }>(`${this.baseUrl}/projects/${projectId}/re-anonymize`, {});
   }
 
   getChapterAnonymizedContent(projectId: string, chapterId: string): Observable<{ anonymized_content: string }> {
