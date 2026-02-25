@@ -341,6 +341,7 @@ async def _run_chapter_generation(
                 ch_content = chapter.content or ""
                 ch_notes = chapter.notes or []
                 proj_improvement = project.improvement_axes if include_improvement_axes else ""
+                proj_ai_context = project.ai_context or ""
 
                 if action == "custom" and custom_prompt:
                     _update("anonymizing", 15, "Anonymisation du contenu...")
@@ -389,12 +390,14 @@ async def _run_chapter_generation(
             if mode == "custom":
                 _update("generating", 35, "Generation IA en cours...")
                 result_text = await ai_service.execute_custom_prompt(
-                    ai_params["anon_content"], ai_params["anon_prompt"], ch_title
+                    ai_params["anon_content"], ai_params["anon_prompt"], ch_title,
+                    ai_context=proj_ai_context,
                 )
             elif mode == "enrich":
                 _update("generating", 35, "Enrichissement IA en cours...")
                 result_text = await ai_service.enrich_content(
-                    ai_params["anon_content"], ch_title, ch_rfp_requirement, proj_improvement
+                    ai_params["anon_content"], ch_title, ch_rfp_requirement, proj_improvement,
+                    ai_context=proj_ai_context,
                 )
             else:
                 _update("generating", 40, "Generation IA du contenu...")
@@ -406,6 +409,7 @@ async def _run_chapter_generation(
                     context_chunks=ai_params["context_chunks_text"],
                     improvement_axes=proj_improvement,
                     notes=ai_params["notes_text"],
+                    ai_context=proj_ai_context,
                 )
 
             # ── Phase 3: Deanonymize + save (short DB session) ──

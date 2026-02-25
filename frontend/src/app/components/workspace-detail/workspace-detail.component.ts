@@ -94,6 +94,12 @@ import { Workspace, RFPProject, WorkspaceMember, UserInfo } from '../../models/r
                 <mat-label>Description</mat-label>
                 <textarea matInput [(ngModel)]="newProject.description" rows="2"></textarea>
               </mat-form-field>
+              <mat-form-field appearance="outline" class="full-width">
+                <mat-label>Contexte IA (optionnel)</mat-label>
+                <textarea matInput [(ngModel)]="newProject.ai_context" rows="3"
+                  placeholder="Ex: Nous sommes une ESN spécialisée en cybersécurité. Notre point fort est notre SOC 24/7 et nos certifications ISO 27001. Le ton doit être technique et rassurant."></textarea>
+                <mat-hint>Ce contexte sera utilisé par l'IA pour orienter la rédaction de tous les contenus du projet</mat-hint>
+              </mat-form-field>
               <div class="category-selection">
                 <h4>Catégories de documents à inclure</h4>
                 <div class="category-checkboxes">
@@ -314,7 +320,7 @@ export class WorkspaceDetailComponent implements OnInit {
     { value: 'new_rfp', label: 'Nouvel AO', desc: 'Documents du nouvel appel d\'offres', icon: 'fiber_new', color: '#d32f2f' },
     { value: 'new_response', label: 'Notre Réponse', desc: 'Notre réponse à analyser', icon: 'task', color: '#7b1fa2' },
   ];
-  newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'] as string[] };
+  newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'] as string[] };
   editingWorkspace = false;
   editWsName = '';
   editWsDescription = '';
@@ -369,7 +375,7 @@ export class WorkspaceDetailComponent implements OnInit {
     this.api.createProject(this.workspaceId, this.newProject).subscribe({
       next: () => {
         this.showCreateProject = false;
-        this.newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'] };
+        this.newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'] };
         this.loadData();
       },
     });

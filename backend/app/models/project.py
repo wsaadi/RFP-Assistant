@@ -52,6 +52,7 @@ class RFPProject(Base):
         default=ProjectStatus.DRAFT,
     )
     improvement_axes: Mapped[str] = mapped_column(Text, default="")
+    ai_context: Mapped[str] = mapped_column(Text, default="")
     enabled_categories: Mapped[list] = mapped_column(
         JSON, default=lambda: ["old_rfp", "old_response", "new_rfp"]
     )

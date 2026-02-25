@@ -89,6 +89,7 @@ async def list_projects(
             deadline=p.deadline,
             status=p.status.value,
             improvement_axes=p.improvement_axes,
+            ai_context=p.ai_context or "",
             enabled_categories=p.enabled_categories or ["old_rfp", "old_response", "new_rfp"],
             created_by=str(p.created_by),
             created_at=p.created_at,
@@ -114,6 +115,7 @@ async def create_project(
         client_name=request.client_name,
         rfp_reference=request.rfp_reference,
         deadline=request.deadline,
+        ai_context=request.ai_context,
         enabled_categories=request.enabled_categories,
         created_by=current_user.id,
     )
@@ -131,6 +133,7 @@ async def create_project(
         deadline=project.deadline,
         status=project.status.value,
         improvement_axes=project.improvement_axes,
+        ai_context=project.ai_context or "",
         enabled_categories=project.enabled_categories or ["old_rfp", "old_response", "new_rfp"],
         created_by=str(project.created_by),
         created_at=project.created_at,
@@ -169,6 +172,7 @@ async def get_project(
         deadline=project.deadline,
         status=project.status.value,
         improvement_axes=project.improvement_axes,
+        ai_context=project.ai_context or "",
         enabled_categories=project.enabled_categories or ["old_rfp", "old_response", "new_rfp"],
         created_by=str(project.created_by),
         created_at=project.created_at,
@@ -191,7 +195,7 @@ async def update_project(
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    for field in ["name", "description", "client_name", "rfp_reference", "deadline", "improvement_axes", "enabled_categories"]:
+    for field in ["name", "description", "client_name", "rfp_reference", "deadline", "improvement_axes", "ai_context", "enabled_categories"]:
         value = getattr(request, field, None)
         if value is not None:
             setattr(project, field, value)
@@ -524,6 +528,11 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
+            # Load project AI context
+            proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+            proj = proj_result.scalar_one()
+            proj_ai_context = proj.ai_context or ""
+
             _update("loading", 5, "Chargement des documents (AO, ancien AO, ancienne reponse)...")
             # Load all 3 categories in parallel for speed
             anon_new_rfp, anon_old_rfp, anon_old_response = await asyncio.gather(
@@ -681,6 +690,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                         old_response_content=anon_old_response,
                         rfp_summary=rfp_summary,
                         on_progress=_doc_progress,
+                        ai_context=proj_ai_context,
                     )
                     _doc_done_count += 1
                     return (doc_id, structure)
@@ -753,6 +763,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 old_response_content=anon_old_response,
                 gap_analysis=gap_analysis,
                 on_progress=gen_cb,
+                ai_context=proj_ai_context,
             )
 
             if not structure:
@@ -919,6 +930,10 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
+            # Load project AI context
+            proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+            proj_ai_context = (proj_result.scalar_one().ai_context or "")
+
             _update("loading", 5, "Chargement des chapitres...")
 
             query = select(Chapter).where(Chapter.project_id == project_id)
@@ -988,6 +1003,7 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                     chapter_description=ch_data["description"],
                     rfp_requirement=ch_data["rfp_requirement"],
                     old_response_content=anon_content,
+                    ai_context=proj_ai_context,
                 )
 
                 # Short DB session for deanonymization + save
@@ -1464,6 +1480,10 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
+            # Load project AI context
+            proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+            proj_ai_context = (proj_result.scalar_one().ai_context or "")
+
             _update("loading", 5, "Chargement des documents à compléter...")
 
             result = await db.execute(
@@ -1543,6 +1563,7 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                     new_rfp_content=anon_new_rfp,
                     old_response_content=combined_context,
                     on_progress=_on_fill_progress,
+                    ai_context=proj_ai_context,
                 )
                 _fill_done += 1
                 return (doc_data["id"], fill_content)
