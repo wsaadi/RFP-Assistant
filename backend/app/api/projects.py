@@ -2380,10 +2380,13 @@ async def re_anonymize_project(
         return {"updated_chunks": 0, "updated_chapters": 0}
 
     def apply_mappings(text: str) -> str:
-        """Apply all mappings to a text, longest match first."""
+        """Apply all mappings to a text, longest match first, case-insensitive."""
+        import re
         result_text = text
         for m in mappings_sorted:
-            result_text = result_text.replace(m.original_value, m.anonymized_value)
+            # Case-insensitive replacement to catch "UGAP", "ugap", "Ugap", etc.
+            pattern = re.compile(re.escape(m.original_value), re.IGNORECASE)
+            result_text = pattern.sub(m.anonymized_value, result_text)
         return result_text
 
     # Re-anonymize document chunks
