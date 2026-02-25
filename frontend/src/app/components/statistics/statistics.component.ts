@@ -113,7 +113,9 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
 
       <!-- Anonymization report -->
       <div class="section-header" *ngIf="anonReport">
-        <h2><mat-icon>security</mat-icon> Rapport d'anonymisation</h2>
+        <h2><mat-icon>security</mat-icon> Rapport d'anonymisation
+          <span class="unresolved-count" *ngIf="unresolvedCount > 0">{{ unresolvedCount }} a completer</span>
+        </h2>
         <div class="section-actions">
           <button mat-raised-button color="accent" (click)="reAnonymize()" [disabled]="reAnonymizing"
             matTooltip="Re-appliquer tous les mappings actifs sur les documents et chapitres">
@@ -190,6 +192,7 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
               </mat-panel-title>
               <mat-panel-description>
                 {{ group.count }} entite(s)
+                <span class="unresolved-count" *ngIf="unresolvedInGroup(group) > 0" style="margin-left: 8px;">{{ unresolvedInGroup(group) }} a completer</span>
               </mat-panel-description>
             </mat-expansion-panel-header>
 
@@ -197,9 +200,13 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
               <ng-container matColumnDef="original">
                 <th mat-header-cell *matHeaderCellDef>Valeur originale (secret)</th>
                 <td mat-cell *matCellDef="let m">
-                  <span class="original-value" *ngIf="editingId !== m.id">{{ m.original_value }}</span>
+                  <span class="original-value" *ngIf="editingId !== m.id && m.original_value">{{ m.original_value }}</span>
+                  <span class="unresolved-badge" *ngIf="editingId !== m.id && !m.original_value"
+                    matTooltip="Cliquez sur le bouton modifier pour renseigner la valeur reelle">
+                    A completer
+                  </span>
                   <mat-form-field *ngIf="editingId === m.id" appearance="outline" class="inline-edit">
-                    <input matInput [(ngModel)]="editForm.original_value">
+                    <input matInput [(ngModel)]="editForm.original_value" [placeholder]="!editForm.original_value ? 'Saisir la valeur reelle...' : ''">
                   </mat-form-field>
                 </td>
               </ng-container>
@@ -312,6 +319,8 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
     .mappings-table { width: 100%; }
     .original-value { color: #e65100; font-weight: 500; }
     .anon-value { color: #2e7d32; font-family: monospace; font-weight: 500; background: #f1f8e9; padding: 2px 6px; border-radius: 4px; }
+    .unresolved-badge { display: inline-block; background: #fff3e0; color: #e65100; border: 1px dashed #e65100; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; cursor: default; }
+    .unresolved-count { display: inline-flex; align-items: center; gap: 4px; background: #fff3e0; color: #e65100; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; margin-left: 8px; }
     .inline-edit { width: 100%; font-size: 13px; }
     .action-buttons { display: flex; gap: 2px; }
     .empty-card { display: flex; align-items: center; gap: 12px; color: #666; }
@@ -478,6 +487,17 @@ export class StatisticsComponent implements OnInit {
   statusPercent(status: string): number {
     if (!this.stats || !this.stats.chapters_total) return 0;
     return (this.statusCount(status) / this.stats.chapters_total) * 100;
+  }
+
+  get unresolvedCount(): number {
+    if (!this.anonReport) return 0;
+    return this.anonReport.entity_groups.reduce(
+      (sum, g) => sum + g.mappings.filter((m: AnonymizationMapping) => !m.original_value).length, 0
+    );
+  }
+
+  unresolvedInGroup(group: any): number {
+    return group.mappings.filter((m: AnonymizationMapping) => !m.original_value).length;
   }
 
   getEntityIcon(entityType: string): string {
