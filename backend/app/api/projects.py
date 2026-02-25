@@ -13,7 +13,7 @@ from sqlalchemy import select, func
 from ..database import get_db
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
-from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType, ComplianceResult, GapAnalysisResult
+from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType, ComplianceResult, GapAnalysisResult, ProjectMember
 from ..models.document import Document, DocumentChunk, DocumentCategory, ProcessingStatus
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
 from ..models.response_document import ResponseDocument, DocumentFormat, ContentType
@@ -2504,6 +2504,198 @@ async def get_chapter_anonymized_content(
         anonymized = anonymized.replace(m.original_value, m.anonymized_value)
 
     return {"anonymized_content": anonymized}
+
+
+@router.post("/{project_id}/resolve-orphans-ai")
+async def resolve_orphans_with_ai(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Use AI to analyze context around orphan placeholders and suggest real values."""
+    from ..services.anonymization_service import AnonymizationService
+
+    # Need AI service for the project's workspace
+    project_result = await db.execute(
+        select(RFPProject).where(RFPProject.id == project_id)
+    )
+    project = project_result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    ai_service = await _get_ai_service(project.workspace_id, db)
+    result = await AnonymizationService.resolve_orphans_with_ai(project_id, db, ai_service)
+    await db.commit()
+    return result
+
+
+@router.post("/{project_id}/consolidate-mappings")
+async def consolidate_mappings(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Find and merge duplicate anonymization mappings for the same entity."""
+    from ..services.anonymization_service import AnonymizationService
+
+    result = await AnonymizationService.consolidate_mappings(project_id, db)
+    await db.commit()
+    return result
+
+
+# ── Project Members ─────────────────────────────────────────────────
+
+@router.get("/{project_id}/members")
+async def list_project_members(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List project members. If no project-specific members, returns workspace members."""
+    result = await db.execute(
+        select(ProjectMember, User)
+        .join(User, User.id == ProjectMember.user_id)
+        .where(ProjectMember.project_id == project_id)
+    )
+    rows = result.all()
+
+    if rows:
+        return [
+            {
+                "id": str(pm.id),
+                "user_id": str(user.id),
+                "username": user.username,
+                "email": user.email,
+                "full_name": user.full_name,
+                "role": pm.role,
+                "joined_at": pm.joined_at.isoformat(),
+                "source": "project",
+            }
+            for pm, user in rows
+        ]
+
+    # Fallback: return workspace members
+    project_result = await db.execute(
+        select(RFPProject).where(RFPProject.id == project_id)
+    )
+    project = project_result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    ws_result = await db.execute(
+        select(WorkspaceMember, User)
+        .join(User, User.id == WorkspaceMember.user_id)
+        .where(WorkspaceMember.workspace_id == project.workspace_id)
+    )
+    ws_rows = ws_result.all()
+    return [
+        {
+            "id": str(wm.id),
+            "user_id": str(user.id),
+            "username": user.username,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": wm.role.value,
+            "joined_at": wm.joined_at.isoformat(),
+            "source": "workspace",
+        }
+        for wm, user in ws_rows
+    ]
+
+
+@router.post("/{project_id}/members", status_code=status.HTTP_201_CREATED)
+async def add_project_member(
+    project_id: uuid.UUID,
+    request: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Add a member to a project."""
+    user_id = request.get("user_id")
+    role = request.get("role", "editor")
+
+    # Check user exists
+    user_result = await db.execute(select(User).where(User.id == uuid.UUID(user_id)))
+    user = user_result.scalar_one_or_none()
+    if not user:
+        raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+
+    # Check not already member
+    existing = await db.execute(
+        select(ProjectMember)
+        .where(ProjectMember.project_id == project_id)
+        .where(ProjectMember.user_id == uuid.UUID(user_id))
+    )
+    if existing.scalar_one_or_none():
+        raise HTTPException(status_code=409, detail="Utilisateur déjà membre du projet")
+
+    member = ProjectMember(
+        project_id=project_id,
+        user_id=uuid.UUID(user_id),
+        role=role if role in ("owner", "editor", "viewer") else "editor",
+    )
+    db.add(member)
+    await db.commit()
+    return {"success": True, "message": "Membre ajouté au projet"}
+
+
+@router.put("/{project_id}/members/{user_id}")
+async def update_project_member_role(
+    project_id: uuid.UUID,
+    user_id: uuid.UUID,
+    request: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a project member's role."""
+    result = await db.execute(
+        select(ProjectMember)
+        .where(ProjectMember.project_id == project_id)
+        .where(ProjectMember.user_id == user_id)
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Membre non trouvé")
+
+    role = request.get("role", "editor")
+    if role not in ("owner", "editor", "viewer"):
+        raise HTTPException(status_code=400, detail="Rôle invalide")
+
+    member.role = role
+    await db.commit()
+
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    user = user_result.scalar_one()
+    return {
+        "id": str(member.id),
+        "user_id": str(user.id),
+        "username": user.username,
+        "email": user.email,
+        "full_name": user.full_name,
+        "role": member.role,
+        "joined_at": member.joined_at.isoformat(),
+    }
+
+
+@router.delete("/{project_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def remove_project_member(
+    project_id: uuid.UUID,
+    user_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove a member from a project."""
+    result = await db.execute(
+        select(ProjectMember)
+        .where(ProjectMember.project_id == project_id)
+        .where(ProjectMember.user_id == user_id)
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Membre non trouvé")
+
+    await db.delete(member)
+    await db.commit()
 
 
 # ── Fill Excel endpoint ─────────────────────────────────────────────

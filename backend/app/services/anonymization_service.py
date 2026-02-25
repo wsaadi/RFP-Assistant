@@ -446,6 +446,259 @@ class AnonymizationService:
         return result
 
     @classmethod
+    async def resolve_orphans_with_ai(
+        cls,
+        project_id: uuid.UUID,
+        db: AsyncSession,
+        ai_service,
+    ) -> dict:
+        """Use AI to analyze context around orphan placeholders and guess their real values.
+
+        For each orphan mapping (empty original_value), we extract surrounding text
+        and ask the AI to extrapolate the most likely real value.
+
+        Returns: {"resolved": int, "suggestions": [{"mapping_id": str, "placeholder": str, "suggested_value": str, "confidence": str}]}
+        """
+        from ..models.project import AnonymizationMapping, EntityType
+
+        # Get all orphan mappings (empty original_value)
+        result = await db.execute(
+            select(AnonymizationMapping)
+            .where(AnonymizationMapping.project_id == project_id)
+            .where(AnonymizationMapping.original_value == "")
+        )
+        orphans = result.scalars().all()
+        if not orphans:
+            return {"resolved": 0, "suggestions": []}
+
+        # Get all chapters content to find context around placeholders
+        from ..models.chapter import Chapter
+        chapters_result = await db.execute(
+            select(Chapter).where(Chapter.project_id == project_id)
+        )
+        chapters = chapters_result.scalars().all()
+        all_text = "\n\n".join(ch.content for ch in chapters if ch.content)
+
+        if not all_text:
+            return {"resolved": 0, "suggestions": []}
+
+        # Also get existing resolved mappings as context for the AI
+        all_mappings_result = await db.execute(
+            select(AnonymizationMapping)
+            .where(AnonymizationMapping.project_id == project_id)
+            .where(AnonymizationMapping.original_value != "")
+        )
+        resolved_mappings = all_mappings_result.scalars().all()
+        known_context = "\n".join(
+            f"  {m.anonymized_value} = {m.original_value}"
+            for m in resolved_mappings
+        )
+
+        # Extract context around each orphan placeholder
+        orphan_contexts = []
+        for orphan in orphans:
+            placeholder = orphan.anonymized_value
+            contexts = []
+            for match in re.finditer(re.escape(placeholder), all_text):
+                start = max(0, match.start() - 200)
+                end = min(len(all_text), match.end() + 200)
+                snippet = all_text[start:end].strip()
+                contexts.append(snippet)
+                if len(contexts) >= 3:
+                    break
+            if contexts:
+                orphan_contexts.append({
+                    "id": str(orphan.id),
+                    "placeholder": placeholder,
+                    "entity_type": orphan.entity_type.value if isinstance(orphan.entity_type, EntityType) else orphan.entity_type,
+                    "contexts": contexts,
+                })
+
+        if not orphan_contexts:
+            return {"resolved": 0, "suggestions": []}
+
+        # Build the AI prompt
+        system_prompt = """Tu es un expert en analyse de documents d'appels d'offres.
+
+On t'a fourni des textes contenant des marqueurs anonymisés ([ENTREPRISE_1], [PERSONNE_2], etc.).
+Certains marqueurs n'ont pas de correspondance connue. Tu dois deviner la valeur réelle
+en analysant le contexte où ils apparaissent.
+
+Tu as aussi la liste des correspondances déjà connues pour t'aider.
+
+Réponds UNIQUEMENT au format JSON suivant (sans markdown):
+[
+  {
+    "placeholder": "[ENTREPRISE_3]",
+    "suggested_value": "Capgemini",
+    "confidence": "high|medium|low",
+    "reasoning": "Brève explication"
+  }
+]
+
+Règles:
+- Si le contexte ne permet pas de deviner, mets confidence: "low" et suggested_value: ""
+- Utilise les mappings connus pour identifier des patterns (ex: si [ENTREPRISE_1]=Acme, un contexte similaire peut aider)
+- Sois prudent : mieux vaut ne pas deviner que deviner faux"""
+
+        orphan_descriptions = []
+        for oc in orphan_contexts:
+            desc = f"Marqueur: {oc['placeholder']} (type: {oc['entity_type']})\n"
+            for i, ctx in enumerate(oc["contexts"]):
+                desc += f"  Contexte {i+1}: ...{ctx}...\n"
+            orphan_descriptions.append(desc)
+
+        user_prompt = f"""Correspondances connues:
+{known_context if known_context else "(aucune)"}
+
+Marqueurs orphelins à résoudre:
+{"".join(orphan_descriptions)}
+
+Analyse le contexte de chaque marqueur et propose une valeur réelle."""
+
+        try:
+            from .ai_service import _parse_json_array
+            raw_response = await ai_service.generate(
+                system_prompt, user_prompt,
+                temperature=0.1, max_tokens=4000,
+            )
+            suggestions_data = _parse_json_array(raw_response) or []
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("AI orphan resolution failed: %s", e)
+            return {"resolved": 0, "suggestions": []}
+
+        # Map suggestions back to orphan mappings
+        orphan_by_placeholder = {o.anonymized_value: o for o in orphans}
+        suggestions = []
+        resolved = 0
+
+        for suggestion in suggestions_data:
+            placeholder = suggestion.get("placeholder", "")
+            value = suggestion.get("suggested_value", "").strip()
+            confidence = suggestion.get("confidence", "low")
+
+            if placeholder in orphan_by_placeholder and value and confidence in ("high", "medium"):
+                orphan = orphan_by_placeholder[placeholder]
+                orphan.original_value = value
+                resolved += 1
+
+            suggestions.append({
+                "placeholder": placeholder,
+                "suggested_value": value,
+                "confidence": confidence,
+                "reasoning": suggestion.get("reasoning", ""),
+            })
+
+        if resolved > 0:
+            await db.flush()
+
+        return {"resolved": resolved, "suggestions": suggestions}
+
+    @classmethod
+    async def consolidate_mappings(
+        cls,
+        project_id: uuid.UUID,
+        db: AsyncSession,
+    ) -> dict:
+        """Find and merge duplicate mappings that refer to the same real entity.
+
+        When the same entity is anonymized under multiple slugs (e.g. [ENTREPRISE_1]
+        and [ENTREPRISE_3] both mapping to "Capgemini"), merge them into one canonical
+        placeholder and update all content.
+
+        Returns: {"merged": int, "groups": [{"canonical": str, "merged_from": [str], "original_value": str}]}
+        """
+        from ..models.project import AnonymizationMapping
+        from ..models.chapter import Chapter
+        from ..models.document import Document, DocumentChunk
+
+        # Get all active mappings with a real value
+        result = await db.execute(
+            select(AnonymizationMapping)
+            .where(AnonymizationMapping.project_id == project_id)
+            .where(AnonymizationMapping.original_value != "")
+            .where(AnonymizationMapping.is_active == True)
+            .order_by(AnonymizationMapping.created_at)
+        )
+        mappings = result.scalars().all()
+
+        # Group by normalized original_value (lowercase, stripped)
+        groups: dict = defaultdict(list)
+        for m in mappings:
+            key = m.original_value.strip().lower()
+            groups[key].append(m)
+
+        merged_count = 0
+        merge_results = []
+
+        for key, group in groups.items():
+            if len(group) < 2:
+                continue
+
+            # First mapping is canonical (oldest)
+            canonical = group[0]
+            duplicates = group[1:]
+
+            # Build replacement map: duplicate placeholder -> canonical placeholder
+            replacements = {}
+            merged_from = []
+            for dup in duplicates:
+                replacements[dup.anonymized_value] = canonical.anonymized_value
+                merged_from.append(dup.anonymized_value)
+
+            # Update all chapter content
+            chapters_result = await db.execute(
+                select(Chapter).where(Chapter.project_id == project_id)
+            )
+            chapters = chapters_result.scalars().all()
+            for ch in chapters:
+                changed = False
+                if ch.content:
+                    new_content = ch.content
+                    for old_ph, new_ph in replacements.items():
+                        if old_ph in new_content:
+                            new_content = new_content.replace(old_ph, new_ph)
+                            changed = True
+                    if changed:
+                        ch.content = new_content
+                        ch.anonymized_content = new_content
+
+            # Update document chunks
+            chunks_result = await db.execute(
+                select(DocumentChunk)
+                .join(Document, Document.id == DocumentChunk.document_id)
+                .where(Document.project_id == project_id)
+            )
+            chunks = chunks_result.scalars().all()
+            for chunk in chunks:
+                if chunk.anonymized_content:
+                    new_anon = chunk.anonymized_content
+                    changed = False
+                    for old_ph, new_ph in replacements.items():
+                        if old_ph in new_anon:
+                            new_anon = new_anon.replace(old_ph, new_ph)
+                            changed = True
+                    if changed:
+                        chunk.anonymized_content = new_anon
+
+            # Deactivate duplicate mappings
+            for dup in duplicates:
+                dup.is_active = False
+
+            merged_count += len(duplicates)
+            merge_results.append({
+                "canonical": canonical.anonymized_value,
+                "merged_from": merged_from,
+                "original_value": canonical.original_value,
+            })
+
+        if merged_count > 0:
+            await db.flush()
+
+        return {"merged": merged_count, "groups": merge_results}
+
+    @classmethod
     async def anonymize_prompt(
         cls,
         prompt: str,

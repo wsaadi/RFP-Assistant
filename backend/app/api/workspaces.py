@@ -8,7 +8,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.workspace import Workspace, WorkspaceMember, MemberRole
 from ..models.project import RFPProject
-from ..schemas.workspace import WorkspaceCreate, WorkspaceUpdate, WorkspaceOut, WorkspaceMemberOut, AddMemberRequest
+from ..schemas.workspace import WorkspaceCreate, WorkspaceUpdate, WorkspaceOut, WorkspaceMemberOut, AddMemberRequest, UpdateMemberRequest
 from .deps import get_current_user
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
@@ -250,6 +250,45 @@ async def add_member(
     await db.commit()
 
     return {"success": True, "message": "Membre ajouté"}
+
+
+@router.put("/{workspace_id}/members/{user_id}")
+async def update_member_role(
+    workspace_id: uuid.UUID,
+    user_id: uuid.UUID,
+    request: UpdateMemberRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update a member's role in the workspace."""
+    result = await db.execute(
+        select(WorkspaceMember)
+        .where(WorkspaceMember.workspace_id == workspace_id)
+        .where(WorkspaceMember.user_id == user_id)
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(status_code=404, detail="Membre non trouvé")
+
+    if request.role in [r.value for r in MemberRole]:
+        member.role = MemberRole(request.role)
+    else:
+        raise HTTPException(status_code=400, detail="Rôle invalide")
+
+    await db.commit()
+
+    # Return updated member info
+    user_result = await db.execute(select(User).where(User.id == user_id))
+    user = user_result.scalar_one()
+    return WorkspaceMemberOut(
+        id=str(member.id),
+        user_id=str(user.id),
+        username=user.username,
+        email=user.email,
+        full_name=user.full_name,
+        role=member.role.value,
+        joined_at=member.joined_at,
+    )
 
 
 @router.delete("/{workspace_id}/members/{user_id}", status_code=status.HTTP_204_NO_CONTENT)

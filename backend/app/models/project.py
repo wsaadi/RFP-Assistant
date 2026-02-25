@@ -83,6 +83,30 @@ class RFPProject(Base):
     gap_analysis_results = relationship(
         "GapAnalysisResult", back_populates="project", cascade="all, delete-orphan",
     )
+    members = relationship(
+        "ProjectMember", back_populates="project", cascade="all, delete-orphan",
+    )
+
+
+class ProjectMember(Base):
+    __tablename__ = "project_members"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rfp_projects.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    role: Mapped[str] = mapped_column(String(50), default="editor")
+    joined_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    project = relationship("RFPProject", back_populates="members")
+    user = relationship("User")
 
 
 class AnonymizationMapping(Base):
