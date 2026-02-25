@@ -153,11 +153,21 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
                         "tags": img.tags or [],
                     })
 
+            # Pre-load deanonymization mappings so export shows real values
+            deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
+
+            def _deanon(text: str) -> str:
+                if not text or not deanon_map:
+                    return text
+                for placeholder, original in deanon_map.items():
+                    text = text.replace(placeholder, original)
+                return text
+
             def build_chapter_data(chapter: Chapter) -> dict:
                 children = children_map.get(chapter.id, [])
                 return {
                     "title": chapter.title,
-                    "content": chapter.content or "",
+                    "content": _deanon(chapter.content or ""),
                     "chapter_type": chapter.chapter_type.value if hasattr(chapter.chapter_type, 'value') else str(chapter.chapter_type),
                     "numbering": chapter.numbering,
                     "images": chapter.image_references or [],
@@ -394,7 +404,7 @@ async def preview_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get a full preview of the document content."""
+    """Get a full preview of the document content (deanonymized)."""
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
@@ -406,6 +416,16 @@ async def preview_document(
         .order_by(Chapter.order)
     )
     all_chapters = chapters_result.scalars().all()
+
+    # Pre-load deanonymization mappings (placeholder → original)
+    deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
+
+    def deanonymize(text: str) -> str:
+        if not text or not deanon_map:
+            return text
+        for placeholder, original in deanon_map.items():
+            text = text.replace(placeholder, original)
+        return text
 
     # Build tree
     children_map = {}
@@ -424,7 +444,7 @@ async def preview_document(
             "title": chapter.title,
             "numbering": numbering,
             "level": level,
-            "content": chapter.content or "",
+            "content": deanonymize(chapter.content or ""),
             "status": chapter.status.value if hasattr(chapter.status, 'value') else str(chapter.status),
             "chapter_type": chapter.chapter_type.value if hasattr(chapter.chapter_type, 'value') else str(chapter.chapter_type),
             "children": [
