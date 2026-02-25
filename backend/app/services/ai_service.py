@@ -705,6 +705,12 @@ Règles:
 - Mettre en valeur les compétences et l'expérience
 - Être factuel et concret
 
+Anonymisation:
+- Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
+- Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
+- Tu ne dois JAMAIS inventer de nouveaux marqueurs. Par exemple si le texte contient [ENTREPRISE_1], tu ne dois PAS créer [ENTREPRISE_2] ou [ENTREPRISE_3] de toi-même.
+- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques (ex: "le client", "le prestataire", "la solution proposée") au lieu d'inventer un marqueur.
+
 Formatage:
 - Utilise des sous-titres avec ## pour les sections
 - Utilise **gras** pour les termes importants
@@ -747,6 +753,12 @@ Règles:
 - Améliorer le style et la clarté
 - Rendre le contenu plus convaincant
 - Retourner uniquement le texte enrichi
+
+Anonymisation:
+- Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
+- Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
+- Tu ne dois JAMAIS inventer de nouveaux marqueurs. Par exemple si le texte contient [ENTREPRISE_1], tu ne dois PAS créer [ENTREPRISE_2] ou [ENTREPRISE_3] de toi-même.
+- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques (ex: "le client", "le prestataire", "la solution proposée") au lieu d'inventer un marqueur.
 
 Formatage:
 - Utilise des sous-titres avec ## pour les sections
@@ -1115,6 +1127,12 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
         system_prompt = """Tu es un assistant expert en rédaction de réponses aux appels d'offres.
 Applique exactement l'instruction de l'utilisateur au contenu fourni.
 Retourne uniquement le texte modifié.
+
+Anonymisation:
+- Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
+- Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
+- Tu ne dois JAMAIS inventer de nouveaux marqueurs. Par exemple si le texte contient [ENTREPRISE_1], tu ne dois PAS créer [ENTREPRISE_2] ou [ENTREPRISE_3] de toi-même.
+- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques (ex: "le client", "le prestataire", "la solution proposée") au lieu d'inventer un marqueur.
 
 Formatage:
 - Utilise des sous-titres avec ## pour les sections

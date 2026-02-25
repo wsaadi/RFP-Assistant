@@ -355,6 +355,46 @@ class AnonymizationService:
         await db.flush()
         return results
 
+    # Regex matching any placeholder the AI might generate: [PREFIX_N]
+    _PLACEHOLDER_RE = re.compile(
+        r'\['
+        r'(?:' + '|'.join(ENTITY_PREFIXES.values()) + r')'
+        r'_\d+'
+        r'\]'
+    )
+
+    @classmethod
+    def strip_unknown_placeholders(cls, text: str, known_placeholders: set) -> str:
+        """Remove placeholders invented by the AI that have no mapping.
+
+        Any [PREFIX_N] token not present in *known_placeholders* is replaced
+        by a safe generic term so no fake anonymisation tags leak into the
+        final content.
+        """
+        def _replace(match: re.Match) -> str:
+            token = match.group(0)
+            if token in known_placeholders:
+                return token  # keep it – it will be deanonymized normally
+            # Map to a safe generic French label
+            inner = token.strip("[]")            # e.g. "ENTREPRISE_3"
+            prefix = inner.rsplit("_", 1)[0]     # e.g. "ENTREPRISE"
+            generics = {
+                "ENTREPRISE": "l'entreprise",
+                "PERSONNE": "le collaborateur",
+                "EMAIL": "l'adresse e-mail",
+                "TELEPHONE": "le numéro de téléphone",
+                "ADRESSE": "l'adresse",
+                "CODE_PROJET": "le code projet",
+                "CODE_AO": "le code de l'appel d'offres",
+                "SOLUTION": "la solution",
+                "DATE": "la date",
+                "MONTANT": "le montant",
+                "ENTITE": "l'entité",
+                "ENTITE_CLIENT": "le client",
+            }
+            return generics.get(prefix, token)
+        return cls._PLACEHOLDER_RE.sub(_replace, text)
+
     @classmethod
     async def deanonymize_text(
         cls,
@@ -362,7 +402,10 @@ class AnonymizationService:
         project_id: uuid.UUID,
         db: AsyncSession,
     ) -> str:
-        """Replace anonymized placeholders with original values."""
+        """Replace anonymized placeholders with original values.
+
+        Also strips any placeholder invented by the AI that has no mapping.
+        """
         if not anonymized_text:
             return anonymized_text
 
@@ -371,6 +414,9 @@ class AnonymizationService:
 
         for placeholder, original in mappings.items():
             result = result.replace(placeholder, original)
+
+        # Clean up any remaining placeholders the AI invented
+        result = cls.strip_unknown_placeholders(result, set(mappings.keys()))
 
         return result
 
