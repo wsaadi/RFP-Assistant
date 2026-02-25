@@ -2365,31 +2365,31 @@ async def re_anonymize_project(
 ):
     """Re-anonymize all document chunks and chapter content using current active mappings.
 
-    Applies all active mappings (including manually added ones) to existing content.
+    Also scans all chapter content for orphan placeholders (e.g. [ENTREPRISE_3])
+    that have no mapping and registers them so the user can fill in the real values.
     """
-    # Get all active mappings sorted by length (longest first to avoid partial replacements)
-    result = await db.execute(
+    from ..services.anonymization_service import AnonymizationService
+
+    # Get ALL mappings (including empty ones) for orphan detection
+    all_mappings_result = await db.execute(
         select(AnonymizationMapping)
         .where(AnonymizationMapping.project_id == project_id)
-        .where(AnonymizationMapping.is_active == True)
     )
-    mappings = result.scalars().all()
-    # Only use mappings that have a real original_value (skip empty/unresolved ones)
-    mappings_sorted = sorted(
-        [m for m in mappings if m.original_value],
+    all_mappings = all_mappings_result.scalars().all()
+    known_placeholders = {m.anonymized_value for m in all_mappings}
+
+    # Only use mappings that have a real original_value for replacement
+    active_with_value = sorted(
+        [m for m in all_mappings if m.original_value and m.is_active],
         key=lambda m: len(m.original_value),
         reverse=True,
     )
-
-    if not mappings_sorted:
-        return {"updated_chunks": 0, "updated_chapters": 0}
 
     def apply_mappings(text: str) -> str:
         """Apply all mappings to a text, longest match first, case-insensitive."""
         import re
         result_text = text
-        for m in mappings_sorted:
-            # Case-insensitive replacement to catch "UGAP", "ugap", "Ugap", etc.
+        for m in active_with_value:
             pattern = re.compile(re.escape(m.original_value), re.IGNORECASE)
             result_text = pattern.sub(m.anonymized_value, result_text)
         return result_text
@@ -2424,7 +2424,6 @@ async def re_anonymize_project(
                 ch.anonymized_content = new_content
                 changed = True
         if not changed and ch.content:
-            # Content was already clean, but anonymized_content may be stale
             new_anon = apply_mappings(ch.content)
             if new_anon != ch.anonymized_content:
                 ch.anonymized_content = new_anon
@@ -2432,9 +2431,43 @@ async def re_anonymize_project(
         if changed:
             updated_chapters += 1
 
+    # ── Scan ALL chapter content for orphan placeholders ──
+    # Collect all text to scan
+    all_chapter_text = "\n".join(ch.content for ch in chapters if ch.content)
+    registered_orphans = 0
+    if all_chapter_text:
+        orphans = AnonymizationService.find_unknown_placeholders(all_chapter_text, known_placeholders)
+        for token in orphans:
+            from ..services.anonymization_service import PREFIX_TO_ENTITY_TYPE
+            inner = token.strip("[]")
+            prefix = inner.rsplit("_", 1)[0]
+            entity_type = PREFIX_TO_ENTITY_TYPE.get(prefix, EntityType.OTHER)
+
+            existing = await db.execute(
+                select(AnonymizationMapping)
+                .where(AnonymizationMapping.project_id == project_id)
+                .where(AnonymizationMapping.anonymized_value == token)
+            )
+            if existing.scalar_one_or_none() is not None:
+                continue
+
+            new_mapping = AnonymizationMapping(
+                project_id=project_id,
+                entity_type=entity_type,
+                original_value="",
+                anonymized_value=token,
+                is_active=True,
+            )
+            db.add(new_mapping)
+            registered_orphans += 1
+
     await db.commit()
 
-    return {"updated_chunks": updated_chunks, "updated_chapters": updated_chapters}
+    return {
+        "updated_chunks": updated_chunks,
+        "updated_chapters": updated_chapters,
+        "registered_orphans": registered_orphans,
+    }
 
 
 @router.get("/{project_id}/chapters/{chapter_id}/anonymized-content")
