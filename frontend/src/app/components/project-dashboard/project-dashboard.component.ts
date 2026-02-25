@@ -1068,7 +1068,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .add-member-form { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
     .member-select-field { flex: 1; min-width: 250px; }
     .role-select-field { width: 160px; }
-    .members-list .member-item { border-bottom: 1px solid #f0f0f0; }
+    .members-list .member-item { border-bottom: 1px solid #f0f0f0; height: auto !important; min-height: 56px; padding: 8px 0; }
+    .members-list .member-item ::ng-deep .mdc-list-item__content { overflow: visible; }
     .member-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
     .role-inline-field { width: 140px; font-size: 13px; }
     .role-inline-field ::ng-deep .mat-mdc-form-field-subscript-wrapper { display: none; }
