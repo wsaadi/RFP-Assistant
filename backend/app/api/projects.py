@@ -2374,7 +2374,12 @@ async def re_anonymize_project(
         .where(AnonymizationMapping.is_active == True)
     )
     mappings = result.scalars().all()
-    mappings_sorted = sorted(mappings, key=lambda m: len(m.original_value), reverse=True)
+    # Only use mappings that have a real original_value (skip empty/unresolved ones)
+    mappings_sorted = sorted(
+        [m for m in mappings if m.original_value],
+        key=lambda m: len(m.original_value),
+        reverse=True,
+    )
 
     if not mappings_sorted:
         return {"updated_chunks": 0, "updated_chapters": 0}

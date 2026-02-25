@@ -51,6 +51,9 @@ ENTITY_PREFIXES = {
     EntityType.OTHER: "ENTITE",
 }
 
+# Reverse mapping: prefix string → EntityType
+PREFIX_TO_ENTITY_TYPE = {v: k for k, v in ENTITY_PREFIXES.items()}
+
 # Regex patterns for entities GLiNER might miss
 REGEX_PATTERNS = {
     EntityType.EMAIL: r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
@@ -355,6 +358,63 @@ class AnonymizationService:
         await db.flush()
         return results
 
+    # Regex matching any placeholder the AI might generate: [PREFIX_N]
+    _PLACEHOLDER_RE = re.compile(
+        r'\['
+        r'(?:' + '|'.join(ENTITY_PREFIXES.values()) + r')'
+        r'_\d+'
+        r'\]'
+    )
+
+    @classmethod
+    def find_unknown_placeholders(cls, text: str, known_placeholders: set) -> set:
+        """Find all [PREFIX_N] placeholders in text that have no known mapping."""
+        all_found = set(cls._PLACEHOLDER_RE.findall(text))
+        return all_found - known_placeholders
+
+    @classmethod
+    async def register_unknown_placeholders(
+        cls,
+        text: str,
+        project_id: uuid.UUID,
+        db: AsyncSession,
+        known_placeholders: set,
+    ) -> None:
+        """Create empty mappings for AI-invented placeholders so they appear in Statistics.
+
+        Any [PREFIX_N] token in *text* not present in *known_placeholders*
+        gets a new AnonymizationMapping with an empty original_value.
+        The user can then fill in the real value from the Statistics page.
+        """
+        unknown = cls.find_unknown_placeholders(text, known_placeholders)
+        if not unknown:
+            return
+
+        for token in unknown:
+            inner = token.strip("[]")                    # e.g. "ENTREPRISE_3"
+            prefix = inner.rsplit("_", 1)[0]             # e.g. "ENTREPRISE"
+            entity_type = PREFIX_TO_ENTITY_TYPE.get(prefix, EntityType.OTHER)
+
+            # Check it doesn't already exist (race condition guard)
+            existing = await db.execute(
+                select(AnonymizationMapping)
+                .where(AnonymizationMapping.project_id == project_id)
+                .where(AnonymizationMapping.anonymized_value == token)
+            )
+            if existing.scalar_one_or_none() is not None:
+                continue
+
+            new_mapping = AnonymizationMapping(
+                project_id=project_id,
+                entity_type=entity_type,
+                original_value="",
+                anonymized_value=token,
+                is_active=True,
+            )
+            db.add(new_mapping)
+
+        await db.flush()
+
     @classmethod
     async def deanonymize_text(
         cls,
@@ -362,15 +422,26 @@ class AnonymizationService:
         project_id: uuid.UUID,
         db: AsyncSession,
     ) -> str:
-        """Replace anonymized placeholders with original values."""
+        """Replace anonymized placeholders with original values.
+
+        Any AI-invented placeholder without a mapping is registered in the
+        database (with empty original_value) so it appears on the Statistics
+        page for the user to complete. The placeholder is kept as-is in the
+        text until the user provides a real value.
+        """
         if not anonymized_text:
             return anonymized_text
 
         mappings = await cls.get_mappings_by_placeholder(db, project_id)
         result = anonymized_text
 
+        # Register any unknown placeholders the AI invented
+        await cls.register_unknown_placeholders(result, project_id, db, set(mappings.keys()))
+
+        # Replace known placeholders that have a real original value
         for placeholder, original in mappings.items():
-            result = result.replace(placeholder, original)
+            if original:  # skip empty mappings (unresolved)
+                result = result.replace(placeholder, original)
 
         return result
 
