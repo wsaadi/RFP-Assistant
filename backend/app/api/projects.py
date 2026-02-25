@@ -2404,18 +2404,28 @@ async def re_anonymize_project(
                 chunk.anonymized_content = new_anon
                 updated_chunks += 1
 
-    # Re-anonymize chapter content (store anonymized version)
+    # Re-anonymize chapter content (both visible content AND anonymized version)
     chapters_result = await db.execute(
         select(Chapter).where(Chapter.project_id == project_id)
     )
     chapters = chapters_result.scalars().all()
     updated_chapters = 0
     for ch in chapters:
+        changed = False
         if ch.content:
+            new_content = apply_mappings(ch.content)
+            if new_content != ch.content:
+                ch.content = new_content
+                ch.anonymized_content = new_content
+                changed = True
+        if not changed and ch.content:
+            # Content was already clean, but anonymized_content may be stale
             new_anon = apply_mappings(ch.content)
             if new_anon != ch.anonymized_content:
                 ch.anonymized_content = new_anon
-                updated_chapters += 1
+                changed = True
+        if changed:
+            updated_chapters += 1
 
     await db.commit()
 
