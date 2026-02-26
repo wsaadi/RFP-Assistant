@@ -87,3 +87,14 @@ async def init_db():
             ))
         except Exception:
             logger.debug("context_mode column already exists or ALTER TABLE not supported")
+
+    # Add full_text / anonymized_full_text columns on documents for full-context mode
+    async with engine.begin() as conn:
+        for col in ("full_text", "anonymized_full_text"):
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE documents ADD COLUMN IF NOT EXISTS "
+                    f"{col} TEXT DEFAULT ''"
+                ))
+            except Exception:
+                logger.debug("%s column already exists or ALTER TABLE not supported", col)

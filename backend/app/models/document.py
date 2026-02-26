@@ -59,6 +59,8 @@ class Document(Base):
     )
     page_count: Mapped[int] = mapped_column(Integer, default=0)
     chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    full_text: Mapped[str] = mapped_column(Text, default="")
+    anonymized_full_text: Mapped[str] = mapped_column(Text, default="")
     uploaded_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )

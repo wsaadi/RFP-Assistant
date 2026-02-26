@@ -679,6 +679,54 @@ async def _get_all_chunks_anonymized_by_category(
     return "\n\n".join(parts)
 
 
+async def _get_full_text_anonymized_by_category(
+    db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory,
+) -> str:
+    """Get full anonymized text for documents in a category (full context mode).
+
+    Uses Document.anonymized_full_text stored at upload time — the raw extracted
+    text anonymized as a single block, exactly like pasting into a chat.
+    Falls back to reassembled chunks for documents uploaded before this feature.
+    """
+    result = await db.execute(
+        select(Document)
+        .where(Document.project_id == project_id)
+        .where(Document.category == category)
+        .where(Document.processing_status == ProcessingStatus.COMPLETED)
+        .order_by(Document.original_filename)
+    )
+    docs: list[Document] = result.scalars().all()
+    parts: list[str] = []
+    fallback_doc_ids: list[uuid.UUID] = []
+    for doc in docs:
+        anon = (doc.anonymized_full_text or "").strip()
+        if anon:
+            parts.append(f"\n\n=== DOCUMENT: {doc.original_filename} ===\n")
+            parts.append(anon)
+        else:
+            fallback_doc_ids.append(doc.id)
+
+    # Fallback: reassemble from chunks for older documents without full_text
+    if fallback_doc_ids:
+        chunk_result = await db.execute(
+            select(DocumentChunk, Document.original_filename)
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(DocumentChunk.document_id.in_(fallback_doc_ids))
+            .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
+        )
+        current_doc = None
+        for chunk, doc_name in chunk_result.all():
+            text = (chunk.anonymized_content or chunk.content or "").strip()
+            if not text:
+                continue
+            if doc_name != current_doc:
+                current_doc = doc_name
+                parts.append(f"\n\n=== DOCUMENT: {doc_name} ===\n")
+            parts.append(text)
+
+    return "\n\n".join(parts)
+
+
 @router.post("/{project_id}/generate-structure")
 async def generate_structure(
     project_id: uuid.UUID,
@@ -1227,7 +1275,7 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
         full_old_response = ""
         if proj_context_mode == "full":
             async with async_session() as db:
-                full_old_response = await _get_all_chunks_anonymized_by_category(
+                full_old_response = await _get_full_text_anonymized_by_category(
                     db, project_id, DocumentCategory.OLD_RESPONSE
                 )
             if not full_old_response.strip():

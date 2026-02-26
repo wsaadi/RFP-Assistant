@@ -12,7 +12,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.project import RFPProject, AIConfig
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
-from ..models.document import Document, DocumentChunk, DocumentCategory
+from ..models.document import Document, DocumentChunk, DocumentCategory, ProcessingStatus
 from ..schemas.chapter import (
     ChapterCreate, ChapterUpdate, ChapterOut,
     ChapterContentRequest, AddNoteRequest, ReorderChaptersRequest,
@@ -298,28 +298,51 @@ async def get_chapter_gen_status(
     })
 
 
-async def _get_all_chunks_anon(
+async def _get_full_text_anon(
     db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory,
 ) -> str:
-    """Get ALL pre-anonymized chunks for a category (full context mode)."""
+    """Get full anonymized text for all documents of a category (full context mode).
+
+    Uses Document.anonymized_full_text stored at upload time — the raw extracted
+    text anonymized as a single block, exactly like pasting into a chat.
+    Falls back to reassembled chunks for documents uploaded before this feature.
+    """
     result = await db.execute(
-        select(DocumentChunk, Document.original_filename)
-        .join(Document, Document.id == DocumentChunk.document_id)
+        select(Document)
         .where(Document.project_id == project_id)
         .where(Document.category == category)
-        .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
+        .where(Document.processing_status == ProcessingStatus.COMPLETED)
+        .order_by(Document.original_filename)
     )
-    rows = result.all()
+    docs = result.scalars().all()
     parts = []
-    current_doc = None
-    for chunk, doc_name in rows:
-        text = (chunk.anonymized_content or chunk.content or "").strip()
-        if not text:
-            continue
-        if doc_name != current_doc:
-            current_doc = doc_name
-            parts.append(f"\n\n=== DOCUMENT: {doc_name} ===\n")
-        parts.append(text)
+    fallback_doc_ids = []
+    for doc in docs:
+        anon = (doc.anonymized_full_text or "").strip()
+        if anon:
+            parts.append(f"\n\n=== DOCUMENT: {doc.original_filename} ===\n")
+            parts.append(anon)
+        else:
+            fallback_doc_ids.append(doc.id)
+
+    # Fallback: reassemble from chunks for older documents without full_text
+    if fallback_doc_ids:
+        chunk_result = await db.execute(
+            select(DocumentChunk, Document.original_filename)
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(DocumentChunk.document_id.in_(fallback_doc_ids))
+            .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
+        )
+        current_doc = None
+        for chunk, doc_name in chunk_result.all():
+            text = (chunk.anonymized_content or chunk.content or "").strip()
+            if not text:
+                continue
+            if doc_name != current_doc:
+                current_doc = doc_name
+                parts.append(f"\n\n=== DOCUMENT: {doc_name} ===\n")
+            parts.append(text)
+
     return "\n\n".join(parts)
 
 
@@ -388,8 +411,8 @@ async def _run_chapter_generation(
                     if proj_context_mode == "full":
                         # ── Full context mode: send ALL document content ──
                         _update("loading", 10, "Chargement du contexte complet...")
-                        old_response_content = await _get_all_chunks_anon(db, project_id, DocumentCategory.OLD_RESPONSE) if use_old_response else ""
-                        context_chunks_text = await _get_all_chunks_anon(db, project_id, DocumentCategory.NEW_RFP)
+                        old_response_content = await _get_full_text_anon(db, project_id, DocumentCategory.OLD_RESPONSE) if use_old_response else ""
+                        context_chunks_text = await _get_full_text_anon(db, project_id, DocumentCategory.NEW_RFP)
                     else:
                         # ── RAG mode: vector search for relevant chunks ──
                         _update("searching", 10, "Recherche de contenu pertinent...")
