@@ -313,12 +313,16 @@ export class ApiService {
   generateRecommendationContent(
     projectId: string,
     recommendation: string,
-    chapterId?: string,
-    missingDescription?: string,
-  ): Observable<{ content: string; chapter_id?: string }> {
-    return this.http.post<{ content: string; chapter_id?: string }>(
+    options?: { chapterId?: string; missingDescription?: string; inject?: boolean },
+  ): Observable<{ content: string; chapter_id?: string; chapter_title?: string }> {
+    return this.http.post<{ content: string; chapter_id?: string; chapter_title?: string }>(
       `${this.baseUrl}/projects/${projectId}/compliance-analysis/generate-recommendation`,
-      { recommendation, chapter_id: chapterId, missing_description: missingDescription }
+      {
+        recommendation,
+        chapter_id: options?.chapterId,
+        missing_description: options?.missingDescription,
+        inject: options?.inject ?? true,
+      }
     );
   }
 
