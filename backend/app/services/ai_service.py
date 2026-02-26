@@ -801,39 +801,60 @@ Enrichis et améliore ce contenu."""
         self, response_content: str, rfp_requirements: str
     ) -> Dict:
         """Analyze exhaustiveness and compliance of the response."""
-        system_prompt = """Tu es un expert en évaluation de réponses aux appels d'offres.
-Analyse si la réponse couvre TOUTES les exigences de l'appel d'offres.
+        system_prompt = """Tu es un expert senior en évaluation de réponses aux appels d'offres publics et privés.
+Ta mission: vérifier que le mémoire technique et les documents de réponse couvrent TOUTES les exigences
+extraites des pièces du dossier de consultation (CCAP, CCTP, RC, etc.).
 
-IMPORTANT: Le contenu de la réponse peut provenir de plusieurs documents et de plusieurs feuilles Excel.
-Analyse l'INTÉGRALITÉ du contenu fourni. Les données peuvent couvrir des thèmes variés:
-RSE, développement durable, technique, qualité, sécurité, organisation, références, prix, etc.
-Ne marque PAS une exigence comme manquante si elle est couverte quelque part dans le contenu,
-même si l'information se trouve dans une section différente ou un onglet Excel séparé.
+## Contexte des documents d'appel d'offres (AO)
+Les documents AO sont structurés avec des marqueurs === DOCUMENT: nom_du_fichier ===.
+Ils peuvent inclure:
+- **CCTP** (Cahier des Clauses Techniques Particulières): exigences techniques, prestations attendues,
+  livrables, niveaux de service, spécifications fonctionnelles et techniques.
+- **CCAP** (Cahier des Clauses Administratives Particulières): exigences administratives, délais,
+  pénalités, modalités d'exécution, assurances, sous-traitance, conditions financières.
+- **RC** (Règlement de Consultation): critères de jugement, forme de la réponse attendue.
+- Autres pièces: BPU, DQE, annexes techniques, etc.
 
-Les documents sont structurés avec des marqueurs === DOCUMENT: nom_du_fichier === et --- Section ---.
-Utilise ces noms de documents pour indiquer les sources dans ta réponse.
+## Contexte de la réponse
+La réponse peut contenir:
+- Le **Mémoire Technique** rédigé par l'outil (marqué === DOCUMENT: Memoire Technique ===),
+  structuré en chapitres (--- Titre du chapitre ---). C'est souvent le document PRINCIPAL de la réponse.
+- Des documents complémentaires uploadés (fiches techniques, attestations, tableaux Excel, etc.).
+
+## Règles d'analyse
+1. Extrais CHAQUE exigence significative des documents AO (CCTP + CCAP + autres).
+2. Vérifie si cette exigence est couverte dans la réponse (mémoire technique OU documents complémentaires).
+3. Ne marque PAS une exigence comme manquante si elle est couverte quelque part dans le contenu,
+   même dans une section différente ou un document séparé.
+4. Pour les exigences du CCTP: vérifie la couverture technique (méthodologie, moyens, organisation).
+5. Pour les exigences du CCAP: vérifie les engagements administratifs (délais, pénalités, conformités).
+6. Sois PRÉCIS sur ce qui manque: ne dis pas juste "non couvert", explique CE QUI manque concrètement.
+7. Analyse l'INTÉGRALITÉ du contenu fourni: technique, RSE, qualité, sécurité, environnement, etc.
 
 Réponds au format JSON (sans markdown):
 {
   "score": 0-100,
-  "covered_requirements": [{"requirement": "...", "coverage": "complete|partial|missing", "comment": "...", "source_rfp": "nom du document AO source", "source_response": "nom du document de réponse où l'info se trouve"}],
-  "missing_elements": [{"requirement": "...", "description": "ce qui manque", "source_rfp": "nom du document AO source"}],
-  "recommendations": ["..."],
+  "covered_requirements": [{"requirement": "...", "coverage": "complete|partial|missing", "comment": "...", "source_rfp": "nom du document AO source (ex: CCTP, CCAP)", "source_response": "nom du document/chapitre de réponse couvrant cette exigence"}],
+  "missing_elements": [{"requirement": "...", "description": "ce qui manque concrètement dans la réponse", "source_rfp": "nom du document AO source"}],
+  "recommendations": ["actions concrètes pour améliorer la conformité"],
   "summary": "..."
 }
 
-Pour source_rfp: indique le nom du document de l'appel d'offres où l'exigence est mentionnée.
-Pour source_response: indique le nom du document de la réponse qui couvre cette exigence (ou vide si manquant)."""
+Pour source_rfp: indique le nom du document AO (CCTP, CCAP, RC, etc.) où l'exigence est mentionnée.
+Pour source_response: indique le chapitre du mémoire technique ou le document qui couvre cette exigence."""
 
-        user_prompt = f"""EXIGENCES DE L'APPEL D'OFFRES:
+        user_prompt = f"""DOCUMENTS DE L'APPEL D'OFFRES (CCAP, CCTP, RC, annexes):
 {rfp_requirements[:50000]}
 
-CONTENU DE LA RÉPONSE:
+CONTENU DE LA RÉPONSE (Mémoire Technique + documents complémentaires):
 {response_content[:50000]}
 
-Analyse l'exhaustivité et la conformité de cette réponse.
-IMPORTANT: Analyse TOUT le contenu fourni, y compris les données RSE, qualité, environnement, et tout autre thème présent.
-Indique pour chaque exigence le document source (AO) et le document de réponse correspondant."""
+Analyse l'exhaustivité et la conformité de cette réponse par rapport aux exigences de l'AO.
+IMPORTANT:
+- Parcours CHAQUE article/clause du CCTP et du CCAP pour vérifier sa couverture dans la réponse.
+- Le Mémoire Technique est le document principal de la réponse – concentre-toi dessus en priorité.
+- Indique pour chaque exigence le document AO source (CCTP art.X, CCAP art.Y) et le chapitre/document de réponse correspondant.
+- Sois factuel et précis dans tes commentaires."""
 
         response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000)
         result = _parse_json_object(response)
