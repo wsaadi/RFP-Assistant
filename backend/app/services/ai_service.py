@@ -233,6 +233,12 @@ class MistralAIService:
         chunks: list[str] = []
         token_count = 0
 
+        # Scale stream-init timeout with input size: large prompts need more
+        # TTFT (time-to-first-token) because the model must process the full
+        # context before emitting anything.  Base 60s + 1s per 5K input chars.
+        init_timeout = max(60, 60 + input_chars // 5000)
+        logger.info("Stream init timeout: %ds (input ~%d chars)", init_timeout, input_chars)
+
         try:
             stream = await asyncio.wait_for(
                 self._client.chat.stream_async(
@@ -244,7 +250,7 @@ class MistralAIService:
                     temperature=temperature or self.temperature,
                     max_tokens=effective_max,
                 ),
-                timeout=60,  # 60s to *start* the stream
+                timeout=init_timeout,
             )
 
             async with stream as event_stream:
@@ -278,8 +284,8 @@ class MistralAIService:
                                     await on_progress(token_count, total_chars)
 
         except asyncio.TimeoutError:
-            logger.error("Mistral stream init timed out after 60s (input ~%d chars)", input_chars)
-            raise TimeoutError("L'appel IA a expire en attendant le debut du stream.")
+            logger.error("Mistral stream init timed out after %ds (input ~%d chars)", init_timeout, input_chars)
+            raise TimeoutError(f"L'appel IA a expire apres {init_timeout}s en attendant le debut du stream.")
 
         result = "".join(chunks)
         elapsed = time.monotonic() - t0
