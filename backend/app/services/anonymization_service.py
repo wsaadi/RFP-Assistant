@@ -11,16 +11,15 @@ from ..models.project import AnonymizationMapping, EntityType
 
 
 # Entity labels GLiNER will search for
+# Keep detection focused on truly sensitive data to avoid over-anonymization:
+# names, companies, emails, addresses, project/RFP codes.
 GLINER_LABELS = [
     "person",
     "organization",
     "company",
     "email address",
-    "phone number",
     "address",
     "project code",
-    "solution name",
-    "monetary amount",
 ]
 
 # Mapping from GLiNER labels to our entity types
@@ -29,11 +28,8 @@ LABEL_TO_ENTITY_TYPE = {
     "organization": EntityType.COMPANY,
     "company": EntityType.COMPANY,
     "email address": EntityType.EMAIL,
-    "phone number": EntityType.PHONE,
     "address": EntityType.ADDRESS,
     "project code": EntityType.PROJECT_CODE,
-    "solution name": EntityType.SOLUTION_NAME,
-    "monetary amount": EntityType.AMOUNT,
 }
 
 # Prefixes for anonymized placeholders
@@ -57,7 +53,6 @@ PREFIX_TO_ENTITY_TYPE = {v: k for k, v in ENTITY_PREFIXES.items()}
 # Regex patterns for entities GLiNER might miss
 REGEX_PATTERNS = {
     EntityType.EMAIL: r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
-    EntityType.PHONE: r'(?:\+33|0)\s*[1-9](?:[\s.-]*\d{2}){4}',
 }
 
 # Regex to catch uppercase acronyms (3-6 chars) that GLiNER often misses for
@@ -238,17 +233,6 @@ class AnonymizationService:
                             (matched_text, entity_type.value, match.start(), match.end())
                         )
 
-            # Acronym catch-up: uppercase 3-6 char words not in stoplist
-            already_covered = {e[0] for e in results[text_idx]}
-            for match in _ACRONYM_RE.finditer(text):
-                acr = match.group()
-                if acr in _ACRONYM_STOPLIST or acr in already_covered:
-                    continue
-                results[text_idx].append(
-                    (acr, EntityType.COMPANY.value, match.start(), match.end())
-                )
-                already_covered.add(acr)
-
             results[text_idx].sort(key=lambda x: x[2])
 
         return results
@@ -281,16 +265,6 @@ class AnonymizationService:
                         match.start(),
                         match.end(),
                     ))
-
-        # Third pass: catch uppercase acronyms (likely company/org names) that
-        # GLiNER missed — common for short names like EDF, SNCF, RATP.
-        already_covered = {e[0] for e in entities}
-        for match in _ACRONYM_RE.finditer(text):
-            acr = match.group()
-            if acr in _ACRONYM_STOPLIST or acr in already_covered:
-                continue
-            entities.append((acr, EntityType.COMPANY.value, match.start(), match.end()))
-            already_covered.add(acr)
 
         # Sort by position for consistent processing
         entities.sort(key=lambda x: x[2])

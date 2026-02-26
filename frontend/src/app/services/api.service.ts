@@ -389,6 +389,10 @@ export class ApiService {
     return this.http.get<{ anonymized_content: string }>(`${this.baseUrl}/projects/${projectId}/chapters/${chapterId}/anonymized-content`);
   }
 
+  purgeAnonymization(projectId: string): Observable<{ restored_chapters: number; cleared_chunks: number; deleted_mappings: number }> {
+    return this.http.post<{ restored_chapters: number; cleared_chunks: number; deleted_mappings: number }>(`${this.baseUrl}/projects/${projectId}/purge-anonymization`, {});
+  }
+
   // ── Export/Import ──
   exportWord(projectId: string): Observable<any> {
     return this.http.post(`${this.baseUrl}/export/${projectId}/word`, {});
