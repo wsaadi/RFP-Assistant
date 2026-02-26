@@ -166,9 +166,16 @@ async def process_document_background(document_id: str, project_id: str):
                 )
                 db.add(db_image)
 
+            # Store full text + anonymized full text for full-context mode
+            anonymized_full_text = await AnonymizationService.anonymize_text(
+                text, uuid.UUID(project_id), db
+            )
+
             # Update document stats
             result = await db.execute(select(Document).where(Document.id == uuid.UUID(document_id)))
             document = result.scalar_one()
+            document.full_text = text
+            document.anonymized_full_text = anonymized_full_text
             if page_count is not None:
                 document.page_count = page_count
             document.chunk_count = len(chunks)

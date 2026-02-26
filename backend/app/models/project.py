@@ -56,6 +56,7 @@ class RFPProject(Base):
     enabled_categories: Mapped[list] = mapped_column(
         JSON, default=lambda: ["old_rfp", "old_response", "new_rfp"]
     )
+    context_mode: Mapped[str] = mapped_column(String(20), default="rag")  # "rag" or "full"
     created_by: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("users.id"), nullable=False
     )

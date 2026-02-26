@@ -91,6 +91,7 @@ async def list_projects(
             improvement_axes=p.improvement_axes,
             ai_context=p.ai_context or "",
             enabled_categories=p.enabled_categories or ["old_rfp", "old_response", "new_rfp"],
+            context_mode=p.context_mode or "rag",
             created_by=str(p.created_by),
             created_at=p.created_at,
             updated_at=p.updated_at,
@@ -117,6 +118,7 @@ async def create_project(
         deadline=request.deadline,
         ai_context=request.ai_context,
         enabled_categories=request.enabled_categories,
+        context_mode=request.context_mode,
         created_by=current_user.id,
     )
     db.add(project)
@@ -135,6 +137,7 @@ async def create_project(
         improvement_axes=project.improvement_axes,
         ai_context=project.ai_context or "",
         enabled_categories=project.enabled_categories or ["old_rfp", "old_response", "new_rfp"],
+        context_mode=project.context_mode or "rag",
         created_by=str(project.created_by),
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -174,6 +177,7 @@ async def get_project(
         improvement_axes=project.improvement_axes,
         ai_context=project.ai_context or "",
         enabled_categories=project.enabled_categories or ["old_rfp", "old_response", "new_rfp"],
+        context_mode=project.context_mode or "rag",
         created_by=str(project.created_by),
         created_at=project.created_at,
         updated_at=project.updated_at,
@@ -195,7 +199,7 @@ async def update_project(
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    for field in ["name", "description", "client_name", "rfp_reference", "deadline", "improvement_axes", "ai_context", "enabled_categories"]:
+    for field in ["name", "description", "client_name", "rfp_reference", "deadline", "improvement_axes", "ai_context", "enabled_categories", "context_mode"]:
         value = getattr(request, field, None)
         if value is not None:
             setattr(project, field, value)
@@ -672,6 +676,54 @@ async def _get_all_chunks_anonymized_by_category(
             current_section = section
             parts.append(f"\n--- {section} ---\n")
         parts.append(text)
+    return "\n\n".join(parts)
+
+
+async def _get_full_text_anonymized_by_category(
+    db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory,
+) -> str:
+    """Get full anonymized text for documents in a category (full context mode).
+
+    Uses Document.anonymized_full_text stored at upload time — the raw extracted
+    text anonymized as a single block, exactly like pasting into a chat.
+    Falls back to reassembled chunks for documents uploaded before this feature.
+    """
+    result = await db.execute(
+        select(Document)
+        .where(Document.project_id == project_id)
+        .where(Document.category == category)
+        .where(Document.processing_status == ProcessingStatus.COMPLETED)
+        .order_by(Document.original_filename)
+    )
+    docs: list[Document] = result.scalars().all()
+    parts: list[str] = []
+    fallback_doc_ids: list[uuid.UUID] = []
+    for doc in docs:
+        anon = (doc.anonymized_full_text or "").strip()
+        if anon:
+            parts.append(f"\n\n=== DOCUMENT: {doc.original_filename} ===\n")
+            parts.append(anon)
+        else:
+            fallback_doc_ids.append(doc.id)
+
+    # Fallback: reassemble from chunks for older documents without full_text
+    if fallback_doc_ids:
+        chunk_result = await db.execute(
+            select(DocumentChunk, Document.original_filename)
+            .join(Document, Document.id == DocumentChunk.document_id)
+            .where(DocumentChunk.document_id.in_(fallback_doc_ids))
+            .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
+        )
+        current_doc = None
+        for chunk, doc_name in chunk_result.all():
+            text = (chunk.anonymized_content or chunk.content or "").strip()
+            if not text:
+                continue
+            if doc_name != current_doc:
+                current_doc = doc_name
+                parts.append(f"\n\n=== DOCUMENT: {doc_name} ===\n")
+            parts.append(text)
+
     return "\n\n".join(parts)
 
 
@@ -1176,9 +1228,11 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # Load project AI context
+            # Load project settings
             proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
-            proj_ai_context = (proj_result.scalar_one().ai_context or "")
+            proj = proj_result.scalar_one()
+            proj_ai_context = proj.ai_context or ""
+            proj_context_mode = proj.context_mode or "rag"
 
             _update("loading", 5, "Chargement des chapitres...")
 
@@ -1217,6 +1271,21 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
         _update("loading", 10,
                 f"{total} chapitre(s) vide(s) a pre-remplir sur {total_chapters} total")
 
+        # Full context mode: load ALL old response content once (already anonymized)
+        full_old_response = ""
+        if proj_context_mode == "full":
+            async with async_session() as db:
+                full_old_response = await _get_full_text_anonymized_by_category(
+                    db, project_id, DocumentCategory.OLD_RESPONSE
+                )
+            if not full_old_response.strip():
+                _prefill_progress[pid] = {
+                    "status": "completed", "step": "done", "progress": 100,
+                    "prefilled_count": 0,
+                    "message": "Aucun contenu d'ancienne reponse trouve",
+                }
+                return
+
         prefilled = 0
         skipped = 0
 
@@ -1227,21 +1296,26 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                         f"Chapitre {idx + 1}/{total}: {ch_data['title'][:60]}...",
                         prefilled_count=prefilled)
 
-                # Vector search (no DB needed)
-                search_query = f"{ch_data['title']} {ch_data['description']}"
-                old_response_chunks = VectorService.search(
-                    str(project_id), search_query, top_k=5, category_filter="old_response"
-                )
+                old_response_chunks = []
+                if proj_context_mode == "full":
+                    # Full context: reuse pre-loaded content (already anonymized)
+                    anon_content = full_old_response
+                else:
+                    # RAG: vector search for relevant chunks
+                    search_query = f"{ch_data['title']} {ch_data['description']}"
+                    old_response_chunks = VectorService.search(
+                        str(project_id), search_query, top_k=5, category_filter="old_response"
+                    )
 
-                if not old_response_chunks:
-                    skipped += 1
-                    continue
+                    if not old_response_chunks:
+                        skipped += 1
+                        continue
 
-                old_content = "\n\n".join([c["content"] for c in old_response_chunks])
+                    old_content = "\n\n".join([c["content"] for c in old_response_chunks])
 
-                # Short DB session for anonymization
-                async with async_session() as db:
-                    anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
+                    # Short DB session for anonymization
+                    async with async_session() as db:
+                        anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
 
                 # AI call (no DB connection held)
                 content = await ai_service.generate_chapter_content(
@@ -1256,7 +1330,7 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                 refs = [
                     {"document": c["document_name"], "page": c["page_number"], "score": c["score"]}
                     for c in old_response_chunks[:3]
-                ]
+                ] if old_response_chunks else []
                 async with async_session() as db:
                     deanon = await AnonymizationService.deanonymize_text(content, project_id, db)
                     chap_result = await db.execute(select(Chapter).where(Chapter.id == ch_data["id"]))

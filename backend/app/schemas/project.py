@@ -12,6 +12,7 @@ class ProjectCreate(BaseModel):
     deadline: str = ""
     ai_context: str = ""
     enabled_categories: List[str] = ["old_rfp", "old_response", "new_rfp"]
+    context_mode: str = "rag"  # "rag" or "full"
 
 
 class ProjectUpdate(BaseModel):
@@ -24,6 +25,7 @@ class ProjectUpdate(BaseModel):
     improvement_axes: Optional[str] = None
     ai_context: Optional[str] = None
     enabled_categories: Optional[List[str]] = None
+    context_mode: Optional[str] = None
 
 
 class ProjectOut(BaseModel):
@@ -38,6 +40,7 @@ class ProjectOut(BaseModel):
     improvement_axes: str
     ai_context: str
     enabled_categories: List[str] = ["old_rfp", "old_response", "new_rfp"]
+    context_mode: str = "rag"
     created_by: str
     created_at: datetime
     updated_at: datetime
