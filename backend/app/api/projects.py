@@ -2022,7 +2022,15 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
 
         # ── Phase 2: AI analysis (NO DB connection held) ──
         _update("analyzing", 40, "Analyse IA de la conformite en cours...")
-        analysis = await ai_service.analyze_compliance(anon_response, anon_rfp)
+
+        async def _compliance_progress_cb(tokens: int, chars: int):
+            # Map streaming progress to 40-70% range
+            pct = min(70, 40 + int(tokens / 20))
+            _update("analyzing", pct, f"Analyse IA en cours... ({tokens} tokens)")
+
+        analysis = await ai_service.analyze_compliance(
+            anon_response, anon_rfp, on_progress=_compliance_progress_cb,
+        )
 
         # ── Phase 3: Deanonymize + save (short DB session) ──
         _update("deanonymizing", 75, "Deanonymisation des resultats...")

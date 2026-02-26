@@ -798,7 +798,8 @@ Enrichis et améliore ce contenu."""
         return await self.generate(system_prompt, user_prompt, temperature=0.4)
 
     async def analyze_compliance(
-        self, response_content: str, rfp_requirements: str
+        self, response_content: str, rfp_requirements: str,
+        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
     ) -> Dict:
         """Analyze exhaustiveness and compliance of the response."""
         system_prompt = """Tu es un expert senior en évaluation de réponses aux appels d'offres publics et privés.
@@ -856,7 +857,10 @@ IMPORTANT:
 - Indique pour chaque exigence le document AO source (CCTP art.X, CCAP art.Y) et le chapitre/document de réponse correspondant.
 - Sois factuel et précis dans tes commentaires."""
 
-        response = await self.generate(system_prompt, user_prompt, temperature=0.2, max_tokens=8000)
+        response = await self.generate_streaming(
+            system_prompt, user_prompt, temperature=0.2, max_tokens=8000,
+            timeout=600, on_progress=on_progress,
+        )
         result = _parse_json_object(response)
         if result:
             return result
