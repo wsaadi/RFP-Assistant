@@ -1,5 +1,6 @@
 import { Component, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
 import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
@@ -11,20 +12,28 @@ import { MatListModule } from '@angular/material/list';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDividerModule } from '@angular/material/divider';
+import { MatSelectModule } from '@angular/material/select';
 import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { ComplianceAnalysis, Chapter } from '../../models/report.model';
 import { renderMarkdown } from '../../services/markdown.service';
 
+interface FlatChapter {
+  id: string;
+  title: string;
+  numbering: string;
+  hasContent: boolean;
+}
+
 @Component({
   selector: 'app-compliance',
   standalone: true,
   imports: [
-    CommonModule, RouterLink,
+    CommonModule, FormsModule, RouterLink,
     MatCardModule, MatButtonModule, MatIconModule, MatProgressSpinnerModule,
     MatProgressBarModule, MatChipsModule, MatListModule, MatSnackBarModule,
-    MatTooltipModule, MatDividerModule,
+    MatTooltipModule, MatDividerModule, MatSelectModule,
   ],
   template: `
     <div class="page-container">
@@ -108,11 +117,11 @@ import { renderMarkdown } from '../../services/markdown.service';
           </div>
         </mat-card>
 
-        <!-- Missing elements -->
+        <!-- Missing elements with chapter integration -->
         <mat-card *ngIf="analysis.missing_elements?.length" class="section-card missing">
           <h3><mat-icon>warning</mat-icon> Elements manquants ({{ analysis.missing_elements.length }})</h3>
           <div class="req-list">
-            <div *ngFor="let item of analysis.missing_elements" class="req-item req-border-missing">
+            <div *ngFor="let item of analysis.missing_elements; let mi = index" class="req-item req-border-missing">
               <div class="req-header">
                 <mat-icon class="coverage-missing">error_outline</mat-icon>
                 <span class="req-title">{{ item.requirement }}</span>
@@ -123,30 +132,108 @@ import { renderMarkdown } from '../../services/markdown.service';
                   <mat-icon>description</mat-icon> AO: {{ item.source_rfp }}
                 </span>
               </div>
+
+              <!-- Integration actions -->
+              <div class="integrate-actions">
+                <div class="integrate-row">
+                  <mat-form-field appearance="outline" class="chapter-select">
+                    <mat-label>Chapitre cible</mat-label>
+                    <mat-select [(value)]="missingTargetChapter[mi]">
+                      <mat-option *ngFor="let ch of flatChapters" [value]="ch.id">
+                        {{ ch.numbering ? ch.numbering + ' ' : '' }}{{ ch.title }}
+                        {{ ch.hasContent ? '' : '(vide)' }}
+                      </mat-option>
+                    </mat-select>
+                  </mat-form-field>
+                  <button mat-raised-button color="accent"
+                    (click)="integrateToMemo('missing', mi, item.requirement, item.description)"
+                    [disabled]="generatingMissing === mi"
+                    matTooltip="Generer et ajouter le contenu manquant dans le chapitre selectionne">
+                    <mat-spinner *ngIf="generatingMissing === mi" diameter="16"></mat-spinner>
+                    <mat-icon *ngIf="generatingMissing !== mi">add_circle</mat-icon>
+                    Integrer au memoire
+                  </button>
+                </div>
+
+                <!-- Success message -->
+                <div *ngIf="missingIntegrated[mi]" class="integration-success">
+                  <mat-icon>check_circle</mat-icon>
+                  <span>Contenu ajoute au chapitre</span>
+                  <a mat-button [routerLink]="['/project', projectId, 'chapter', missingTargetChapter[mi]]" color="primary">
+                    <mat-icon>open_in_new</mat-icon> Voir le chapitre
+                  </a>
+                </div>
+
+                <!-- Generated content preview -->
+                <div *ngIf="missingGeneratedContents[mi]" class="generated-content">
+                  <div class="generated-header">
+                    <mat-icon>description</mat-icon>
+                    <span>Contenu genere et integre</span>
+                    <button mat-icon-button (click)="copyToClipboard(missingGeneratedContents[mi])" matTooltip="Copier">
+                      <mat-icon>content_copy</mat-icon>
+                    </button>
+                  </div>
+                  <div class="generated-body" [innerHTML]="renderMarkdown(missingGeneratedContents[mi])"></div>
+                </div>
+              </div>
             </div>
           </div>
         </mat-card>
 
-        <!-- Recommendations with generate buttons -->
+        <!-- Recommendations with generate buttons and chapter integration -->
         <mat-card *ngIf="analysis.recommendations?.length" class="section-card recommendations-card">
           <h3><mat-icon>lightbulb</mat-icon> Recommandations</h3>
           <div *ngFor="let rec of analysis.recommendations; let i = index" class="recommendation-item">
             <div class="rec-header">
               <mat-icon class="rec-icon">arrow_forward</mat-icon>
               <span class="rec-text">{{ rec }}</span>
-              <button mat-raised-button color="accent" (click)="generateRecommendation(i, rec)"
-                [disabled]="generatingRec === i"
-                matTooltip="Generer du contenu repondant a cette recommandation">
-                <mat-spinner *ngIf="generatingRec === i" diameter="16"></mat-spinner>
-                <mat-icon *ngIf="generatingRec !== i">auto_fix_high</mat-icon>
-                Generer
-              </button>
             </div>
+
+            <!-- Integration actions -->
+            <div class="integrate-actions rec-integrate">
+              <div class="integrate-row">
+                <mat-form-field appearance="outline" class="chapter-select">
+                  <mat-label>Chapitre cible</mat-label>
+                  <mat-select [(value)]="recTargetChapter[i]">
+                    <mat-option *ngFor="let ch of flatChapters" [value]="ch.id">
+                      {{ ch.numbering ? ch.numbering + ' ' : '' }}{{ ch.title }}
+                      {{ ch.hasContent ? '' : '(vide)' }}
+                    </mat-option>
+                  </mat-select>
+                </mat-form-field>
+                <button mat-raised-button color="accent"
+                  (click)="integrateToMemo('rec', i, rec)"
+                  [disabled]="generatingRec === i"
+                  matTooltip="Generer et ajouter le contenu dans le chapitre selectionne">
+                  <mat-spinner *ngIf="generatingRec === i" diameter="16"></mat-spinner>
+                  <mat-icon *ngIf="generatingRec !== i">add_circle</mat-icon>
+                  Integrer au memoire
+                </button>
+                <button mat-stroked-button
+                  (click)="generateRecommendation(i, rec)"
+                  [disabled]="generatingRec === i"
+                  matTooltip="Generer un apercu du contenu sans l'ajouter a un chapitre">
+                  <mat-spinner *ngIf="generatingRec === i && !recTargetChapter[i]" diameter="16"></mat-spinner>
+                  <mat-icon *ngIf="generatingRec !== i || recTargetChapter[i]">visibility</mat-icon>
+                  Apercu
+                </button>
+              </div>
+
+              <!-- Success message -->
+              <div *ngIf="recIntegrated[i]" class="integration-success">
+                <mat-icon>check_circle</mat-icon>
+                <span>Contenu ajoute au chapitre</span>
+                <a mat-button [routerLink]="['/project', projectId, 'chapter', recTargetChapter[i]]" color="primary">
+                  <mat-icon>open_in_new</mat-icon> Voir le chapitre
+                </a>
+              </div>
+            </div>
+
             <!-- Generated content preview -->
             <div *ngIf="generatedContents[i]" class="generated-content">
               <div class="generated-header">
                 <mat-icon>description</mat-icon>
-                <span>Contenu genere</span>
+                <span>{{ recIntegrated[i] ? 'Contenu genere et integre' : 'Apercu du contenu' }}</span>
                 <button mat-icon-button (click)="copyToClipboard(generatedContents[i])" matTooltip="Copier">
                   <mat-icon>content_copy</mat-icon>
                 </button>
@@ -222,7 +309,6 @@ import { renderMarkdown } from '../../services/markdown.service';
     .rec-header { display: flex; align-items: flex-start; gap: 10px; }
     .rec-icon { color: #1976d2; margin-top: 2px; flex-shrink: 0; }
     .rec-text { flex: 1; font-size: 14px; line-height: 1.5; }
-    .rec-header button { flex-shrink: 0; }
     .generated-content { margin: 12px 0 12px 34px; border: 1px solid #e0e0e0; border-radius: 8px; overflow: hidden; }
     .generated-header { display: flex; align-items: center; gap: 8px; padding: 8px 12px; background: #e3f2fd; font-size: 13px; font-weight: 500; color: #1565c0; }
     .generated-header span { flex: 1; }
@@ -238,6 +324,16 @@ import { renderMarkdown } from '../../services/markdown.service';
     .empty-card h3 { margin: 0 0 4px; color: #1B3A5C; }
     .empty-card p { margin: 0; color: #888; font-size: 14px; }
     .error-card { padding: 24px; display: flex; align-items: center; gap: 12px; color: #c62828; }
+
+    /* Integration actions */
+    .integrate-actions { margin: 12px 0 0 34px; }
+    .rec-integrate { margin-left: 34px; margin-top: 10px; }
+    .integrate-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .chapter-select { width: 320px; }
+    .chapter-select .mat-mdc-form-field-subscript-wrapper { display: none; }
+    .integration-success { display: flex; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 12px; background: #e8f5e9; border-radius: 6px; font-size: 13px; color: #2e7d32; }
+    .integration-success mat-icon { font-size: 18px; width: 18px; height: 18px; }
+    .integration-success a { font-size: 13px; }
   `],
 })
 export class ComplianceComponent implements OnInit, OnDestroy {
@@ -246,12 +342,25 @@ export class ComplianceComponent implements OnInit, OnDestroy {
   analyzing = false;
   loadingExisting = false;
   error = '';
-  generatingRec: number | null = null;
-  generatedContents: Record<number, string> = {};
   renderMarkdown = renderMarkdown;
   analysisProgress: { status: string; step: string; progress: number; message: string } | null = null;
   exportingPdf = false;
   private pollSub: Subscription | null = null;
+
+  // Chapter list for integration
+  flatChapters: FlatChapter[] = [];
+
+  // Recommendations state
+  generatingRec: number | null = null;
+  generatedContents: Record<number, string> = {};
+  recTargetChapter: Record<number, string> = {};
+  recIntegrated: Record<number, boolean> = {};
+
+  // Missing elements state
+  generatingMissing: number | null = null;
+  missingGeneratedContents: Record<number, string> = {};
+  missingTargetChapter: Record<number, string> = {};
+  missingIntegrated: Record<number, boolean> = {};
 
   get scoreClass(): string {
     if (!this.analysis) return '';
@@ -269,6 +378,7 @@ export class ComplianceComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
     this.loadExisting();
+    this.loadChapters();
     // Resume polling if analysis was already running
     this.api.getComplianceAnalysisStatus(this.projectId).subscribe({
       next: (status) => {
@@ -283,6 +393,32 @@ export class ComplianceComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.stopPolling();
+  }
+
+  loadChapters(): void {
+    this.api.getChapters(this.projectId).subscribe({
+      next: (chapters) => {
+        this.flatChapters = this.flattenChapters(chapters);
+      },
+    });
+  }
+
+  private flattenChapters(chapters: Chapter[], prefix: string = ''): FlatChapter[] {
+    const result: FlatChapter[] = [];
+    for (let i = 0; i < chapters.length; i++) {
+      const ch = chapters[i];
+      const numbering = ch.numbering || prefix + (i + 1);
+      result.push({
+        id: ch.id,
+        title: ch.title,
+        numbering,
+        hasContent: !!(ch.content && ch.content.trim()),
+      });
+      if (ch.children?.length) {
+        result.push(...this.flattenChapters(ch.children, numbering + '.'));
+      }
+    }
+    return result;
   }
 
   loadExisting(): void {
@@ -300,6 +436,9 @@ export class ComplianceComponent implements OnInit, OnDestroy {
     this.analyzing = true;
     this.error = '';
     this.generatedContents = {};
+    this.missingGeneratedContents = {};
+    this.recIntegrated = {};
+    this.missingIntegrated = {};
     this.analysisProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement...' };
     this.api.analyzeCompliance(this.projectId).subscribe({
       next: () => {
@@ -326,6 +465,7 @@ export class ComplianceComponent implements OnInit, OnDestroy {
           this.analysisProgress = null;
           this.snackBar.open('Analyse de conformite terminee', 'OK', { duration: 3000 });
           this.loadExisting();
+          this.loadChapters();
         } else if (status.status === 'error') {
           this.stopPolling();
           this.analyzing = false;
@@ -341,6 +481,51 @@ export class ComplianceComponent implements OnInit, OnDestroy {
     this.pollSub = null;
   }
 
+  /** Generate and integrate content for a missing element or recommendation into a chapter */
+  integrateToMemo(type: 'missing' | 'rec', index: number, requirement: string, description?: string): void {
+    const targetChapterId = type === 'missing' ? this.missingTargetChapter[index] : this.recTargetChapter[index];
+
+    if (!targetChapterId) {
+      this.snackBar.open('Selectionnez un chapitre cible', 'OK', { duration: 3000 });
+      return;
+    }
+
+    if (type === 'missing') {
+      this.generatingMissing = index;
+    } else {
+      this.generatingRec = index;
+    }
+
+    this.api.generateRecommendationContent(
+      this.projectId,
+      requirement,
+      targetChapterId,
+      type === 'missing' ? description : undefined,
+    ).subscribe({
+      next: (res) => {
+        if (type === 'missing') {
+          this.missingGeneratedContents[index] = res.content;
+          this.missingIntegrated[index] = true;
+          this.generatingMissing = null;
+        } else {
+          this.generatedContents[index] = res.content;
+          this.recIntegrated[index] = true;
+          this.generatingRec = null;
+        }
+        this.snackBar.open('Contenu genere et ajoute au chapitre', 'OK', { duration: 3000 });
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur de generation', 'OK', { duration: 4000 });
+        if (type === 'missing') {
+          this.generatingMissing = null;
+        } else {
+          this.generatingRec = null;
+        }
+      },
+    });
+  }
+
+  /** Generate a preview of recommendation content without targeting a chapter */
   generateRecommendation(index: number, recommendation: string): void {
     this.generatingRec = index;
     this.api.generateRecommendationContent(this.projectId, recommendation).subscribe({

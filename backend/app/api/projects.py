@@ -2155,12 +2155,20 @@ async def generate_recommendation_content(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate chapter content addressing a specific compliance recommendation.
+    """Generate chapter content addressing a specific compliance recommendation or missing element.
 
-    Body: {"recommendation": "the recommendation text", "chapter_id": "optional target chapter id"}
+    Body: {
+        "recommendation": "the recommendation or missing element text",
+        "chapter_id": "optional target chapter id to inject content into",
+        "missing_description": "optional description of what is missing (for missing elements)"
+    }
+
+    When chapter_id is provided, the generated content is appended to the chapter.
+    The generation uses old response documents and RFP context for richer, more relevant content.
     """
     recommendation = request.get("recommendation", "").strip()
     chapter_id = request.get("chapter_id")
+    missing_description = request.get("missing_description", "").strip()
 
     if not recommendation:
         raise HTTPException(status_code=400, detail="Recommendation manquante")
@@ -2172,31 +2180,86 @@ async def generate_recommendation_content(
 
     ai_service = await _get_ai_service(project.workspace_id, db)
 
-    # Get RFP context
+    # Get RFP context via vector search
     rfp_chunks = VectorService.search(
         str(project_id), recommendation, top_k=5, category_filter="new_rfp"
     )
     rfp_context = "\n\n".join([c["content"] for c in rfp_chunks]) if rfp_chunks else ""
 
-    # Anonymize
+    # Search old response documents for relevant content
+    old_response_chunks = VectorService.search(
+        str(project_id), recommendation, top_k=5, category_filter="old_response"
+    )
+    old_response_context = "\n\n".join([c["content"] for c in old_response_chunks]) if old_response_chunks else ""
+
+    # Load target chapter content if specified (to generate content that integrates naturally)
+    existing_chapter_content = ""
+    chapter_title = ""
+    if chapter_id:
+        ch_result = await db.execute(
+            select(Chapter).where(Chapter.id == uuid.UUID(chapter_id)).where(Chapter.project_id == project_id)
+        )
+        target_chapter = ch_result.scalar_one_or_none()
+        if target_chapter:
+            existing_chapter_content = target_chapter.content or ""
+            chapter_title = target_chapter.title or ""
+
+    # Anonymize all texts
     anon_rec = await AnonymizationService.anonymize_text(recommendation, project_id, db)
     anon_rfp = await AnonymizationService.anonymize_text(rfp_context, project_id, db) if rfp_context else ""
+    anon_old_response = await AnonymizationService.anonymize_text(old_response_context, project_id, db) if old_response_context else ""
+    anon_existing = await AnonymizationService.anonymize_text(existing_chapter_content, project_id, db) if existing_chapter_content else ""
+    anon_missing = await AnonymizationService.anonymize_text(missing_description, project_id, db) if missing_description else ""
 
-    system_prompt = """Tu es un expert en réponse aux appels d'offres.
-À partir d'une recommandation issue d'une analyse de conformité, génère un contenu structuré
-qui répond à cette recommandation et comble la lacune identifiée.
+    # Build contextual system prompt
+    system_prompt = """Tu es un expert senior en réponse aux appels d'offres.
+À partir d'une lacune ou recommandation identifiée lors d'une analyse de conformité,
+tu dois générer un contenu structuré qui comble cette lacune.
 
-Rédige en français, de manière professionnelle et argumentée. Utilise du markdown
-(titres, listes, tableaux si pertinent). Le contenu doit être directement intégrable
-dans un mémoire de réponse."""
+Règles:
+- Rédige en français, de manière professionnelle, argumentée et convaincante.
+- Utilise du markdown (sous-titres ##, listes à puces -, **gras**, tableaux si pertinent).
+- Le contenu doit être directement intégrable dans un mémoire technique de réponse.
+- Si une ancienne réponse est fournie, EXPLOITE ces informations pour enrichir le contenu
+  (méthodologies, références, expériences, chiffres clés). Adapte-les au contexte actuel.
+- Si l'ancienne réponse ne contient pas l'information nécessaire, complète avec un contenu
+  pertinent et cohérent par rapport au contexte de l'appel d'offres et aux compétences attendues.
+- Ne répète PAS le contenu déjà présent dans le chapitre cible.
 
-    user_prompt = f"""RECOMMANDATION À TRAITER:
-{anon_rec}
+Anonymisation:
+- Le texte peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], etc.
+- Réutilise EXACTEMENT les mêmes marqueurs. N'en invente JAMAIS de nouveaux."""
 
-CONTEXTE DU CAHIER DES CHARGES:
-{anon_rfp[:5000] if anon_rfp else "(non disponible)"}
+    if project.ai_context:
+        system_prompt += f"""
 
-Génère un contenu structuré (1-2 pages) qui répond à cette recommandation."""
+Contexte de rédaction (informations sur notre société et notre approche):
+{project.ai_context}"""
+
+    # Build user prompt with all available context
+    user_parts = []
+    if missing_description:
+        user_parts.append(f"ÉLÉMENT MANQUANT IDENTIFIÉ:\nExigence: {anon_rec}\nCe qui manque: {anon_missing}")
+    else:
+        user_parts.append(f"RECOMMANDATION À TRAITER:\n{anon_rec}")
+
+    if anon_rfp:
+        user_parts.append(f"CONTEXTE DU CAHIER DES CHARGES (extraits pertinents):\n{anon_rfp[:5000]}")
+
+    if anon_old_response:
+        user_parts.append(f"ÉLÉMENTS DE L'ANCIENNE RÉPONSE (à exploiter et adapter):\n{anon_old_response[:5000]}")
+
+    if anon_existing and chapter_title:
+        user_parts.append(
+            f"CONTENU ACTUEL DU CHAPITRE \"{chapter_title}\" (ne pas répéter, compléter):\n{anon_existing[:3000]}"
+        )
+
+    user_parts.append(
+        "Génère un contenu structuré (1-2 pages) qui comble cette lacune. "
+        "Le contenu doit s'intégrer naturellement dans le mémoire technique."
+    )
+
+    user_prompt = "\n\n".join(user_parts)
 
     try:
         content = await ai_service.generate(system_prompt, user_prompt, max_tokens=4096)
@@ -2216,7 +2279,7 @@ Génère un contenu structuré (1-2 pages) qui répond à cette recommandation."
             chapter.content = (chapter.content or "") + separator + content
             await db.commit()
 
-    return {"content": content}
+    return {"content": content, "chapter_id": chapter_id}
 
 
 @router.get("/{project_id}/compliance-analysis/export-pdf")

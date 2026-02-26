@@ -310,10 +310,15 @@ export class ApiService {
     return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/compliance-analysis-status`);
   }
 
-  generateRecommendationContent(projectId: string, recommendation: string, chapterId?: string): Observable<{ content: string }> {
-    return this.http.post<{ content: string }>(
+  generateRecommendationContent(
+    projectId: string,
+    recommendation: string,
+    chapterId?: string,
+    missingDescription?: string,
+  ): Observable<{ content: string; chapter_id?: string }> {
+    return this.http.post<{ content: string; chapter_id?: string }>(
       `${this.baseUrl}/projects/${projectId}/compliance-analysis/generate-recommendation`,
-      { recommendation, chapter_id: chapterId }
+      { recommendation, chapter_id: chapterId, missing_description: missingDescription }
     );
   }
 
