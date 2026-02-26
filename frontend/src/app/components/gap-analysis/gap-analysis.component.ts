@@ -23,6 +23,11 @@ import { GapAnalysis } from '../../models/report.model';
       <div class="page-header">
         <button mat-icon-button [routerLink]="['/project', projectId]"><mat-icon>arrow_back</mat-icon></button>
         <h1>Analyse des écarts</h1>
+        <button mat-stroked-button (click)="exportPdf()" [disabled]="!analysis || analyzing || exportingPdf">
+          <mat-spinner *ngIf="exportingPdf" diameter="18"></mat-spinner>
+          <mat-icon *ngIf="!exportingPdf">picture_as_pdf</mat-icon>
+          Export PDF
+        </button>
         <button mat-raised-button color="primary" (click)="runAnalysis()" [disabled]="analyzing">
           <mat-spinner *ngIf="analyzing" diameter="18"></mat-spinner>
           <mat-icon *ngIf="!analyzing">compare_arrows</mat-icon>
@@ -145,6 +150,7 @@ export class GapAnalysisComponent implements OnInit, OnDestroy {
   analysis: GapAnalysis | null = null;
   analyzing = false;
   loadingExisting = false;
+  exportingPdf = false;
   error = '';
   analysisProgress: { status: string; step: string; progress: number; message: string } | null = null;
   private pollSub: Subscription | null = null;
@@ -193,6 +199,26 @@ export class GapAnalysisComponent implements OnInit, OnDestroy {
         this.error = err.error?.detail || 'Erreur d\'analyse';
         this.analyzing = false;
         this.analysisProgress = null;
+      },
+    });
+  }
+
+  exportPdf(): void {
+    this.exportingPdf = true;
+    this.api.exportGapAnalysisPdf(this.projectId).subscribe({
+      next: (blob) => {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'analyse_ecarts.pdf';
+        a.click();
+        window.URL.revokeObjectURL(url);
+        this.exportingPdf = false;
+        this.snackBar.open('PDF exporte avec succes', 'OK', { duration: 3000 });
+      },
+      error: () => {
+        this.exportingPdf = false;
+        this.snackBar.open('Erreur lors de l\'export PDF', 'OK', { duration: 3000 });
       },
     });
   }

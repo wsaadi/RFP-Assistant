@@ -321,6 +321,10 @@ export class ApiService {
     return this.http.get(`${this.baseUrl}/projects/${projectId}/compliance-analysis/export-pdf`, { responseType: 'blob' });
   }
 
+  exportGapAnalysisPdf(projectId: string): Observable<Blob> {
+    return this.http.get(`${this.baseUrl}/projects/${projectId}/gap-analysis/export-pdf`, { responseType: 'blob' });
+  }
+
   addImprovementAxis(projectId: string, content: string, source: string = ''): Observable<any> {
     return this.http.post(`${this.baseUrl}/projects/${projectId}/improvement-axes`, { content, source });
   }
