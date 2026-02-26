@@ -60,6 +60,38 @@ REGEX_PATTERNS = {
     EntityType.PHONE: r'(?:\+33|0)\s*[1-9](?:[\s.-]*\d{2}){4}',
 }
 
+# Regex to catch uppercase acronyms (3-6 chars) that GLiNER often misses for
+# short company/organization names (EDF, SNCF, RATP, ENGIE, …).
+# Applied as a second-pass after GLiNER + REGEX_PATTERNS.
+_ACRONYM_RE = re.compile(r'\b[A-Z][A-Z0-9]{2,5}\b')
+
+# Stoplist of uppercase acronyms that are NOT sensitive entities.
+# These are common French/English abbreviations found in RFP documents.
+_ACRONYM_STOPLIST: set = {
+    # RFP / procurement terms
+    "AOR", "BPU", "CCTP", "CCP", "DCE", "DQE", "DPGF", "ATTRI", "NOTI",
+    # Administrative forms
+    "DC1", "DC2", "DC3", "DC4",
+    # Legal forms (not sensitive — generic terms)
+    "SAS", "SARL", "SCI", "EURL", "PME", "TPE", "ETI",
+    # Tax / finance
+    "TVA", "HT0", "TTC", "EUR",
+    # Tech / IT common
+    "API", "URL", "SQL", "CSS", "HTML", "HTTP", "HTTPS", "JSON", "XML",
+    "CSV", "USB", "RAM", "CPU", "GPU", "SSD", "LAN", "WAN", "VPN",
+    "PDF", "DOCX", "XLSX",
+    # French admin / regulation
+    "RGPD", "CNIL", "DREAL", "DIRECCTE",
+    "CDI", "CDD", "RTT", "CSE",
+    # Generic abbreviations
+    "RSE", "QSE", "HSE", "SST", "EPI",
+    "FAQ", "QCM", "REX",
+    "NFC", "IOT", "ERP", "CRM", "PLM", "BIM",
+    # Chapter / document markers the AI uses
+    "ENTREPRISE", "PERSONNE", "EMAIL", "TELEPHONE", "ADRESSE",
+    "CODE", "PROJET", "SOLUTION", "DATE", "MONTANT", "ENTITE",
+}
+
 
 class AnonymizationService:
     """Service for anonymizing/pseudonymizing sensitive content."""
@@ -109,6 +141,10 @@ class AnonymizationService:
     # French/technical text can reach ~2.5 tokens/word, so 150 words ≈ 375 tokens
     _GLINER_SEGMENT_WORDS = 150
     _GLINER_OVERLAP_WORDS = 20
+    # Confidence threshold for GLiNER predictions.
+    # 0.3 gives better recall on short entities (acronyms like EDF, SNCF) while
+    # keeping acceptable precision.
+    _GLINER_THRESHOLD = 0.3
 
     @classmethod
     def _predict_on_segments(cls, model, text: str) -> List[Tuple[str, str, int, int]]:
@@ -117,7 +153,7 @@ class AnonymizationService:
         word_spans = [(m.start(), m.end()) for m in re.finditer(r'\S+', text)]
 
         if len(word_spans) <= cls._GLINER_SEGMENT_WORDS:
-            predictions = model.predict_entities(text, GLINER_LABELS, threshold=0.4)
+            predictions = model.predict_entities(text, GLINER_LABELS, threshold=cls._GLINER_THRESHOLD)
             return [
                 (p["text"], p["label"], p["start"], p["end"])
                 for p in predictions
@@ -133,7 +169,7 @@ class AnonymizationService:
             seg_char_end = span_slice[-1][1]
             segment_text = text[seg_char_start:seg_char_end]
 
-            predictions = model.predict_entities(segment_text, GLINER_LABELS, threshold=0.4)
+            predictions = model.predict_entities(segment_text, GLINER_LABELS, threshold=cls._GLINER_THRESHOLD)
             for pred in predictions:
                 abs_start = seg_char_start + pred["start"]
                 abs_end = seg_char_start + pred["end"]
@@ -176,7 +212,7 @@ class AnonymizationService:
                 segment_texts = [s[2] for s in all_segments]
                 try:
                     batch_predictions = model.predict_entities(
-                        segment_texts, GLINER_LABELS, threshold=0.4
+                        segment_texts, GLINER_LABELS, threshold=cls._GLINER_THRESHOLD
                     )
                     # predict_entities returns list-of-lists when given a list input
                     for (text_idx, seg_start, _), preds in zip(all_segments, batch_predictions):
@@ -201,6 +237,18 @@ class AnonymizationService:
                         results[text_idx].append(
                             (matched_text, entity_type.value, match.start(), match.end())
                         )
+
+            # Acronym catch-up: uppercase 3-6 char words not in stoplist
+            already_covered = {e[0] for e in results[text_idx]}
+            for match in _ACRONYM_RE.finditer(text):
+                acr = match.group()
+                if acr in _ACRONYM_STOPLIST or acr in already_covered:
+                    continue
+                results[text_idx].append(
+                    (acr, EntityType.COMPANY.value, match.start(), match.end())
+                )
+                already_covered.add(acr)
+
             results[text_idx].sort(key=lambda x: x[2])
 
         return results
@@ -233,6 +281,16 @@ class AnonymizationService:
                         match.start(),
                         match.end(),
                     ))
+
+        # Third pass: catch uppercase acronyms (likely company/org names) that
+        # GLiNER missed — common for short names like EDF, SNCF, RATP.
+        already_covered = {e[0] for e in entities}
+        for match in _ACRONYM_RE.finditer(text):
+            acr = match.group()
+            if acr in _ACRONYM_STOPLIST or acr in already_covered:
+                continue
+            entities.append((acr, EntityType.COMPANY.value, match.start(), match.end()))
+            already_covered.add(acr)
 
         # Sort by position for consistent processing
         entities.sort(key=lambda x: x[2])

@@ -714,6 +714,37 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
         <!-- AI Tools tab -->
         <mat-tab label="Outils IA">
           <div class="tab-content">
+            <!-- AI Context -->
+            <mat-card class="ai-context-card">
+              <div class="ai-context-header">
+                <div>
+                  <h3><mat-icon>psychology</mat-icon> Contexte IA du projet</h3>
+                  <p class="ai-context-hint">Ce contexte sera utilisé par l'IA pour orienter la rédaction de tous les contenus (chapitres, enrichissement, etc.)</p>
+                </div>
+                <button mat-icon-button (click)="editingAiContext = !editingAiContext" [matTooltip]="editingAiContext ? 'Annuler' : 'Modifier'">
+                  <mat-icon>{{ editingAiContext ? 'close' : 'edit' }}</mat-icon>
+                </button>
+              </div>
+              <div *ngIf="!editingAiContext && project.ai_context" class="ai-context-display">
+                <pre class="ai-context-content">{{ project.ai_context }}</pre>
+              </div>
+              <div *ngIf="!editingAiContext && !project.ai_context" class="ai-context-empty">
+                <mat-icon>info_outline</mat-icon>
+                <span>Aucun contexte défini. <a (click)="editingAiContext = true" class="link">Ajouter un contexte</a> pour guider l'IA dans la rédaction.</span>
+              </div>
+              <div *ngIf="editingAiContext" class="ai-context-edit">
+                <mat-form-field appearance="outline" class="full-width">
+                  <mat-label>Contexte pour l'IA</mat-label>
+                  <textarea matInput [(ngModel)]="aiContextDraft" rows="4"
+                    placeholder="Ex: Nous sommes une ESN spécialisée en cybersécurité. Notre point fort est notre SOC 24/7 et nos certifications ISO 27001. Le ton doit être technique et rassurant."></textarea>
+                </mat-form-field>
+                <div class="form-actions">
+                  <button mat-button (click)="editingAiContext = false">Annuler</button>
+                  <button mat-raised-button color="primary" (click)="saveAiContext()">Enregistrer</button>
+                </div>
+              </div>
+            </mat-card>
+
             <div class="tools-grid">
               <mat-card class="tool-card" [routerLink]="['/project', projectId, 'gap-analysis']">
                 <mat-icon>compare_arrows</mat-icon>
@@ -935,6 +966,16 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .improvement-form { padding: 24px; margin-top: 16px; }
     .axes-display { padding: 24px; margin-top: 16px; }
     .axes-content { white-space: pre-wrap; font-size: 14px; background: #f5f5f5; padding: 12px; border-radius: 4px; }
+    .ai-context-card { padding: 24px; margin-bottom: 20px; border-left: 4px solid #7c4dff; }
+    .ai-context-header { display: flex; justify-content: space-between; align-items: flex-start; }
+    .ai-context-header h3 { margin: 0; color: #1B3A5C; display: flex; align-items: center; gap: 8px; }
+    .ai-context-header h3 mat-icon { color: #7c4dff; }
+    .ai-context-hint { margin: 4px 0 0; font-size: 13px; color: #666; }
+    .ai-context-display { margin-top: 12px; }
+    .ai-context-content { white-space: pre-wrap; font-size: 14px; background: #f3e8ff; padding: 12px; border-radius: 4px; color: #333; }
+    .ai-context-empty { display: flex; align-items: center; gap: 8px; margin-top: 12px; font-size: 13px; color: #999; }
+    .ai-context-empty .link { color: #7c4dff; cursor: pointer; text-decoration: underline; }
+    .ai-context-edit { margin-top: 12px; }
     .full-width { width: 100%; }
     .form-actions { display: flex; gap: 8px; justify-content: flex-end; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
@@ -1107,6 +1148,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   showImprovementForm = false;
   improvementContent = '';
   improvementSource = '';
+  editingAiContext = false;
+  aiContextDraft = '';
   private pollSub: Subscription | null = null;
 
   // Cached computed data to avoid method calls in template (prevents change detection loops)
@@ -1233,6 +1276,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.api.getProject(this.projectId).subscribe({
       next: (p) => {
         this.project = p;
+        this.aiContextDraft = p.ai_context || '';
         this.loading = false;
         if (p.enabled_categories && p.enabled_categories.length) {
           this.categories = this.allCategories.filter(c => p.enabled_categories.includes(c.value));
@@ -2072,6 +2116,17 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.improvementSource = '';
         this.loadAll();
       },
+    });
+  }
+
+  saveAiContext(): void {
+    this.api.updateProject(this.projectId, { ai_context: this.aiContextDraft }).subscribe({
+      next: () => {
+        this.snackBar.open('Contexte IA enregistré', 'OK', { duration: 2000 });
+        this.project.ai_context = this.aiContextDraft;
+        this.editingAiContext = false;
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
     });
   }
 

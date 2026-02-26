@@ -345,6 +345,7 @@ Analyse les écarts entre ces deux appels d'offres."""
         old_response_content: str = "",
         gap_analysis: Optional[Dict] = None,
         on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+        ai_context: str = "",
     ) -> List[Dict]:
         """Generate the complete response structure by deeply analyzing the new RFP,
         comparing with the old RFP, and leveraging the old response."""
@@ -434,6 +435,9 @@ Valeurs de delta:
                 gap_summary.append(f"  [INCHANGÉ] {req.get('title', '')}")
             if gap_summary:
                 parts.append(f"ANALYSE DES ÉCARTS ANCIEN/NOUVEAU AO:\n" + "\n".join(gap_summary))
+
+        if ai_context:
+            parts.append(f"CONTEXTE DE RÉDACTION (fourni par l'utilisateur pour orienter la réponse):\n{ai_context}")
 
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += "\n\nAnalyse en profondeur le nouvel AO et génère la structure complète et idéale de la réponse."
@@ -616,6 +620,7 @@ Format: texte structuré avec des titres markdown. Pas de JSON."""
         old_response_content: str = "",
         rfp_summary: str = "",
         on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+        ai_context: str = "",
     ) -> List[Dict]:
         """Generate chapter structure for a specific response document (redaction type only)."""
         system_prompt = f"""Tu es un expert senior en réponse aux appels d'offres.
@@ -666,6 +671,8 @@ Réponds UNIQUEMENT au format JSON suivant (sans markdown):
             parts.append(f"CONTENU DE L'ANCIEN AO:\n{old_rfp_content[:30000]}")
         if old_response_content:
             parts.append(f"ANCIENNE RÉPONSE:\n{old_response_content[:30000]}")
+        if ai_context:
+            parts.append(f"CONTEXTE DE RÉDACTION (fourni par l'utilisateur pour orienter la réponse):\n{ai_context}")
 
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += (
@@ -694,6 +701,7 @@ Réponds UNIQUEMENT au format JSON suivant (sans markdown):
         context_chunks: str = "",
         improvement_axes: str = "",
         notes: str = "",
+        ai_context: str = "",
     ) -> str:
         """Generate or enrich content for a chapter."""
         system_prompt = """Tu es un rédacteur expert en réponses aux appels d'offres.
@@ -716,6 +724,12 @@ Formatage:
 - Utilise **gras** pour les termes importants
 - Utilise des listes à puces avec - pour les énumérations
 - Structure en paragraphes clairs et aérés"""
+
+        if ai_context:
+            system_prompt += f"""
+
+Contexte de rédaction fourni par l'utilisateur (utilise-le pour orienter le ton, le style et le contenu):
+{ai_context}"""
 
         parts = [f"Chapitre: {chapter_title}"]
         if chapter_description:
@@ -742,6 +756,7 @@ Formatage:
         chapter_title: str,
         rfp_requirement: str = "",
         improvement_axes: str = "",
+        ai_context: str = "",
     ) -> str:
         """Enrich existing chapter content."""
         system_prompt = """Tu es un rédacteur expert en réponses aux appels d'offres.
@@ -764,6 +779,12 @@ Formatage:
 - Utilise des sous-titres avec ## pour les sections
 - Utilise **gras** pour les termes importants
 - Utilise des listes à puces avec - pour les énumérations"""
+
+        if ai_context:
+            system_prompt += f"""
+
+Contexte de rédaction fourni par l'utilisateur (utilise-le pour orienter le ton, le style et le contenu):
+{ai_context}"""
 
         user_prompt = f"""Chapitre: {chapter_title}
 Exigence AO: {rfp_requirement}
@@ -855,6 +876,7 @@ Décris cette image et suggère des tags et chapitres pertinents."""
         new_rfp_content: str,
         old_response_content: str = "",
         on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+        ai_context: str = "",
     ) -> str:
         """Generate fill-in content/instructions for a completion-type document (BPU, DQE, forms, etc.).
 
@@ -907,6 +929,8 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
         parts = [f"CONTENU DE L'APPEL D'OFFRES:\n{new_rfp_content[:60000]}"]
         if old_response_content:
             parts.append(f"ANCIENNE RÉPONSE (pour référence):\n{old_response_content[:30000]}")
+        if ai_context:
+            parts.append(f"CONTEXTE DE RÉDACTION (fourni par l'utilisateur pour orienter la réponse):\n{ai_context}")
 
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += (
@@ -1122,7 +1146,7 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
 
         return data
 
-    async def execute_custom_prompt(self, content: str, prompt: str, context: str = "") -> str:
+    async def execute_custom_prompt(self, content: str, prompt: str, context: str = "", ai_context: str = "") -> str:
         """Execute a custom user prompt on content."""
         system_prompt = """Tu es un assistant expert en rédaction de réponses aux appels d'offres.
 Applique exactement l'instruction de l'utilisateur au contenu fourni.
@@ -1138,6 +1162,12 @@ Formatage:
 - Utilise des sous-titres avec ## pour les sections
 - Utilise **gras** pour les termes importants
 - Utilise des listes à puces avec - pour les énumérations"""
+
+        if ai_context:
+            system_prompt += f"""
+
+Contexte de rédaction fourni par l'utilisateur (utilise-le pour orienter le ton, le style et le contenu):
+{ai_context}"""
 
         user_prompt = f"""Contexte: {context}
 

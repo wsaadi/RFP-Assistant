@@ -67,3 +67,13 @@ async def init_db():
             ))
         except Exception:
             logger.debug("enabled_categories column already exists or ALTER TABLE not supported")
+
+    # Add ai_context column for project-level AI context
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "ALTER TABLE rfp_projects ADD COLUMN IF NOT EXISTS "
+                "ai_context TEXT DEFAULT ''"
+            ))
+        except Exception:
+            logger.debug("ai_context column already exists or ALTER TABLE not supported")
