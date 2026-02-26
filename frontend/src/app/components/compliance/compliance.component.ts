@@ -14,14 +14,17 @@ import { MatDividerModule } from '@angular/material/divider';
 import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
-import { ComplianceAnalysis, Chapter } from '../../models/report.model';
+import { ComplianceAnalysis } from '../../models/report.model';
 import { renderMarkdown } from '../../services/markdown.service';
 
-/** Tracks the result of an integration into a chapter */
-interface IntegrationResult {
-  chapterId: string;
-  chapterTitle: string;
-  content: string;
+interface RecGenProgress {
+  status: string;
+  step: string;
+  progress: number;
+  message: string;
+  chapterId?: string;
+  chapterTitle?: string;
+  content?: string;
 }
 
 @Component({
@@ -117,7 +120,16 @@ interface IntegrationResult {
 
         <!-- Missing elements with auto-integration -->
         <mat-card *ngIf="analysis.missing_elements?.length" class="section-card missing">
-          <h3><mat-icon>warning</mat-icon> Elements manquants ({{ analysis.missing_elements.length }})</h3>
+          <h3>
+            <mat-icon>warning</mat-icon> Elements manquants ({{ analysis.missing_elements.length }})
+            <span class="spacer"></span>
+            <button mat-raised-button color="accent" (click)="integrateAllMissing()"
+              [disabled]="allMissingLaunched()"
+              matTooltip="Lancer l'integration de tous les elements manquants en parallele">
+              <mat-icon>playlist_add</mat-icon>
+              Tout integrer
+            </button>
+          </h3>
           <div class="req-list">
             <div *ngFor="let item of analysis.missing_elements; let mi = index" class="req-item req-border-missing">
               <div class="req-header">
@@ -131,24 +143,37 @@ interface IntegrationResult {
                 </span>
               </div>
 
-              <!-- Integration button -->
-              <div class="integrate-actions" *ngIf="!missingResults[mi]">
+              <!-- Integration button (hidden when processing or done) -->
+              <div class="integrate-actions" *ngIf="!missingProgress[mi] && !missingDone[mi]">
                 <button mat-raised-button color="accent"
                   (click)="integrateMissing(mi, item.requirement, item.description)"
-                  [disabled]="generatingMissing === mi"
                   matTooltip="L'IA identifie le meilleur chapitre et y ajoute le contenu manquant">
-                  <mat-spinner *ngIf="generatingMissing === mi" diameter="16"></mat-spinner>
-                  <mat-icon *ngIf="generatingMissing !== mi">add_circle</mat-icon>
+                  <mat-icon>add_circle</mat-icon>
                   Integrer au memoire
                 </button>
               </div>
 
+              <!-- Progress bar -->
+              <div *ngIf="missingProgress[mi]" class="gen-progress-section">
+                <div class="gen-progress-header">
+                  <mat-icon *ngIf="missingProgress[mi].status === 'queued'" class="queued-icon">schedule</mat-icon>
+                  <mat-spinner *ngIf="missingProgress[mi].status !== 'queued'" diameter="16"></mat-spinner>
+                  <span>{{ missingProgress[mi].message }}</span>
+                </div>
+                <mat-progress-bar
+                  [mode]="missingProgress[mi].progress ? 'determinate' : 'indeterminate'"
+                  [value]="missingProgress[mi].progress"
+                  [color]="missingProgress[mi].status === 'queued' ? 'primary' : 'accent'">
+                </mat-progress-bar>
+                <div *ngIf="missingProgress[mi].progress" class="gen-progress-pct">{{ missingProgress[mi].progress }}%</div>
+              </div>
+
               <!-- Success result -->
-              <div *ngIf="missingResults[mi]" class="integration-result">
+              <div *ngIf="missingDone[mi]" class="integration-result">
                 <div class="integration-success">
                   <mat-icon>check_circle</mat-icon>
-                  <span>Contenu ajoute dans : <strong>{{ missingResults[mi].chapterTitle }}</strong></span>
-                  <a mat-button [routerLink]="['/project', projectId, 'chapter', missingResults[mi].chapterId]" color="primary">
+                  <span>Contenu ajoute dans : <strong>{{ missingDone[mi].chapterTitle }}</strong></span>
+                  <a mat-button [routerLink]="['/project', projectId, 'chapter', missingDone[mi].chapterId]" color="primary">
                     <mat-icon>open_in_new</mat-icon> Voir
                   </a>
                 </div>
@@ -156,11 +181,11 @@ interface IntegrationResult {
                   <div class="generated-header">
                     <mat-icon>description</mat-icon>
                     <span>Contenu genere et integre</span>
-                    <button mat-icon-button (click)="copyToClipboard(missingResults[mi].content)" matTooltip="Copier">
+                    <button mat-icon-button (click)="copyToClipboard(missingDone[mi].content)" matTooltip="Copier">
                       <mat-icon>content_copy</mat-icon>
                     </button>
                   </div>
-                  <div class="generated-body" [innerHTML]="renderMarkdown(missingResults[mi].content)"></div>
+                  <div class="generated-body" [innerHTML]="renderMarkdown(missingDone[mi].content)"></div>
                 </div>
               </div>
             </div>
@@ -169,39 +194,59 @@ interface IntegrationResult {
 
         <!-- Recommendations with auto-integration -->
         <mat-card *ngIf="analysis.recommendations?.length" class="section-card recommendations-card">
-          <h3><mat-icon>lightbulb</mat-icon> Recommandations</h3>
+          <h3>
+            <mat-icon>lightbulb</mat-icon> Recommandations
+            <span class="spacer"></span>
+            <button mat-raised-button color="accent" (click)="integrateAllRecs()"
+              [disabled]="allRecsLaunched()"
+              matTooltip="Lancer l'integration de toutes les recommandations en parallele">
+              <mat-icon>playlist_add</mat-icon>
+              Tout integrer
+            </button>
+          </h3>
           <div *ngFor="let rec of analysis.recommendations; let i = index" class="recommendation-item">
             <div class="rec-header">
               <mat-icon class="rec-icon">arrow_forward</mat-icon>
               <span class="rec-text">{{ rec }}</span>
             </div>
 
-            <!-- Integration buttons -->
-            <div class="integrate-actions rec-integrate" *ngIf="!recResults[i]">
+            <!-- Integration buttons (hidden when processing or done) -->
+            <div class="integrate-actions rec-integrate" *ngIf="!recProgress[i] && !recDone[i]">
               <button mat-raised-button color="accent"
                 (click)="integrateRec(i, rec)"
-                [disabled]="generatingRec === i"
                 matTooltip="L'IA identifie le meilleur chapitre et y ajoute le contenu">
-                <mat-spinner *ngIf="generatingRec === i && recInjectMode[i]" diameter="16"></mat-spinner>
-                <mat-icon *ngIf="generatingRec !== i || !recInjectMode[i]">add_circle</mat-icon>
+                <mat-icon>add_circle</mat-icon>
                 Integrer au memoire
               </button>
               <button mat-stroked-button
                 (click)="previewRec(i, rec)"
-                [disabled]="generatingRec === i"
                 matTooltip="Generer un apercu du contenu sans l'ajouter a un chapitre">
-                <mat-spinner *ngIf="generatingRec === i && !recInjectMode[i]" diameter="16"></mat-spinner>
-                <mat-icon *ngIf="generatingRec !== i || recInjectMode[i]">visibility</mat-icon>
+                <mat-icon>visibility</mat-icon>
                 Apercu
               </button>
             </div>
 
-            <!-- Success result (when injected) -->
-            <div *ngIf="recResults[i]" class="integration-result">
+            <!-- Progress bar -->
+            <div *ngIf="recProgress[i]" class="gen-progress-section rec-integrate">
+              <div class="gen-progress-header">
+                <mat-icon *ngIf="recProgress[i].status === 'queued'" class="queued-icon">schedule</mat-icon>
+                <mat-spinner *ngIf="recProgress[i].status !== 'queued'" diameter="16"></mat-spinner>
+                <span>{{ recProgress[i].message }}</span>
+              </div>
+              <mat-progress-bar
+                [mode]="recProgress[i].progress ? 'determinate' : 'indeterminate'"
+                [value]="recProgress[i].progress"
+                [color]="recProgress[i].status === 'queued' ? 'primary' : 'accent'">
+              </mat-progress-bar>
+              <div *ngIf="recProgress[i].progress" class="gen-progress-pct">{{ recProgress[i].progress }}%</div>
+            </div>
+
+            <!-- Success result (injected) -->
+            <div *ngIf="recDone[i]" class="integration-result">
               <div class="integration-success">
                 <mat-icon>check_circle</mat-icon>
-                <span>Contenu ajoute dans : <strong>{{ recResults[i].chapterTitle }}</strong></span>
-                <a mat-button [routerLink]="['/project', projectId, 'chapter', recResults[i].chapterId]" color="primary">
+                <span>Contenu ajoute dans : <strong>{{ recDone[i].chapterTitle }}</strong></span>
+                <a mat-button [routerLink]="['/project', projectId, 'chapter', recDone[i].chapterId]" color="primary">
                   <mat-icon>open_in_new</mat-icon> Voir
                 </a>
               </div>
@@ -209,16 +254,16 @@ interface IntegrationResult {
                 <div class="generated-header">
                   <mat-icon>description</mat-icon>
                   <span>Contenu genere et integre</span>
-                  <button mat-icon-button (click)="copyToClipboard(recResults[i].content)" matTooltip="Copier">
+                  <button mat-icon-button (click)="copyToClipboard(recDone[i].content)" matTooltip="Copier">
                     <mat-icon>content_copy</mat-icon>
                   </button>
                 </div>
-                <div class="generated-body" [innerHTML]="renderMarkdown(recResults[i].content)"></div>
+                <div class="generated-body" [innerHTML]="renderMarkdown(recDone[i].content)"></div>
               </div>
             </div>
 
             <!-- Preview-only content (not injected) -->
-            <div *ngIf="!recResults[i] && recPreviews[i]" class="generated-content">
+            <div *ngIf="!recDone[i] && !recProgress[i] && recPreviews[i]" class="generated-content rec-integrate">
               <div class="generated-header">
                 <mat-icon>description</mat-icon>
                 <span>Apercu du contenu</span>
@@ -270,6 +315,7 @@ interface IntegrationResult {
     .score-details h2 { margin: 0 0 8px; }
     .section-card { padding: 20px; margin-bottom: 16px; }
     .section-card h3 { display: flex; align-items: center; gap: 8px; color: #1B3A5C; margin-bottom: 16px; }
+    .spacer { flex: 1; }
     .missing h3 { color: #c62828; }
     .coverage-complete { color: #4caf50; }
     .coverage-partial { color: #ff9800; }
@@ -313,7 +359,7 @@ interface IntegrationResult {
     .empty-card p { margin: 0; color: #888; font-size: 14px; }
     .error-card { padding: 24px; display: flex; align-items: center; gap: 12px; color: #c62828; }
 
-    /* Integration actions */
+    /* Integration actions & progress */
     .integrate-actions { margin: 12px 0 0 34px; display: flex; gap: 10px; flex-wrap: wrap; }
     .rec-integrate { margin-left: 34px; margin-top: 10px; }
     .integration-result { margin: 12px 0 0 34px; }
@@ -321,6 +367,11 @@ interface IntegrationResult {
     .integration-success mat-icon { font-size: 18px; width: 18px; height: 18px; flex-shrink: 0; }
     .integration-success span { flex: 1; }
     .integration-success a { font-size: 13px; flex-shrink: 0; }
+
+    .gen-progress-section { margin: 10px 0 0 34px; }
+    .gen-progress-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; color: #555; }
+    .gen-progress-pct { text-align: right; font-size: 12px; color: #888; margin-top: 3px; }
+    .queued-icon { font-size: 18px; width: 18px; height: 18px; color: #1565c0; }
   `],
 })
 export class ComplianceComponent implements OnInit, OnDestroy {
@@ -334,15 +385,17 @@ export class ComplianceComponent implements OnInit, OnDestroy {
   exportingPdf = false;
   private pollSub: Subscription | null = null;
 
-  // Recommendations state
-  generatingRec: number | null = null;
-  recResults: Record<number, IntegrationResult> = {};
-  recPreviews: Record<number, string> = {};
-  recInjectMode: Record<number, boolean> = {};
+  // Per-item progress tracking (key = index)
+  missingProgress: Record<number, RecGenProgress> = {};
+  missingDone: Record<number, { chapterId: string; chapterTitle: string; content: string }> = {};
+  private missingTaskIds: Record<number, string> = {};
+  private missingPollSubs: Record<number, Subscription> = {};
 
-  // Missing elements state
-  generatingMissing: number | null = null;
-  missingResults: Record<number, IntegrationResult> = {};
+  recProgress: Record<number, RecGenProgress> = {};
+  recDone: Record<number, { chapterId: string; chapterTitle: string; content: string }> = {};
+  recPreviews: Record<number, string> = {};
+  private recTaskIds: Record<number, string> = {};
+  private recPollSubs: Record<number, Subscription> = {};
 
   get scoreClass(): string {
     if (!this.analysis) return '';
@@ -360,7 +413,6 @@ export class ComplianceComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
     this.loadExisting();
-    // Resume polling if analysis was already running
     this.api.getComplianceAnalysisStatus(this.projectId).subscribe({
       next: (status) => {
         if (status.status === 'running') {
@@ -374,6 +426,8 @@ export class ComplianceComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.stopPolling();
+    for (const sub of Object.values(this.missingPollSubs)) sub.unsubscribe();
+    for (const sub of Object.values(this.recPollSubs)) sub.unsubscribe();
   }
 
   loadExisting(): void {
@@ -390,14 +444,14 @@ export class ComplianceComponent implements OnInit, OnDestroy {
   runAnalysis(): void {
     this.analyzing = true;
     this.error = '';
-    this.recResults = {};
+    this.missingProgress = {};
+    this.missingDone = {};
+    this.recProgress = {};
+    this.recDone = {};
     this.recPreviews = {};
-    this.missingResults = {};
     this.analysisProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement...' };
     this.api.analyzeCompliance(this.projectId).subscribe({
-      next: () => {
-        this.startPolling();
-      },
+      next: () => this.startPolling(),
       error: (err) => {
         this.error = err.error?.detail || 'Erreur';
         this.analyzing = false;
@@ -434,74 +488,163 @@ export class ComplianceComponent implements OnInit, OnDestroy {
     this.pollSub = null;
   }
 
-  /** Auto-detect best chapter and inject missing element content */
+  // ── Missing elements ──
+
   integrateMissing(index: number, requirement: string, description: string): void {
-    this.generatingMissing = index;
-    this.api.generateRecommendationContent(this.projectId, requirement, {
-      missingDescription: description,
-      inject: true,
+    if (this.missingProgress[index] || this.missingDone[index]) return;
+
+    const taskId = `missing-${Date.now()}-${index}`;
+    this.missingTaskIds[index] = taskId;
+    this.missingProgress[index] = { status: 'queued', step: 'queued', progress: 0, message: 'En file d\'attente...' };
+
+    this.api.launchRecommendationGeneration(this.projectId, requirement, taskId, {
+      missingDescription: description, inject: true,
     }).subscribe({
-      next: (res) => {
-        this.missingResults[index] = {
-          chapterId: res.chapter_id || '',
-          chapterTitle: res.chapter_title || 'Chapitre',
-          content: res.content,
-        };
-        this.generatingMissing = null;
-        this.snackBar.open(
-          `Contenu ajoute dans "${res.chapter_title}"`, 'OK', { duration: 4000 }
-        );
-      },
+      next: () => this._startRecPolling('missing', index, taskId),
       error: (err) => {
-        this.snackBar.open(err.error?.detail || 'Erreur de generation', 'OK', { duration: 4000 });
-        this.generatingMissing = null;
+        delete this.missingProgress[index];
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 4000 });
       },
     });
   }
 
-  /** Auto-detect best chapter and inject recommendation content */
+  integrateAllMissing(): void {
+    if (!this.analysis?.missing_elements) return;
+    for (let i = 0; i < this.analysis.missing_elements.length; i++) {
+      if (!this.missingProgress[i] && !this.missingDone[i]) {
+        const item = this.analysis.missing_elements[i];
+        this.integrateMissing(i, item.requirement, item.description);
+      }
+    }
+  }
+
+  allMissingLaunched(): boolean {
+    if (!this.analysis?.missing_elements) return true;
+    return this.analysis.missing_elements.every((_, i) => !!this.missingProgress[i] || !!this.missingDone[i]);
+  }
+
+  // ── Recommendations ──
+
   integrateRec(index: number, recommendation: string): void {
-    this.generatingRec = index;
-    this.recInjectMode[index] = true;
-    this.api.generateRecommendationContent(this.projectId, recommendation, {
+    if (this.recProgress[index] || this.recDone[index]) return;
+
+    const taskId = `rec-${Date.now()}-${index}`;
+    this.recTaskIds[index] = taskId;
+    this.recProgress[index] = { status: 'queued', step: 'queued', progress: 0, message: 'En file d\'attente...' };
+
+    this.api.launchRecommendationGeneration(this.projectId, recommendation, taskId, {
       inject: true,
     }).subscribe({
-      next: (res) => {
-        this.recResults[index] = {
-          chapterId: res.chapter_id || '',
-          chapterTitle: res.chapter_title || 'Chapitre',
-          content: res.content,
-        };
-        this.generatingRec = null;
-        this.snackBar.open(
-          `Contenu ajoute dans "${res.chapter_title}"`, 'OK', { duration: 4000 }
-        );
-      },
+      next: () => this._startRecPolling('rec', index, taskId),
       error: (err) => {
-        this.snackBar.open(err.error?.detail || 'Erreur de generation', 'OK', { duration: 4000 });
-        this.generatingRec = null;
+        delete this.recProgress[index];
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 4000 });
       },
     });
   }
 
-  /** Generate a preview of recommendation content without injecting */
   previewRec(index: number, recommendation: string): void {
-    this.generatingRec = index;
-    this.recInjectMode[index] = false;
-    this.api.generateRecommendationContent(this.projectId, recommendation, {
+    if (this.recProgress[index]) return;
+
+    const taskId = `rec-preview-${Date.now()}-${index}`;
+    this.recTaskIds[index] = taskId;
+    this.recProgress[index] = { status: 'queued', step: 'queued', progress: 0, message: 'En file d\'attente...' };
+
+    this.api.launchRecommendationGeneration(this.projectId, recommendation, taskId, {
       inject: false,
     }).subscribe({
-      next: (res) => {
-        this.recPreviews[index] = res.content;
-        this.generatingRec = null;
-        this.snackBar.open('Apercu genere', 'OK', { duration: 2000 });
-      },
+      next: () => this._startRecPolling('rec-preview', index, taskId),
       error: (err) => {
-        this.snackBar.open(err.error?.detail || 'Erreur de generation', 'OK', { duration: 4000 });
-        this.generatingRec = null;
+        delete this.recProgress[index];
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 4000 });
       },
     });
   }
+
+  integrateAllRecs(): void {
+    if (!this.analysis?.recommendations) return;
+    for (let i = 0; i < this.analysis.recommendations.length; i++) {
+      if (!this.recProgress[i] && !this.recDone[i]) {
+        this.integrateRec(i, this.analysis.recommendations[i]);
+      }
+    }
+  }
+
+  allRecsLaunched(): boolean {
+    if (!this.analysis?.recommendations) return true;
+    return this.analysis.recommendations.every((_, i) => !!this.recProgress[i] || !!this.recDone[i]);
+  }
+
+  // ── Generic polling for recommendation generation tasks ──
+
+  private _startRecPolling(type: 'missing' | 'rec' | 'rec-preview', index: number, taskId: string): void {
+    const pollSubs = type === 'missing' ? this.missingPollSubs : this.recPollSubs;
+
+    pollSubs[index]?.unsubscribe();
+    pollSubs[index] = timer(500, 1500).pipe(
+      switchMap(() => this.api.getRecommendationGenStatus(this.projectId, taskId))
+    ).subscribe({
+      next: (status) => {
+        if (status.status === 'completed') {
+          pollSubs[index]?.unsubscribe();
+          delete pollSubs[index];
+
+          if (type === 'missing') {
+            delete this.missingProgress[index];
+            this.missingDone[index] = {
+              chapterId: status.chapter_id || '',
+              chapterTitle: status.chapter_title || 'Chapitre',
+              content: status.content || '',
+            };
+          } else if (type === 'rec') {
+            delete this.recProgress[index];
+            this.recDone[index] = {
+              chapterId: status.chapter_id || '',
+              chapterTitle: status.chapter_title || 'Chapitre',
+              content: status.content || '',
+            };
+          } else {
+            // rec-preview
+            delete this.recProgress[index];
+            this.recPreviews[index] = status.content || '';
+          }
+
+          const msg = type === 'rec-preview'
+            ? 'Apercu genere'
+            : `Contenu integre dans "${status.chapter_title}"`;
+          this.snackBar.open(msg, 'OK', { duration: 3000 });
+
+        } else if (status.status === 'error') {
+          pollSubs[index]?.unsubscribe();
+          delete pollSubs[index];
+          if (type === 'missing') {
+            delete this.missingProgress[index];
+          } else {
+            delete this.recProgress[index];
+          }
+          this.snackBar.open(status.message || 'Erreur de generation', 'OK', { duration: 5000 });
+
+        } else {
+          // running / queued → update progress
+          const progress: RecGenProgress = {
+            status: status.status,
+            step: status.step,
+            progress: status.progress,
+            message: status.message,
+            chapterId: status.chapter_id,
+            chapterTitle: status.chapter_title,
+          };
+          if (type === 'missing') {
+            this.missingProgress[index] = progress;
+          } else {
+            this.recProgress[index] = progress;
+          }
+        }
+      },
+    });
+  }
+
+  // ── Utilities ──
 
   copyToClipboard(text: string): void {
     navigator.clipboard.writeText(text).then(() => {

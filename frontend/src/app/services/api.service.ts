@@ -310,19 +310,30 @@ export class ApiService {
     return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/compliance-analysis-status`);
   }
 
-  generateRecommendationContent(
+  launchRecommendationGeneration(
     projectId: string,
     recommendation: string,
+    taskId: string,
     options?: { chapterId?: string; missingDescription?: string; inject?: boolean },
-  ): Observable<{ content: string; chapter_id?: string; chapter_title?: string }> {
-    return this.http.post<{ content: string; chapter_id?: string; chapter_title?: string }>(
+  ): Observable<{ task_id: string }> {
+    return this.http.post<{ task_id: string }>(
       `${this.baseUrl}/projects/${projectId}/compliance-analysis/generate-recommendation`,
       {
         recommendation,
+        task_id: taskId,
         chapter_id: options?.chapterId,
         missing_description: options?.missingDescription,
         inject: options?.inject ?? true,
       }
+    );
+  }
+
+  getRecommendationGenStatus(
+    projectId: string,
+    taskId: string,
+  ): Observable<{ status: string; step: string; progress: number; message: string; chapter_id?: string; chapter_title?: string; content?: string }> {
+    return this.http.get<any>(
+      `${this.baseUrl}/projects/${projectId}/compliance-analysis/generate-recommendation-status/${taskId}`
     );
   }
 

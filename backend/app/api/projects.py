@@ -40,6 +40,8 @@ _generation_progress: Dict[str, dict] = {}
 _prefill_progress: Dict[str, dict] = {}
 _gap_analysis_progress: Dict[str, dict] = {}
 _compliance_progress: Dict[str, dict] = {}
+_rec_gen_progress: Dict[str, dict] = {}
+_rec_gen_semaphore = asyncio.Semaphore(3)
 
 
 async def _get_ai_service(workspace_id: uuid.UUID, db: AsyncSession) -> MistralAIService:
@@ -2208,23 +2210,24 @@ async def _find_best_chapter(
 async def generate_recommendation_content(
     project_id: uuid.UUID,
     request: dict,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate chapter content addressing a specific compliance recommendation or missing element.
+    """Launch recommendation content generation as a background task (returns immediately).
 
     Body: {
         "recommendation": "the recommendation or missing element text",
+        "task_id": "unique id from frontend to track this specific generation",
         "chapter_id": "optional override – if omitted the best chapter is auto-detected",
         "missing_description": "optional description of what is missing (for missing elements)",
         "inject": true/false (default true) – whether to inject into the chapter
     }
 
-    The AI automatically identifies the best target chapter based on semantic matching.
-    The generation uses old response documents and RFP context for richer, more relevant content.
-    Returns: {content, chapter_id, chapter_title} so the frontend knows where content was injected.
+    Returns immediately with {task_id}. Poll status via GET .../generate-recommendation-status/{task_id}.
     """
     recommendation = request.get("recommendation", "").strip()
+    task_id = request.get("task_id", str(uuid.uuid4()))
     chapter_id = request.get("chapter_id")
     missing_description = request.get("missing_description", "").strip()
     inject = request.get("inject", True)
@@ -2232,54 +2235,134 @@ async def generate_recommendation_content(
     if not recommendation:
         raise HTTPException(status_code=400, detail="Recommendation manquante")
 
+    # Don't relaunch if already running
+    existing = _rec_gen_progress.get(task_id)
+    if existing and existing.get("status") in ("running", "queued"):
+        return {"task_id": task_id}
+
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    ai_service = await _get_ai_service(project.workspace_id, db)
+    # Quick config check
+    await _get_ai_service(project.workspace_id, db)
 
-    # Get RFP context via vector search
-    rfp_chunks = VectorService.search(
-        str(project_id), recommendation, top_k=5, category_filter="new_rfp"
+    _rec_gen_progress[task_id] = {
+        "status": "queued", "step": "queued", "progress": 0,
+        "message": "En file d'attente...",
+        "chapter_id": None, "chapter_title": None, "content": None,
+    }
+
+    background_tasks.add_task(
+        _run_rec_generation,
+        task_id, project_id, project.workspace_id,
+        recommendation, missing_description, chapter_id, inject,
     )
-    rfp_context = "\n\n".join([c["content"] for c in rfp_chunks]) if rfp_chunks else ""
 
-    # Search old response documents for relevant content
-    old_response_chunks = VectorService.search(
-        str(project_id), recommendation, top_k=5, category_filter="old_response"
-    )
-    old_response_context = "\n\n".join([c["content"] for c in old_response_chunks]) if old_response_chunks else ""
+    return {"task_id": task_id}
 
-    # Auto-detect or load target chapter
-    target_chapter = None
-    if chapter_id:
-        ch_result = await db.execute(
-            select(Chapter).where(Chapter.id == uuid.UUID(chapter_id)).where(Chapter.project_id == project_id)
-        )
-        target_chapter = ch_result.scalar_one_or_none()
-    elif inject:
-        # Auto-detect the best matching chapter
-        search_text = f"{recommendation} {missing_description}"
-        target_chapter, _score = await _find_best_chapter(db, project_id, search_text)
 
-    existing_chapter_content = ""
-    chapter_title = ""
-    resolved_chapter_id = None
-    if target_chapter:
-        existing_chapter_content = target_chapter.content or ""
-        chapter_title = target_chapter.title or ""
-        resolved_chapter_id = str(target_chapter.id)
+@router.get("/{project_id}/compliance-analysis/generate-recommendation-status/{task_id}")
+async def get_rec_gen_status(
+    project_id: uuid.UUID,
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of a recommendation content generation task."""
+    return _rec_gen_progress.get(task_id, {
+        "status": "idle", "step": "idle", "progress": 0, "message": "",
+        "chapter_id": None, "chapter_title": None, "content": None,
+    })
 
-    # Anonymize all texts
-    anon_rec = await AnonymizationService.anonymize_text(recommendation, project_id, db)
-    anon_rfp = await AnonymizationService.anonymize_text(rfp_context, project_id, db) if rfp_context else ""
-    anon_old_response = await AnonymizationService.anonymize_text(old_response_context, project_id, db) if old_response_context else ""
-    anon_existing = await AnonymizationService.anonymize_text(existing_chapter_content, project_id, db) if existing_chapter_content else ""
-    anon_missing = await AnonymizationService.anonymize_text(missing_description, project_id, db) if missing_description else ""
 
-    # Build contextual system prompt
-    system_prompt = """Tu es un expert senior en réponse aux appels d'offres.
+async def _run_rec_generation(
+    task_id: str, project_id: uuid.UUID, workspace_id: uuid.UUID,
+    recommendation: str, missing_description: str,
+    chapter_id_override: str | None, inject: bool,
+):
+    """Background task for recommendation/missing-element content generation.
+
+    Uses a semaphore to limit concurrent generations (max 3).
+    DB connections are released during the slow AI call.
+    """
+    from ..database import async_session
+
+    def _update(step: str, progress: int, message: str, **extra):
+        _rec_gen_progress[task_id] = {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+            "chapter_id": extra.get("chapter_id"),
+            "chapter_title": extra.get("chapter_title"),
+            "content": extra.get("content"),
+        }
+
+    try:
+        async with _rec_gen_semaphore:
+            _update("starting", 5, "Demarrage...")
+
+            # ── Phase 1: Load data + anonymize (short DB session) ──
+            async with async_session() as db:
+                ai_service = await _get_ai_service(workspace_id, db)
+
+                project_result = await db.execute(
+                    select(RFPProject).where(RFPProject.id == project_id)
+                )
+                project = project_result.scalar_one()
+                ai_context = project.ai_context or ""
+
+                _update("searching", 10, "Recherche de contexte...")
+
+                # Get RFP context via vector search
+                rfp_chunks = VectorService.search(
+                    str(project_id), recommendation, top_k=5, category_filter="new_rfp"
+                )
+                rfp_context = "\n\n".join([c["content"] for c in rfp_chunks]) if rfp_chunks else ""
+
+                # Search old response documents for relevant content
+                old_response_chunks = VectorService.search(
+                    str(project_id), recommendation, top_k=5, category_filter="old_response"
+                )
+                old_response_context = "\n\n".join([c["content"] for c in old_response_chunks]) if old_response_chunks else ""
+
+                # Auto-detect or load target chapter
+                _update("matching", 20, "Identification du meilleur chapitre...")
+                target_chapter = None
+                if chapter_id_override:
+                    ch_result = await db.execute(
+                        select(Chapter)
+                        .where(Chapter.id == uuid.UUID(chapter_id_override))
+                        .where(Chapter.project_id == project_id)
+                    )
+                    target_chapter = ch_result.scalar_one_or_none()
+                elif inject:
+                    search_text = f"{recommendation} {missing_description}"
+                    target_chapter, _score = await _find_best_chapter(db, project_id, search_text)
+
+                existing_chapter_content = ""
+                chapter_title = ""
+                resolved_chapter_id = None
+                if target_chapter:
+                    existing_chapter_content = target_chapter.content or ""
+                    chapter_title = target_chapter.title or ""
+                    resolved_chapter_id = str(target_chapter.id)
+
+                _update("anonymizing", 30, f"Preparation (chapitre: {chapter_title or 'auto'})...",
+                        chapter_id=resolved_chapter_id, chapter_title=chapter_title)
+
+                # Anonymize all texts
+                anon_rec = await AnonymizationService.anonymize_text(recommendation, project_id, db)
+                anon_rfp = await AnonymizationService.anonymize_text(rfp_context, project_id, db) if rfp_context else ""
+                anon_old_response = await AnonymizationService.anonymize_text(old_response_context, project_id, db) if old_response_context else ""
+                anon_existing = await AnonymizationService.anonymize_text(existing_chapter_content, project_id, db) if existing_chapter_content else ""
+                anon_missing = await AnonymizationService.anonymize_text(missing_description, project_id, db) if missing_description else ""
+            # DB released
+
+            # ── Phase 2: AI generation (NO DB connection held) ──
+            _update("generating", 40, "Generation IA en cours...",
+                    chapter_id=resolved_chapter_id, chapter_title=chapter_title)
+
+            system_prompt = """Tu es un expert senior en réponse aux appels d'offres.
 À partir d'une lacune ou recommandation identifiée lors d'une analyse de conformité,
 tu dois générer un contenu structuré qui comble cette lacune.
 
@@ -2297,61 +2380,67 @@ Anonymisation:
 - Le texte peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], etc.
 - Réutilise EXACTEMENT les mêmes marqueurs. N'en invente JAMAIS de nouveaux."""
 
-    if project.ai_context:
-        system_prompt += f"""
+            if ai_context:
+                system_prompt += f"""
 
 Contexte de rédaction (informations sur notre société et notre approche):
-{project.ai_context}"""
+{ai_context}"""
 
-    # Build user prompt with all available context
-    user_parts = []
-    if missing_description:
-        user_parts.append(f"ÉLÉMENT MANQUANT IDENTIFIÉ:\nExigence: {anon_rec}\nCe qui manque: {anon_missing}")
-    else:
-        user_parts.append(f"RECOMMANDATION À TRAITER:\n{anon_rec}")
+            user_parts = []
+            if missing_description:
+                user_parts.append(f"ÉLÉMENT MANQUANT IDENTIFIÉ:\nExigence: {anon_rec}\nCe qui manque: {anon_missing}")
+            else:
+                user_parts.append(f"RECOMMANDATION À TRAITER:\n{anon_rec}")
 
-    if anon_rfp:
-        user_parts.append(f"CONTEXTE DU CAHIER DES CHARGES (extraits pertinents):\n{anon_rfp[:5000]}")
+            if anon_rfp:
+                user_parts.append(f"CONTEXTE DU CAHIER DES CHARGES (extraits pertinents):\n{anon_rfp[:5000]}")
+            if anon_old_response:
+                user_parts.append(f"ÉLÉMENTS DE L'ANCIENNE RÉPONSE (à exploiter et adapter):\n{anon_old_response[:5000]}")
+            if anon_existing and chapter_title:
+                user_parts.append(
+                    f"CONTENU ACTUEL DU CHAPITRE \"{chapter_title}\" (ne pas répéter, compléter):\n{anon_existing[:3000]}"
+                )
+            user_parts.append(
+                "Génère un contenu structuré (1-2 pages) qui comble cette lacune. "
+                "Le contenu doit s'intégrer naturellement dans le mémoire technique."
+            )
 
-    if anon_old_response:
-        user_parts.append(f"ÉLÉMENTS DE L'ANCIENNE RÉPONSE (à exploiter et adapter):\n{anon_old_response[:5000]}")
+            content = await ai_service.generate(system_prompt, "\n\n".join(user_parts), max_tokens=4096)
 
-    if anon_existing and chapter_title:
-        user_parts.append(
-            f"CONTENU ACTUEL DU CHAPITRE \"{chapter_title}\" (ne pas répéter, compléter):\n{anon_existing[:3000]}"
-        )
+            # ── Phase 3: Deanonymize + save (short DB session) ──
+            _update("deanonymizing", 80, "Deanonymisation...",
+                    chapter_id=resolved_chapter_id, chapter_title=chapter_title)
 
-    user_parts.append(
-        "Génère un contenu structuré (1-2 pages) qui comble cette lacune. "
-        "Le contenu doit s'intégrer naturellement dans le mémoire technique."
-    )
+            async with async_session() as db:
+                content = await AnonymizationService.deanonymize_text(content, project_id, db)
 
-    user_prompt = "\n\n".join(user_parts)
+                if inject and resolved_chapter_id:
+                    _update("saving", 90, f"Injection dans '{chapter_title}'...",
+                            chapter_id=resolved_chapter_id, chapter_title=chapter_title)
+                    ch_result = await db.execute(
+                        select(Chapter).where(Chapter.id == uuid.UUID(resolved_chapter_id))
+                    )
+                    chapter = ch_result.scalar_one_or_none()
+                    if chapter:
+                        separator = "\n\n---\n\n" if chapter.content else ""
+                        chapter.content = (chapter.content or "") + separator + content
+                        await db.commit()
 
-    try:
-        content = await ai_service.generate(system_prompt, user_prompt, max_tokens=4096)
-        content = await AnonymizationService.deanonymize_text(content, project_id, db)
+        _rec_gen_progress[task_id] = {
+            "status": "completed", "step": "done", "progress": 100,
+            "message": f"Contenu integre dans '{chapter_title}'" if inject and chapter_title else "Contenu genere",
+            "chapter_id": resolved_chapter_id,
+            "chapter_title": chapter_title,
+            "content": content,
+        }
+
     except Exception as e:
-        logger.exception("Recommendation content generation failed")
-        raise HTTPException(status_code=500, detail=f"Erreur de génération: {str(e)}")
-
-    # Inject into the target chapter
-    if inject and target_chapter:
-        # Re-fetch to avoid stale state
-        ch_result = await db.execute(
-            select(Chapter).where(Chapter.id == target_chapter.id)
-        )
-        chapter = ch_result.scalar_one_or_none()
-        if chapter:
-            separator = "\n\n---\n\n" if chapter.content else ""
-            chapter.content = (chapter.content or "") + separator + content
-            await db.commit()
-
-    return {
-        "content": content,
-        "chapter_id": resolved_chapter_id,
-        "chapter_title": chapter_title,
-    }
+        logger.exception("Recommendation generation failed for task %s", task_id)
+        _rec_gen_progress[task_id] = {
+            "status": "error", "step": "error", "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+            "chapter_id": None, "chapter_title": None, "content": None,
+        }
 
 
 @router.get("/{project_id}/compliance-analysis/export-pdf")
