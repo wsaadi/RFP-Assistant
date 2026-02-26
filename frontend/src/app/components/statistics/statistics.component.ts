@@ -132,6 +132,11 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
             <mat-spinner *ngIf="reAnonymizing" diameter="18"></mat-spinner>
             <mat-icon *ngIf="!reAnonymizing">sync</mat-icon> Re-anonymiser tout
           </button>
+          <button mat-raised-button color="warn" (click)="purgeAnonymization()" [disabled]="purging"
+            matTooltip="Supprimer TOUTES les anonymisations et restaurer le texte original des chapitres">
+            <mat-spinner *ngIf="purging" diameter="18"></mat-spinner>
+            <mat-icon *ngIf="!purging">delete_sweep</mat-icon> Purger toute l'anonymisation
+          </button>
         </div>
       </div>
 
@@ -348,6 +353,7 @@ export class StatisticsComponent implements OnInit {
   reAnonymizing = false;
   resolvingOrphans = false;
   consolidating = false;
+  purging = false;
   addingMapping = false;
   mappingColumns = ['original', 'anonymized', 'active', 'actions'];
 
@@ -360,16 +366,11 @@ export class StatisticsComponent implements OnInit {
 
   entityTypes = [
     { value: 'company', label: 'Entreprise / Organisation' },
-    { value: 'person', label: 'Personne' },
+    { value: 'person', label: 'Personne (nom, prenom)' },
     { value: 'email', label: 'Adresse email' },
-    { value: 'phone', label: 'Telephone' },
     { value: 'address', label: 'Adresse postale' },
     { value: 'project_code', label: 'Code projet / marche' },
-    { value: 'rfp_code', label: 'Code AO' },
-    { value: 'solution_name', label: 'Nom de solution' },
-    { value: 'date', label: 'Date' },
-    { value: 'amount', label: 'Montant' },
-    { value: 'other', label: 'Autre' },
+    { value: 'rfp_code', label: 'Code AO / numero d\'appel d\'offres' },
   ];
 
   constructor(
@@ -533,6 +534,30 @@ export class StatisticsComponent implements OnInit {
     });
   }
 
+  purgeAnonymization(): void {
+    if (!confirm(
+      'ATTENTION : Cette action va :\n' +
+      '- Restaurer le texte original dans tous les chapitres (remplacer les [ENTREPRISE_1] etc. par les vraies valeurs)\n' +
+      '- Supprimer TOUS les mappings d\'anonymisation\n\n' +
+      'Cette action est irreversible. Continuer ?'
+    )) return;
+    this.purging = true;
+    this.api.purgeAnonymization(this.projectId).subscribe({
+      next: (res) => {
+        this.snackBar.open(
+          `Anonymisation purgee : ${res.restored_chapters} chapitre(s) restaure(s), ${res.deleted_mappings} mapping(s) supprime(s)`,
+          'OK', { duration: 6000 }
+        );
+        this.purging = false;
+        this.loadAnonReport();
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur lors de la purge', 'OK', { duration: 5000 });
+        this.purging = false;
+      },
+    });
+  }
+
   // ── Helpers ──
 
   statusCount(status: string): number {
@@ -560,14 +585,9 @@ export class StatisticsComponent implements OnInit {
       'company': 'business',
       'person': 'person',
       'email': 'email',
-      'phone': 'phone',
       'address': 'place',
       'project_code': 'tag',
       'rfp_code': 'label',
-      'solution_name': 'devices',
-      'date': 'calendar_today',
-      'amount': 'euro',
-      'other': 'help_outline',
     };
     return icons[entityType] || 'label';
   }

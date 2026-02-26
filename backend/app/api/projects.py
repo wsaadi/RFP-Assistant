@@ -3003,27 +3003,18 @@ async def re_anonymize_project(
                 chunk.anonymized_content = new_anon
                 updated_chunks += 1
 
-    # Re-anonymize chapter content (both visible content AND anonymized version)
+    # Re-anonymize chapter content (only anonymized_content – never touch ch.content)
     chapters_result = await db.execute(
         select(Chapter).where(Chapter.project_id == project_id)
     )
     chapters = chapters_result.scalars().all()
     updated_chapters = 0
     for ch in chapters:
-        changed = False
         if ch.content:
-            new_content = apply_mappings(ch.content)
-            if new_content != ch.content:
-                ch.content = new_content
-                ch.anonymized_content = new_content
-                changed = True
-        if not changed and ch.content:
             new_anon = apply_mappings(ch.content)
             if new_anon != ch.anonymized_content:
                 ch.anonymized_content = new_anon
-                changed = True
-        if changed:
-            updated_chapters += 1
+                updated_chapters += 1
 
     # ── Scan ALL chapter content for orphan placeholders ──
     # Collect all text to scan
@@ -3135,6 +3126,109 @@ async def consolidate_mappings(
     result = await AnonymizationService.consolidate_mappings(project_id, db)
     await db.commit()
     return result
+
+
+@router.post("/{project_id}/purge-anonymization")
+async def purge_anonymization(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Remove ALL anonymization: deanonymize chapter content, clear anonymized fields, delete all mappings.
+
+    This restores the project to its original non-anonymized state.
+    Steps:
+    1. Replace all [PLACEHOLDER_N] tokens in chapter.content with their original values
+    2. Clear chapter.anonymized_content
+    3. Clear document_chunk.anonymized_content
+    4. Clear document.anonymized_full_text
+    5. Delete all anonymization mappings
+    """
+    from ..services.anonymization_service import ENTITY_PREFIXES
+
+    # Get all mappings (including inactive) to restore original values
+    all_mappings_result = await db.execute(
+        select(AnonymizationMapping)
+        .where(AnonymizationMapping.project_id == project_id)
+    )
+    all_mappings = all_mappings_result.scalars().all()
+
+    # Build placeholder → original_value map
+    placeholder_to_original = {
+        m.anonymized_value: m.original_value
+        for m in all_mappings
+        if m.original_value  # skip unresolved
+    }
+
+    # Also build a regex to catch any placeholder pattern (even orphans)
+    prefix_pattern = '|'.join(re.escape(p) for p in ENTITY_PREFIXES.values())
+    placeholder_re = re.compile(r'\[(?:' + prefix_pattern + r')_\d+\]')
+
+    def deanonymize(text: str) -> str:
+        """Replace known placeholders with original values, remove unknown ones."""
+        if not text:
+            return text
+        result = text
+        # Replace known placeholders (longest first to avoid partial matches)
+        for placeholder, original in sorted(placeholder_to_original.items(), key=lambda x: len(x[0]), reverse=True):
+            result = result.replace(placeholder, original)
+        # Remove any remaining unknown placeholders (leave text clean)
+        result = placeholder_re.sub('', result)
+        # Clean up double spaces left by removed placeholders
+        result = re.sub(r'  +', ' ', result)
+        return result
+
+    # 1. Deanonymize chapter content
+    chapters_result = await db.execute(
+        select(Chapter).where(Chapter.project_id == project_id)
+    )
+    chapters = chapters_result.scalars().all()
+    restored_chapters = 0
+    for ch in chapters:
+        changed = False
+        if ch.content and placeholder_re.search(ch.content):
+            ch.content = deanonymize(ch.content)
+            changed = True
+        if ch.anonymized_content:
+            ch.anonymized_content = ""
+            changed = True
+        if changed:
+            restored_chapters += 1
+
+    # 2. Clear anonymized fields on document chunks
+    chunks_result = await db.execute(
+        select(DocumentChunk)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.project_id == project_id)
+    )
+    chunks = chunks_result.scalars().all()
+    cleared_chunks = 0
+    for chunk in chunks:
+        if chunk.anonymized_content:
+            chunk.anonymized_content = ""
+            cleared_chunks += 1
+
+    # 3. Clear anonymized_full_text on documents
+    docs_result = await db.execute(
+        select(Document).where(Document.project_id == project_id)
+    )
+    docs = docs_result.scalars().all()
+    for doc in docs:
+        if doc.anonymized_full_text:
+            doc.anonymized_full_text = ""
+
+    # 4. Delete all mappings
+    deleted_mappings = len(all_mappings)
+    for m in all_mappings:
+        await db.delete(m)
+
+    await db.commit()
+
+    return {
+        "restored_chapters": restored_chapters,
+        "cleared_chunks": cleared_chunks,
+        "deleted_mappings": deleted_mappings,
+    }
 
 
 # ── Project Members ─────────────────────────────────────────────────
