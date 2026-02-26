@@ -1899,7 +1899,16 @@ async def analyze_compliance(
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
     # Quick pre-checks before launching background task
-    # Check for NEW_RESPONSE documents (uploaded response files)
+    # Check for chapters (mémoire technique) OR uploaded NEW_RESPONSE documents
+    chapters_result = await db.execute(
+        select(func.count()).select_from(Chapter).where(
+            Chapter.project_id == project_id,
+            Chapter.content != None,
+            Chapter.content != "",
+        )
+    )
+    has_chapters = (chapters_result.scalar() or 0) > 0
+
     nr_result = await db.execute(
         select(Document.id).where(
             Document.project_id == project_id,
@@ -1909,20 +1918,11 @@ async def analyze_compliance(
     )
     has_new_response_docs = nr_result.scalar_one_or_none() is not None
 
-    if not has_new_response_docs:
-        # Fallback: check chapters content
-        chapters_result = await db.execute(
-            select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
+    if not has_chapters and not has_new_response_docs:
+        raise HTTPException(
+            status_code=400,
+            detail="Aucun contenu à analyser. Rédigez les chapitres du mémoire technique ou chargez des documents 'Notre réponse'.",
         )
-        chapters = chapters_result.scalars().all()
-        response_content = "\n\n".join([
-            f"## {c.title}\n{c.content}" for c in chapters if c.content
-        ])
-        if not response_content.strip():
-            raise HTTPException(
-                status_code=400,
-                detail="Aucun contenu à analyser. Chargez des documents 'Notre réponse' ou rédigez les chapitres.",
-            )
 
     _compliance_progress[pid] = {
         "status": "running", "step": "starting", "progress": 0,
@@ -1965,26 +1965,47 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # Load ALL response content (all documents, all sheets, all chunks)
-            # Uses pre-anonymized content from upload time — no re-anonymization needed
-            _update("loading", 10, "Chargement intégral de la réponse...")
-            anon_response = await _get_all_chunks_anonymized_by_category(
+            # ── 1a. Load the mémoire technique (generated chapters) ──
+            # This is the PRIMARY response content – always included when available.
+            _update("loading", 5, "Chargement du memoire technique (chapitres)...")
+            chapters_result = await db.execute(
+                select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
+            )
+            chapters = chapters_result.scalars().all()
+            chapters_with_content = [c for c in chapters if (c.content or "").strip()]
+
+            chapter_parts = []
+            if chapters_with_content:
+                chapter_parts.append("\n\n=== DOCUMENT: Memoire Technique (redige avec l'outil) ===\n")
+                for c in chapters_with_content:
+                    text = (c.anonymized_content or c.content or "").strip()
+                    chapter_parts.append(f"\n--- {c.title} ---\n")
+                    chapter_parts.append(text)
+            anon_chapters = "\n\n".join(chapter_parts)
+
+            # ── 1b. Load uploaded NEW_RESPONSE documents (if any) ──
+            _update("loading", 10, "Chargement des documents reponse uploades...")
+            anon_uploaded_response = await _get_all_chunks_anonymized_by_category(
                 db, project_id, DocumentCategory.NEW_RESPONSE
             )
 
-            if not anon_response.strip():
-                # Fallback: use chapters content (not pre-anonymized)
-                chapters_result = await db.execute(
-                    select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
-                )
-                chapters = chapters_result.scalars().all()
-                response_content = "\n\n".join([
-                    f"## {c.title}\n{c.content}" for c in chapters if c.content
-                ])
-                anon_response = await AnonymizationService.anonymize_text(response_content, project_id, db)
+            # Combine: chapters first (primary), then uploaded docs (complementary)
+            response_parts = []
+            if anon_chapters.strip():
+                response_parts.append(anon_chapters)
+            if anon_uploaded_response.strip():
+                response_parts.append(anon_uploaded_response)
+            anon_response = "\n\n".join(response_parts)
 
-            _update("searching", 15, "Chargement intégral du cahier des charges...")
-            # Load ALL RFP content (no vector search = no missed chunks)
+            if not anon_response.strip():
+                _compliance_progress[pid] = {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "Aucun contenu a analyser. Redigez les chapitres du memoire technique ou chargez des documents 'Notre reponse'.",
+                }
+                return
+
+            # ── 1c. Load ALL RFP content (CCAP, CCTP, RC, etc.) ──
+            _update("searching", 15, "Chargement integral du cahier des charges (CCAP, CCTP, RC...)...")
             anon_rfp = await _get_all_chunks_anonymized_by_category(
                 db, project_id, DocumentCategory.NEW_RFP
             )
