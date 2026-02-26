@@ -77,3 +77,13 @@ async def init_db():
             ))
         except Exception:
             logger.debug("ai_context column already exists or ALTER TABLE not supported")
+
+    # Add context_mode column (rag or full) for AI context retrieval strategy
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "ALTER TABLE rfp_projects ADD COLUMN IF NOT EXISTS "
+                "context_mode VARCHAR(20) DEFAULT 'rag'"
+            ))
+        except Exception:
+            logger.debug("context_mode column already exists or ALTER TABLE not supported")

@@ -320,7 +320,7 @@ export class WorkspaceDetailComponent implements OnInit {
     { value: 'new_rfp', label: 'Nouvel AO', desc: 'Documents du nouvel appel d\'offres', icon: 'fiber_new', color: '#d32f2f' },
     { value: 'new_response', label: 'Notre Réponse', desc: 'Notre réponse à analyser', icon: 'task', color: '#7b1fa2' },
   ];
-  newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'] as string[] };
+  newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'] as string[], context_mode: 'rag' };
   editingWorkspace = false;
   editWsName = '';
   editWsDescription = '';
@@ -375,7 +375,7 @@ export class WorkspaceDetailComponent implements OnInit {
     this.api.createProject(this.workspaceId, this.newProject).subscribe({
       next: () => {
         this.showCreateProject = false;
-        this.newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'] };
+        this.newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp'], context_mode: 'rag' };
         this.loadData();
       },
     });

@@ -745,6 +745,45 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
             </mat-card>
 
+            <mat-card class="ai-context-card" style="margin-top: 12px;">
+              <div class="ai-context-header">
+                <div>
+                  <h3><mat-icon>tune</mat-icon> Mode de contexte IA</h3>
+                  <p class="ai-context-hint">Définit comment les documents sont transmis à l'IA pour la rédaction des chapitres.</p>
+                </div>
+              </div>
+              <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px;">
+                <mat-card [class.selected-mode]="project.context_mode !== 'full'"
+                  (click)="setContextMode('rag')"
+                  style="flex: 1; min-width: 220px; cursor: pointer; padding: 16px; border: 2px solid transparent; transition: all 0.2s;"
+                  [style.borderColor]="project.context_mode !== 'full' ? '#1976d2' : 'transparent'"
+                  [style.background]="project.context_mode !== 'full' ? '#e3f2fd' : ''">
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                    <mat-icon [style.color]="project.context_mode !== 'full' ? '#1976d2' : '#999'">search</mat-icon>
+                    <strong>RAG (Recherche)</strong>
+                  </div>
+                  <p style="margin: 0; font-size: 13px; color: #555;">
+                    L'IA reçoit uniquement les extraits les plus pertinents de vos documents.
+                    <strong>Plus rapide et économique</strong>, adapté aux gros volumes.
+                  </p>
+                </mat-card>
+                <mat-card [class.selected-mode]="project.context_mode === 'full'"
+                  (click)="setContextMode('full')"
+                  style="flex: 1; min-width: 220px; cursor: pointer; padding: 16px; border: 2px solid transparent; transition: all 0.2s;"
+                  [style.borderColor]="project.context_mode === 'full' ? '#7b1fa2' : 'transparent'"
+                  [style.background]="project.context_mode === 'full' ? '#f3e5f5' : ''">
+                  <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
+                    <mat-icon [style.color]="project.context_mode === 'full' ? '#7b1fa2' : '#999'">description</mat-icon>
+                    <strong>Contexte complet</strong>
+                  </div>
+                  <p style="margin: 0; font-size: 13px; color: #555;">
+                    L'IA reçoit l'intégralité des documents, comme dans un chat.
+                    <strong>Meilleure compréhension</strong>, mais plus lent et coûteux.
+                  </p>
+                </mat-card>
+              </div>
+            </mat-card>
+
             <div class="tools-grid">
               <mat-card class="tool-card" [routerLink]="['/project', projectId, 'gap-analysis']">
                 <mat-icon>compare_arrows</mat-icon>
@@ -2125,6 +2164,20 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.snackBar.open('Contexte IA enregistré', 'OK', { duration: 2000 });
         if (this.project) this.project.ai_context = this.aiContextDraft;
         this.editingAiContext = false;
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
+    });
+  }
+
+  setContextMode(mode: string): void {
+    if (this.project?.context_mode === mode) return;
+    this.api.updateProject(this.projectId, { context_mode: mode }).subscribe({
+      next: () => {
+        if (this.project) this.project.context_mode = mode;
+        this.snackBar.open(
+          mode === 'full' ? 'Mode contexte complet activé' : 'Mode RAG activé',
+          'OK', { duration: 2000 },
+        );
       },
       error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
     });

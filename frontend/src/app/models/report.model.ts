@@ -72,6 +72,7 @@ export interface RFPProject {
   improvement_axes: string;
   ai_context: string;
   enabled_categories: string[];
+  context_mode: string;
   created_by: string;
   created_at: string;
   updated_at: string;
@@ -87,6 +88,7 @@ export interface ProjectCreate {
   deadline: string;
   ai_context: string;
   enabled_categories: string[];
+  context_mode: string;
 }
 
 // ── Document ──

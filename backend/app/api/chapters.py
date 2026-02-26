@@ -12,6 +12,7 @@ from ..database import get_db
 from ..models.user import User
 from ..models.project import RFPProject, AIConfig
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
+from ..models.document import Document, DocumentChunk, DocumentCategory
 from ..schemas.chapter import (
     ChapterCreate, ChapterUpdate, ChapterOut,
     ChapterContentRequest, AddNoteRequest, ReorderChaptersRequest,
@@ -297,6 +298,31 @@ async def get_chapter_gen_status(
     })
 
 
+async def _get_all_chunks_anon(
+    db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory,
+) -> str:
+    """Get ALL pre-anonymized chunks for a category (full context mode)."""
+    result = await db.execute(
+        select(DocumentChunk, Document.original_filename)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.project_id == project_id)
+        .where(Document.category == category)
+        .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
+    )
+    rows = result.all()
+    parts = []
+    current_doc = None
+    for chunk, doc_name in rows:
+        text = (chunk.anonymized_content or chunk.content or "").strip()
+        if not text:
+            continue
+        if doc_name != current_doc:
+            current_doc = doc_name
+            parts.append(f"\n\n=== DOCUMENT: {doc_name} ===\n")
+        parts.append(text)
+    return "\n\n".join(parts)
+
+
 async def _run_chapter_generation(
     chapter_id: uuid.UUID, project_id: uuid.UUID, workspace_id: uuid.UUID,
     action: str, custom_prompt: str, use_old_response: bool, include_improvement_axes: bool,
@@ -342,6 +368,7 @@ async def _run_chapter_generation(
                 ch_notes = chapter.notes or []
                 proj_improvement = project.improvement_axes if include_improvement_axes else ""
                 proj_ai_context = project.ai_context or ""
+                proj_context_mode = project.context_mode or "rag"
 
                 if action == "custom" and custom_prompt:
                     _update("anonymizing", 15, "Anonymisation du contenu...")
@@ -355,27 +382,35 @@ async def _run_chapter_generation(
                     ai_params = {"mode": "enrich", "anon_content": anon_content}
 
                 else:
-                    _update("searching", 10, "Recherche de contenu pertinent...")
                     old_response_content = ""
-                    search_results = []
-                    if use_old_response:
-                        search_results = VectorService.search(
+                    context_chunks_text = ""
+
+                    if proj_context_mode == "full":
+                        # ── Full context mode: send ALL document content ──
+                        _update("loading", 10, "Chargement du contexte complet...")
+                        old_response_content = await _get_all_chunks_anon(db, project_id, DocumentCategory.OLD_RESPONSE) if use_old_response else ""
+                        context_chunks_text = await _get_all_chunks_anon(db, project_id, DocumentCategory.NEW_RFP)
+                    else:
+                        # ── RAG mode: vector search for relevant chunks ──
+                        _update("searching", 10, "Recherche de contenu pertinent...")
+                        search_results = []
+                        if use_old_response:
+                            search_results = VectorService.search(
+                                str(project_id),
+                                f"{ch_title} {ch_description}",
+                                top_k=5, category_filter="old_response",
+                            )
+                        context_results = VectorService.search(
                             str(project_id),
-                            f"{ch_title} {ch_description}",
-                            top_k=5, category_filter="old_response",
+                            f"{ch_title} {ch_rfp_requirement}",
+                            top_k=3,
                         )
-                    context_results = VectorService.search(
-                        str(project_id),
-                        f"{ch_title} {ch_rfp_requirement}",
-                        top_k=3,
-                    )
-                    context_chunks_text = "\n\n".join([r["content"] for r in context_results]) if context_results else ""
+                        context_chunks_text = "\n\n".join([r["content"] for r in context_results]) if context_results else ""
+                        if search_results:
+                            raw_old = "\n\n".join([r["content"] for r in search_results])
+                            old_response_content = await AnonymizationService.anonymize_text(raw_old, project_id, db)
 
-                    _update("anonymizing", 25, "Anonymisation...")
-                    if search_results:
-                        raw_old = "\n\n".join([r["content"] for r in search_results])
-                        old_response_content = await AnonymizationService.anonymize_text(raw_old, project_id, db)
-
+                    _update("anonymizing", 25, "Preparation...")
                     notes_text = "\n".join([n.get("content", "") for n in ch_notes])
                     ai_params = {
                         "mode": "generate",
