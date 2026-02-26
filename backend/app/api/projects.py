@@ -298,6 +298,252 @@ async def get_gap_analysis_status(
     })
 
 
+@router.get("/{project_id}/gap-analysis/export-pdf")
+async def export_gap_analysis_pdf(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Export the latest gap analysis as a structured PDF document."""
+    import fitz  # PyMuPDF
+
+    result = await db.execute(
+        select(GapAnalysisResult)
+        .where(GapAnalysisResult.project_id == project_id)
+        .order_by(GapAnalysisResult.created_at.desc())
+        .limit(1)
+    )
+    gr = result.scalar_one_or_none()
+    if not gr:
+        raise HTTPException(status_code=404, detail="Aucune analyse des ecarts disponible")
+
+    proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = proj_result.scalar_one_or_none()
+    project_name = project.name if project else "Projet"
+
+    # Build PDF with PyMuPDF
+    doc = fitz.open()
+
+    MARGIN = 50
+    PAGE_W, PAGE_H = fitz.paper_size("a4")
+    TEXT_W = PAGE_W - 2 * MARGIN
+    Y_BOTTOM = PAGE_H - MARGIN
+
+    # Colors
+    COL_TITLE = (0.106, 0.227, 0.361)   # #1B3A5C – dark blue
+    COL_BLUE = (0.082, 0.396, 0.753)     # #1565C0 – new requirements
+    COL_RED = (0.776, 0.157, 0.157)      # #C62828 – removed
+    COL_ORANGE = (0.937, 0.424, 0.0)     # #EF6C00 – modified
+    COL_GREEN = (0.180, 0.490, 0.196)    # #2E7D32 – unchanged
+    COL_BLACK = (0.0, 0.0, 0.0)
+    COL_GRAY = (0.4, 0.4, 0.4)
+    COL_LIGHTGRAY = (0.92, 0.92, 0.92)
+    COL_WHITE = (1.0, 1.0, 1.0)
+
+    PRIORITY_COLORS = {
+        "high": (0.898, 0.224, 0.208),    # red
+        "medium": (0.937, 0.424, 0.0),    # orange
+        "low": (0.180, 0.490, 0.196),     # green
+    }
+    PRIORITY_LABELS = {"high": "Haute", "medium": "Moyenne", "low": "Basse"}
+
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    y = MARGIN
+
+    def _new_page():
+        nonlocal page, y
+        page = doc.new_page(width=PAGE_W, height=PAGE_H)
+        y = MARGIN
+
+    def _check_space(needed: float):
+        nonlocal y
+        if y + needed > Y_BOTTOM:
+            _new_page()
+
+    def _write(text: str, fontsize: float = 10, color=COL_BLACK, bold: bool = False, indent: float = 0, max_width: float = 0):
+        nonlocal y
+        fontname = "hebo" if bold else "helv"
+        w = max_width or (TEXT_W - indent)
+        lines = []
+        for paragraph in text.split("\n"):
+            if not paragraph.strip():
+                lines.append("")
+                continue
+            words = paragraph.split()
+            current_line = ""
+            for word in words:
+                test = f"{current_line} {word}".strip()
+                tw = fitz.get_text_length(test, fontname=fontname, fontsize=fontsize)
+                if tw > w and current_line:
+                    lines.append(current_line)
+                    current_line = word
+                else:
+                    current_line = test
+            if current_line:
+                lines.append(current_line)
+
+        line_h = fontsize * 1.4
+        for line in lines:
+            _check_space(line_h)
+            page.insert_text(
+                fitz.Point(MARGIN + indent, y + fontsize),
+                line, fontsize=fontsize, fontname=fontname, color=color,
+            )
+            y += line_h
+
+    def _draw_separator():
+        nonlocal y
+        _check_space(10)
+        page.draw_line(
+            fitz.Point(MARGIN, y), fitz.Point(MARGIN + TEXT_W, y),
+            color=COL_LIGHTGRAY, width=0.5,
+        )
+        y += 10
+
+    def _draw_section_header(icon_text: str, title: str, count: int, color):
+        nonlocal y
+        _check_space(35)
+        # Section background bar
+        bar_rect = fitz.Rect(MARGIN, y, MARGIN + TEXT_W, y + 28)
+        page.draw_rect(bar_rect, color=None, fill=(*color, 0.08) if hasattr(color, '__len__') else color)
+        page.draw_rect(fitz.Rect(MARGIN, y, MARGIN + 4, y + 28), color=None, fill=color)
+        page.insert_text(
+            fitz.Point(MARGIN + 12, y + 18),
+            f"{icon_text}  {title} ({count})", fontsize=12, fontname="hebo", color=color,
+        )
+        y += 35
+
+    # ── Cover / Title ──
+    _write("Analyse des Ecarts", fontsize=22, color=COL_TITLE, bold=True)
+    _write(project_name, fontsize=13, color=COL_GRAY)
+    if gr.created_at:
+        _write(f"Date : {gr.created_at.strftime('%d/%m/%Y %H:%M')}", fontsize=9, color=COL_GRAY)
+    y += 8
+
+    # ── Stats summary bar ──
+    new_count = len(gr.new_requirements or [])
+    removed_count = len(gr.removed_requirements or [])
+    modified_count = len(gr.modified_requirements or [])
+    unchanged_count = len(gr.unchanged_requirements or [])
+    total = new_count + removed_count + modified_count + unchanged_count
+
+    _check_space(50)
+    stats = [
+        (f"{new_count} nouvelles", COL_BLUE),
+        (f"{removed_count} supprimees", COL_RED),
+        (f"{modified_count} modifiees", COL_ORANGE),
+        (f"{unchanged_count} inchangees", COL_GREEN),
+    ]
+    stat_x = MARGIN
+    for label, color in stats:
+        page.insert_text(fitz.Point(stat_x, y + 12), label, fontsize=10, fontname="hebo", color=color)
+        stat_x += fitz.get_text_length(label, fontname="hebo", fontsize=10) + 20
+    y += 22
+
+    # Total bar
+    if total > 0:
+        bar_y = y
+        bar_h = 6
+        page.draw_rect(fitz.Rect(MARGIN, bar_y, MARGIN + TEXT_W, bar_y + bar_h), color=None, fill=COL_LIGHTGRAY)
+        x_off = MARGIN
+        for count, color in [(new_count, COL_BLUE), (removed_count, COL_RED), (modified_count, COL_ORANGE), (unchanged_count, COL_GREEN)]:
+            seg_w = TEXT_W * count / total
+            if seg_w > 0:
+                page.draw_rect(fitz.Rect(x_off, bar_y, x_off + seg_w, bar_y + bar_h), color=None, fill=color)
+                x_off += seg_w
+        y += bar_h + 10
+
+    _draw_separator()
+
+    # ── Summary ──
+    if gr.summary:
+        _write("Resume", fontsize=13, color=COL_TITLE, bold=True)
+        y += 4
+        _write(gr.summary, fontsize=10, color=COL_GRAY)
+        y += 10
+        _draw_separator()
+
+    # ── New Requirements ──
+    new_reqs = gr.new_requirements or []
+    if new_reqs:
+        _draw_section_header("\u25b6", "Nouvelles exigences", len(new_reqs), COL_BLUE)
+        for req in new_reqs:
+            _check_space(40)
+            title = req.get("title", "")
+            priority = req.get("priority", "medium")
+            p_label = PRIORITY_LABELS.get(priority, priority)
+            p_color = PRIORITY_COLORS.get(priority, COL_GRAY)
+            _write(f"[{p_label}]  {title}", fontsize=10, bold=True, indent=10, color=p_color)
+            desc = req.get("description", "")
+            if desc:
+                _write(desc, fontsize=9, color=COL_GRAY, indent=20)
+            y += 4
+        _draw_separator()
+
+    # ── Removed Requirements ──
+    removed_reqs = gr.removed_requirements or []
+    if removed_reqs:
+        _draw_section_header("\u2716", "Exigences supprimees", len(removed_reqs), COL_RED)
+        for req in removed_reqs:
+            _check_space(35)
+            _write(req.get("title", ""), fontsize=10, bold=True, indent=10, color=COL_RED)
+            desc = req.get("description", "")
+            if desc:
+                _write(desc, fontsize=9, color=COL_GRAY, indent=20)
+            y += 4
+        _draw_separator()
+
+    # ── Modified Requirements ──
+    modified_reqs = gr.modified_requirements or []
+    if modified_reqs:
+        _draw_section_header("\u270E", "Exigences modifiees", len(modified_reqs), COL_ORANGE)
+        for req in modified_reqs:
+            _check_space(70)
+            _write(req.get("title", ""), fontsize=10, bold=True, indent=10, color=COL_ORANGE)
+            old_desc = req.get("old_description", "")
+            new_desc = req.get("new_description", "")
+            impact = req.get("impact", "")
+            if old_desc:
+                _write(f"Avant : {old_desc}", fontsize=9, color=COL_RED, indent=20)
+            if new_desc:
+                _write(f"Apres : {new_desc}", fontsize=9, color=COL_GREEN, indent=20)
+            if impact:
+                _write(f"Impact : {impact}", fontsize=9, color=COL_GRAY, indent=20)
+            y += 4
+        _draw_separator()
+
+    # ── Unchanged Requirements ──
+    unchanged_reqs = gr.unchanged_requirements or []
+    if unchanged_reqs:
+        _draw_section_header("\u2714", "Exigences inchangees", len(unchanged_reqs), COL_GREEN)
+        for req in unchanged_reqs:
+            _check_space(20)
+            _write(f"- {req.get('title', '')}", fontsize=9, indent=10, color=COL_GREEN)
+            desc = req.get("description", "")
+            if desc:
+                _write(desc, fontsize=8, color=COL_GRAY, indent=20)
+        _draw_separator()
+
+    # ── Footer on each page ──
+    for i in range(len(doc)):
+        p = doc[i]
+        footer_text = f"Analyse des ecarts - {project_name} | Page {i + 1}/{len(doc)}"
+        tw = fitz.get_text_length(footer_text, fontname="helv", fontsize=8)
+        p.insert_text(
+            fitz.Point(PAGE_W / 2 - tw / 2, PAGE_H - 25),
+            footer_text, fontsize=8, fontname="helv", color=COL_GRAY,
+        )
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+
+    return StreamingResponse(
+        io.BytesIO(pdf_bytes),
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="analyse_ecarts_{project_name}.pdf"'},
+    )
+
+
 async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
     """Background task for gap analysis.
 
