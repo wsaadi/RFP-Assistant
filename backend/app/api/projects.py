@@ -2148,6 +2148,62 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
         }
 
 
+async def _find_best_chapter(
+    db: AsyncSession, project_id: uuid.UUID, search_text: str,
+) -> tuple:
+    """Find the best matching chapter for a given compliance gap text.
+
+    Uses a scoring approach: compares the gap text against each chapter's
+    title, description, and rfp_requirement to find the most relevant one.
+    Returns (chapter, score) or (None, 0) if no chapters exist.
+    """
+    result = await db.execute(
+        select(Chapter)
+        .where(Chapter.project_id == project_id)
+        .order_by(Chapter.order)
+    )
+    all_chapters = result.scalars().all()
+    if not all_chapters:
+        return None, 0
+
+    search_lower = search_text.lower()
+    search_words = set(w for w in search_lower.split() if len(w) > 3)
+
+    best_chapter = None
+    best_score = -1
+
+    for chapter in all_chapters:
+        score = 0
+        ch_title = (chapter.title or "").lower()
+        ch_desc = (chapter.description or "").lower()
+        ch_rfp = (chapter.rfp_requirement or "").lower()
+        ch_combined = f"{ch_title} {ch_desc} {ch_rfp}"
+
+        # Word overlap scoring
+        ch_words = set(w for w in ch_combined.split() if len(w) > 3)
+        overlap = search_words & ch_words
+        score += len(overlap) * 3
+
+        # Substring matching on title (strong signal)
+        for word in search_words:
+            if word in ch_title:
+                score += 5
+
+        # Prefer chapters that already have content (more context for generation)
+        if (chapter.content or "").strip():
+            score += 1
+
+        # Prefer leaf chapters (sub-chapters) over root chapters
+        if chapter.parent_id:
+            score += 1
+
+        if score > best_score:
+            best_score = score
+            best_chapter = chapter
+
+    return best_chapter, best_score
+
+
 @router.post("/{project_id}/compliance-analysis/generate-recommendation")
 async def generate_recommendation_content(
     project_id: uuid.UUID,
@@ -2159,16 +2215,19 @@ async def generate_recommendation_content(
 
     Body: {
         "recommendation": "the recommendation or missing element text",
-        "chapter_id": "optional target chapter id to inject content into",
-        "missing_description": "optional description of what is missing (for missing elements)"
+        "chapter_id": "optional override – if omitted the best chapter is auto-detected",
+        "missing_description": "optional description of what is missing (for missing elements)",
+        "inject": true/false (default true) – whether to inject into the chapter
     }
 
-    When chapter_id is provided, the generated content is appended to the chapter.
+    The AI automatically identifies the best target chapter based on semantic matching.
     The generation uses old response documents and RFP context for richer, more relevant content.
+    Returns: {content, chapter_id, chapter_title} so the frontend knows where content was injected.
     """
     recommendation = request.get("recommendation", "").strip()
     chapter_id = request.get("chapter_id")
     missing_description = request.get("missing_description", "").strip()
+    inject = request.get("inject", True)
 
     if not recommendation:
         raise HTTPException(status_code=400, detail="Recommendation manquante")
@@ -2192,17 +2251,25 @@ async def generate_recommendation_content(
     )
     old_response_context = "\n\n".join([c["content"] for c in old_response_chunks]) if old_response_chunks else ""
 
-    # Load target chapter content if specified (to generate content that integrates naturally)
-    existing_chapter_content = ""
-    chapter_title = ""
+    # Auto-detect or load target chapter
+    target_chapter = None
     if chapter_id:
         ch_result = await db.execute(
             select(Chapter).where(Chapter.id == uuid.UUID(chapter_id)).where(Chapter.project_id == project_id)
         )
         target_chapter = ch_result.scalar_one_or_none()
-        if target_chapter:
-            existing_chapter_content = target_chapter.content or ""
-            chapter_title = target_chapter.title or ""
+    elif inject:
+        # Auto-detect the best matching chapter
+        search_text = f"{recommendation} {missing_description}"
+        target_chapter, _score = await _find_best_chapter(db, project_id, search_text)
+
+    existing_chapter_content = ""
+    chapter_title = ""
+    resolved_chapter_id = None
+    if target_chapter:
+        existing_chapter_content = target_chapter.content or ""
+        chapter_title = target_chapter.title or ""
+        resolved_chapter_id = str(target_chapter.id)
 
     # Anonymize all texts
     anon_rec = await AnonymizationService.anonymize_text(recommendation, project_id, db)
@@ -2268,10 +2335,11 @@ Contexte de rédaction (informations sur notre société et notre approche):
         logger.exception("Recommendation content generation failed")
         raise HTTPException(status_code=500, detail=f"Erreur de génération: {str(e)}")
 
-    # If a target chapter is specified, append the content
-    if chapter_id:
+    # Inject into the target chapter
+    if inject and target_chapter:
+        # Re-fetch to avoid stale state
         ch_result = await db.execute(
-            select(Chapter).where(Chapter.id == uuid.UUID(chapter_id)).where(Chapter.project_id == project_id)
+            select(Chapter).where(Chapter.id == target_chapter.id)
         )
         chapter = ch_result.scalar_one_or_none()
         if chapter:
@@ -2279,7 +2347,11 @@ Contexte de rédaction (informations sur notre société et notre approche):
             chapter.content = (chapter.content or "") + separator + content
             await db.commit()
 
-    return {"content": content, "chapter_id": chapter_id}
+    return {
+        "content": content,
+        "chapter_id": resolved_chapter_id,
+        "chapter_title": chapter_title,
+    }
 
 
 @router.get("/{project_id}/compliance-analysis/export-pdf")
