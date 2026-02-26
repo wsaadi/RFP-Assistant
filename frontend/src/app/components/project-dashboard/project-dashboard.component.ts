@@ -2123,7 +2123,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.api.updateProject(this.projectId, { ai_context: this.aiContextDraft }).subscribe({
       next: () => {
         this.snackBar.open('Contexte IA enregistré', 'OK', { duration: 2000 });
-        this.project.ai_context = this.aiContextDraft;
+        if (this.project) this.project.ai_context = this.aiContextDraft;
         this.editingAiContext = false;
       },
       error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
