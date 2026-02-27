@@ -87,6 +87,7 @@ services:
       - rfp-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "dgx-spark:192.168.10.170"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
       interval: 30s
@@ -144,6 +145,7 @@ services:
       - rfp-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
+      - "dgx-spark:192.168.10.170"
     deploy:
       resources:
         limits:
@@ -174,3 +176,5 @@ volumes:
 networks:
   rfp-network:
     driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "true"
