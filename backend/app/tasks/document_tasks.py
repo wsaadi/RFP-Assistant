@@ -210,6 +210,7 @@ async def _process_document_async(document_id: str, project_id: str):
 
         # ── Phase 3b: Save chunks to DB ──
         logger.info("[doc:%s] Phase 3b: Saving %d chunks to DB", document_id, len(chunks))
+        ProgressTracker.update(document_id, "saving_chunks")
         async with TaskSession() as db:
             for chunk_data, anonymized in zip(chunks, anonymized_texts):
                 db_chunk = DocumentChunk(
@@ -257,6 +258,7 @@ async def _process_document_async(document_id: str, project_id: str):
 
         # ── Phase 3d: Save images + finalize document ──
         logger.info("[doc:%s] Phase 3d: Finalizing", document_id)
+        ProgressTracker.update(document_id, "finalizing")
         async with TaskSession() as db:
             for img_data in images_data:
                 db_image = DocumentImage(

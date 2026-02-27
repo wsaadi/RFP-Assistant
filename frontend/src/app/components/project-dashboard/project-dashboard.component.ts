@@ -168,8 +168,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       <ng-container *ngIf="doc.processing_status === 'completed'">
                         - {{ doc.page_count }} pages - {{ doc.chunk_count }} chunks
                       </ng-container>
-                      <mat-chip [class]="'proc-' + doc.processing_status" size="small">
-                        {{ statusLabel(doc.processing_status) }}
+                      <mat-chip [class]="'proc-' + getEffectiveStatus(doc)" size="small">
+                        {{ statusLabel(getEffectiveStatus(doc)) }}
                       </mat-chip>
                     </span>
                     <button mat-icon-button matListItemMeta (click)="deleteDoc(doc.id)"><mat-icon>delete</mat-icon></button>
@@ -177,29 +177,34 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                   <!-- Processing progress bar with step details -->
                   <div *ngIf="getProgress(doc.id) as prog" class="doc-progress">
                     <div class="progress-info">
-                      <mat-spinner *ngIf="prog.progress > 0 && prog.step !== 'completed'" diameter="16"></mat-spinner>
+                      <mat-icon *ngIf="prog.step === 'queued'" class="progress-queued-icon">schedule</mat-icon>
+                      <mat-spinner *ngIf="prog.progress > 0 && prog.step !== 'completed' && prog.step !== 'queued'" diameter="16"></mat-spinner>
                       <mat-icon *ngIf="prog.step === 'completed'" class="progress-done-icon">check_circle</mat-icon>
                       <span class="progress-label">{{ prog.step_label }}</span>
                       <span class="progress-pct" *ngIf="prog.progress > 0">{{ prog.progress }}%</span>
                     </div>
                     <mat-progress-bar
-                      [mode]="prog.progress > 0 ? 'determinate' : 'indeterminate'"
+                      [mode]="prog.step === 'queued' ? 'indeterminate' : (prog.progress > 0 ? 'determinate' : 'indeterminate')"
                       [value]="prog.progress"
-                      [color]="prog.progress < 0 ? 'warn' : 'primary'">
+                      [color]="prog.progress < 0 ? 'warn' : (prog.step === 'queued' ? 'accent' : 'primary')">
                     </mat-progress-bar>
-                    <!-- Step indicators -->
+                    <!-- Step indicators (8 steps) -->
                     <div class="progress-steps" *ngIf="prog.progress > 0 && prog.step !== 'completed' && prog.step !== 'failed'">
-                      <span class="step-dot" [class.active]="prog.progress >= 10" [class.current]="prog.step === 'reading'" matTooltip="Lecture">1</span>
+                      <span class="step-dot" [class.active]="prog.progress >= 5" [class.current]="prog.step === 'reading'" matTooltip="Lecture">1</span>
+                      <span class="step-line" [class.active]="prog.progress >= 15"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 15" [class.current]="prog.step === 'extracting_text'" matTooltip="Extraction texte">2</span>
                       <span class="step-line" [class.active]="prog.progress >= 30"></span>
-                      <span class="step-dot" [class.active]="prog.progress >= 30" [class.current]="prog.step === 'extracting_text'" matTooltip="Extraction texte">2</span>
+                      <span class="step-dot" [class.active]="prog.progress >= 30" [class.current]="prog.step === 'extracting_images'" matTooltip="Extraction images">3</span>
+                      <span class="step-line" [class.active]="prog.progress >= 40"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 40" [class.current]="prog.step === 'chunking'" matTooltip="Decoupage">4</span>
                       <span class="step-line" [class.active]="prog.progress >= 50"></span>
-                      <span class="step-dot" [class.active]="prog.progress >= 50" [class.current]="prog.step === 'extracting_images'" matTooltip="Extraction images">3</span>
+                      <span class="step-dot" [class.active]="prog.progress >= 50" [class.current]="prog.step === 'anonymizing'" matTooltip="Anonymisation">5</span>
                       <span class="step-line" [class.active]="prog.progress >= 65"></span>
-                      <span class="step-dot" [class.active]="prog.progress >= 65" [class.current]="prog.step === 'chunking'" matTooltip="Decoupage">4</span>
+                      <span class="step-dot" [class.active]="prog.progress >= 65" [class.current]="prog.step === 'saving_chunks'" matTooltip="Enregistrement">6</span>
                       <span class="step-line" [class.active]="prog.progress >= 75"></span>
-                      <span class="step-dot" [class.active]="prog.progress >= 75" [class.current]="prog.step === 'anonymizing'" matTooltip="Anonymisation">5</span>
+                      <span class="step-dot" [class.active]="prog.progress >= 75" [class.current]="prog.step === 'indexing'" matTooltip="Indexation">7</span>
                       <span class="step-line" [class.active]="prog.progress >= 90"></span>
-                      <span class="step-dot" [class.active]="prog.progress >= 90" [class.current]="prog.step === 'indexing'" matTooltip="Indexation">6</span>
+                      <span class="step-dot" [class.active]="prog.progress >= 90" [class.current]="prog.step === 'finalizing'" matTooltip="Finalisation">8</span>
                     </div>
                   </div>
                 </div>
@@ -1354,7 +1359,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   private startPolling(): void {
     if (this.pollSub) return;
-    this.pollSub = interval(1500).pipe(
+    this.pollSub = interval(2000).pipe(
       switchMap(() => this.api.getProcessingProgress(this.projectId))
     ).subscribe({
       next: (res) => {
@@ -1363,6 +1368,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
           map[p.document_id] = p;
         }
         this.progressMap = map;
+
         if (res.progress.length === 0) {
           // No active progress tracked server-side (e.g. after a restart).
           // Refresh documents only to avoid an infinite loadAll→poll loop.
@@ -1371,9 +1377,41 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
           this.api.getDocuments(this.projectId).subscribe({
             next: (d) => { this.documents = d; this._refreshDocsByCategory(); },
           });
-        } else if (res.progress.every(p => p.step === 'completed' || p.step === 'failed' || p.step === 'stalled')) {
-          this.stopPolling();
-          this.loadAll();
+          return;
+        }
+
+        // Use db_status as source of truth for completion.
+        // This avoids the delay between Redis progress reaching 100% and DB commit.
+        const allDone = res.progress.every(p => {
+          const dbStatus = (p as any).db_status;
+          if (dbStatus === 'completed' || dbStatus === 'failed') return true;
+          if (p.step === 'completed' || p.step === 'failed' || p.step === 'stalled') return true;
+          return false;
+        });
+
+        if (allDone) {
+          // Also update document list to sync statuses from DB
+          this.api.getDocuments(this.projectId).subscribe({
+            next: (d) => {
+              this.documents = d;
+              this._refreshDocsByCategory();
+              // Only stop polling if DB confirms no more pending/processing docs
+              const stillActive = d.some(doc =>
+                doc.processing_status === 'pending' || doc.processing_status === 'processing'
+              );
+              if (!stillActive) {
+                this.stopPolling();
+                this.progressMap = {};
+                this.loadAll();
+              }
+            },
+          });
+        } else {
+          // While processing, also refresh document statuses periodically
+          // so that the status chip updates in near real-time
+          this.api.getDocuments(this.projectId).subscribe({
+            next: (d) => { this.documents = d; this._refreshDocsByCategory(); },
+          });
         }
       },
       error: () => { this.stopPolling(); },
@@ -1394,6 +1432,20 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       pending: 'En attente', processing: 'Traitement...', completed: 'Traité', failed: 'Échec',
     };
     return labels[status] || status;
+  }
+
+  /**
+   * Get the most up-to-date status for a document by combining
+   * the DB status from the document list with real-time progress data.
+   * Progress data's db_status is fresher than the document list
+   * (which is only refreshed periodically).
+   */
+  getEffectiveStatus(doc: DocumentInfo): string {
+    const prog = this.progressMap[doc.id];
+    if (prog?.db_status) {
+      return prog.db_status;
+    }
+    return doc.processing_status;
   }
 
   private _refreshDocsByCategory(): void {
