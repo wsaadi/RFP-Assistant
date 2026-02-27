@@ -67,6 +67,7 @@ class AnonymizationService:
     _model = None
     _model_load_failed = False  # sentinel to avoid retrying a broken model
     _device = "cpu"  # "cpu", "mps" (Apple Silicon), or "cuda"
+    _using_onnx = False
 
     @classmethod
     def _detect_device(cls) -> str:
@@ -91,12 +92,25 @@ class AnonymizationService:
         try:
             from gliner import GLiNER
             from ..config import settings
+
             cls._device = cls._detect_device()
-            logger.info("Loading GLiNER model: %s on device: %s ...", settings.gliner_model, cls._device)
-            cls._model = GLiNER.from_pretrained(settings.gliner_model)
-            if cls._device != "cpu":
-                cls._model = cls._model.to(cls._device)
-            logger.info("GLiNER model loaded successfully on %s", cls._device)
+            use_onnx = settings.gliner_use_onnx
+
+            if use_onnx:
+                logger.info("Loading GLiNER model (ONNX): %s ...", settings.gliner_model)
+                cls._model = GLiNER.from_pretrained(
+                    settings.gliner_model,
+                    load_onnx_model=True,
+                    load_tokenizer=True,
+                )
+                cls._using_onnx = True
+                logger.info("GLiNER ONNX model loaded successfully")
+            else:
+                logger.info("Loading GLiNER model: %s on device: %s ...", settings.gliner_model, cls._device)
+                cls._model = GLiNER.from_pretrained(settings.gliner_model)
+                if cls._device != "cpu":
+                    cls._model = cls._model.to(cls._device)
+                logger.info("GLiNER model loaded successfully on %s", cls._device)
         except Exception as e:
             logger.error("Could not load GLiNER model: %s", e, exc_info=True)
             cls._model = None
@@ -199,10 +213,15 @@ class AnonymizationService:
         seen: List[set] = [set() for _ in texts]
 
         model = cls._get_model()
-        # GPU is not thread-safe; use 1 worker. CPU benefits from parallelism.
-        n_workers = 1 if cls._device != "cpu" else min(os.cpu_count() or 4, 4)
-        logger.debug("[batch_detect] GLiNER on %s, processing %d texts with %d workers",
-                     cls._device, len(texts), n_workers)
+        # GPU is not thread-safe → 1 worker.
+        # ONNX Runtime handles its own parallelism internally → 1 worker.
+        # CPU PyTorch benefits from thread-level parallelism → multiple workers.
+        if cls._device != "cpu" or cls._using_onnx:
+            n_workers = 1
+        else:
+            n_workers = min(os.cpu_count() or 4, 4)
+        logger.debug("[batch_detect] GLiNER on %s (onnx=%s), processing %d texts with %d workers",
+                     cls._device, cls._using_onnx, len(texts), n_workers)
 
         if model is not None:
             done_count = 0
