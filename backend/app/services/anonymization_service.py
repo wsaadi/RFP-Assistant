@@ -29,8 +29,9 @@ from ..models.project import AnonymizationMapping, EntityType
 logger = logging.getLogger(__name__)
 
 # ── Ollama configuration ──
-# Ollama runs on the DGX Spark at 192.168.10.170 (GPU-accelerated).
-_OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://192.168.10.170:11434")
+# Ollama runs on the DGX Spark — Docker containers reach it via
+# host.docker.internal (Mac host forwards port 11434 to DGX via socat).
+_OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 _OLLAMA_MODEL = os.environ.get("OLLAMA_NER_MODEL", "gemma3:4b")
 _OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_NER_TIMEOUT", "60"))
 # Maximum concurrent requests to Ollama (avoid overloading)
