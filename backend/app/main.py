@@ -121,6 +121,30 @@ async def lifespan(app: FastAPI):
             END $$
         """))
 
+        # Add AI provider configuration columns to ai_configs
+        await conn.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE ai_configs ADD COLUMN provider VARCHAR(20) DEFAULT 'mistral';
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
+        await conn.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE ai_configs ADD COLUMN ollama_base_url VARCHAR(500) DEFAULT 'http://host.docker.internal:11434';
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
+        await conn.execute(text("""
+            DO $$ BEGIN
+                ALTER TABLE ai_configs ADD COLUMN ollama_model VARCHAR(100) DEFAULT 'mistral:latest';
+            EXCEPTION WHEN duplicate_column THEN NULL;
+            END $$
+        """))
+        # Make mistral_api_key_encrypted nullable (not needed for Ollama provider)
+        await conn.execute(text("""
+            ALTER TABLE ai_configs ALTER COLUMN mistral_api_key_encrypted DROP NOT NULL
+        """))
+
     # Create data directories
     for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir]:
         os.makedirs(dir_path, exist_ok=True)

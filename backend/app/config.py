@@ -35,6 +35,11 @@ class Settings(BaseSettings):
     ollama_ner_timeout: int = 60
     ollama_ner_concurrency: int = 3
 
+    # Ollama (generation provider — alternative to Mistral)
+    ollama_gen_model: str = "mistral:latest"
+    ollama_gen_timeout: int = 300
+    ollama_gen_stream_timeout: int = 600
+
     # HuggingFace
     hf_token: Optional[str] = None
 

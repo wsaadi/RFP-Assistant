@@ -55,7 +55,7 @@ async def _run_chapter_generation(
     from ..models.project import RFPProject, AIConfig
     from ..models.chapter import Chapter, ChapterStatus
     from ..models.document import Document, DocumentChunk, DocumentCategory, ProcessingStatus
-    from ..services.ai_service import MistralAIService
+    from ..services.ai_service import MistralAIService, create_ai_service
     from ..services.vector_service import VectorService
     from ..services.anonymization_service import AnonymizationService
 
@@ -75,7 +75,7 @@ async def _run_chapter_generation(
                 select(AIConfig).where(AIConfig.workspace_id == workspace_id)
             )
             config = config_result.scalar_one_or_none()
-            ai_service = MistralAIService.from_config(config, config.mistral_api_key_encrypted)
+            ai_service = create_ai_service(config)
 
             result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
             chapter = result.scalar_one()
