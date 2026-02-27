@@ -1,6 +1,7 @@
 """Document API routes for upload, processing, and search."""
 import uuid
 import os
+from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -275,11 +276,60 @@ async def get_processing_progress(
 ):
     """Get processing progress for all documents in a project."""
     result = await db.execute(
-        select(Document.id).where(
+        select(
+            Document.id,
+            Document.original_filename,
+            Document.processing_status,
+            Document.created_at,
+        ).where(
             Document.project_id == project_id,
             Document.processing_status.in_([ProcessingStatus.PENDING, ProcessingStatus.PROCESSING]),
         )
     )
-    doc_ids = [str(row[0]) for row in result.all()]
+    rows = result.all()
+    if not rows:
+        return {"progress": []}
+
+    doc_ids = [str(row[0]) for row in rows]
     progress_list = ProgressTracker.get_for_project(doc_ids)
+
+    # Build a set of document IDs that have Redis progress entries
+    tracked_ids = {p["document_id"] for p in progress_list if "document_id" in p}
+
+    # For documents in PROCESSING/PENDING state without Redis progress
+    # (e.g. Redis key expired, worker crashed), detect stalled processing
+    # and auto-mark as FAILED so the user isn't stuck forever.
+    now = datetime.now(timezone.utc)
+    # Beyond the Celery hard time limit (15 min) + margin, the task is dead.
+    stall_threshold = timedelta(minutes=20)
+
+    for row in rows:
+        doc_id_str = str(row[0])
+        if doc_id_str not in tracked_ids:
+            age = now - row[3] if row[3] else timedelta(0)
+            if age > stall_threshold:
+                # Task is certainly dead — auto-mark as FAILED in the DB
+                doc_result = await db.execute(
+                    select(Document).where(Document.id == row[0])
+                )
+                doc = doc_result.scalar_one_or_none()
+                if doc:
+                    doc.processing_status = ProcessingStatus.FAILED
+                    await db.commit()
+                progress_list.append({
+                    "document_id": doc_id_str,
+                    "filename": row[1],
+                    "step": "failed",
+                    "step_label": "Traitement interrompu — veuillez relancer",
+                    "progress": -1,
+                })
+            else:
+                progress_list.append({
+                    "document_id": doc_id_str,
+                    "filename": row[1],
+                    "step": "stalled",
+                    "step_label": "Traitement interrompu",
+                    "progress": -1,
+                })
+
     return {"progress": progress_list}
