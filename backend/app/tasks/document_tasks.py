@@ -190,11 +190,16 @@ async def _process_document_async(document_id: str, project_id: str):
         ProgressTracker.update(document_id, "anonymizing")
 
         anonymized_texts = None
+
+        def _anon_progress(done: int, total: int):
+            ProgressTracker.update_sub_progress(document_id, done, total)
+
         try:
             async with TaskSession() as db:
                 chunk_texts = [c["content"] for c in chunks]
                 anonymized_texts = await AnonymizationService.anonymize_chunks_batch(
-                    chunk_texts, uuid.UUID(project_id), db
+                    chunk_texts, uuid.UUID(project_id), db,
+                    progress_callback=_anon_progress,
                 )
                 await db.commit()  # persist new anonymization mappings
             logger.info("[doc:%s] Anonymization completed successfully", document_id)

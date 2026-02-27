@@ -36,6 +36,12 @@ _OLLAMA_MODEL = os.environ.get("OLLAMA_NER_MODEL", "gemma3:4b")
 _OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_NER_TIMEOUT", "60"))
 # Maximum concurrent requests to Ollama (avoid overloading)
 _OLLAMA_CONCURRENCY = int(os.environ.get("OLLAMA_NER_CONCURRENCY", "3"))
+# Number of chunks grouped into a single LLM call.
+# 4 chunks × ~300 words = ~1200 words ≈ 1600 tokens — well within model capacity.
+# Reduces total LLM calls by ~75% since the system prompt is only sent once per group.
+_CHUNKS_PER_GROUP = int(os.environ.get("OLLAMA_NER_CHUNKS_PER_GROUP", "4"))
+# Separator between grouped chunks in the prompt
+_CHUNK_SEPARATOR = "\n\n---\n\n"
 
 # ── NER Prompt ──
 # This prompt is the core of the anonymization quality. It tells the LLM
@@ -72,8 +78,11 @@ IMPORTANT :
 - "le prestataire" → NE PAS extraire
 - "la société Atos" → extraire "Atos"
 
+Le texte peut contenir plusieurs blocs séparés par "--- BLOC N ---".
+Dans ce cas, ajoute le numéro du bloc dans ta réponse.
+
 Réponds UNIQUEMENT avec un tableau JSON (sans markdown, sans explication) :
-[{"text": "texte exact trouvé", "type": "person|company|email|address|project_code"}]
+[{"text": "texte exact trouvé", "type": "person|company|email|address|project_code", "block": 1}]
 
 Si aucune entité sensible n'est trouvée, réponds : []"""
 
@@ -325,14 +334,82 @@ class AnonymizationService:
             return True
         return cls._ollama_available
 
+    # ── Regex for extracting "interesting" words (potential proper nouns) ──
+    _CAPITALIZED_WORD_RE = re.compile(r'\b[A-ZÀ-ÖÙ-Ý][a-zà-öù-ÿ]{2,}(?:\s+[A-ZÀ-ÖÙ-Ý][a-zà-öù-ÿ]{2,})*\b')
+
+    @classmethod
+    def _can_skip_llm(cls, text: str, known_originals: set) -> bool:
+        """Check if we can skip the LLM call for this text.
+
+        Returns True if all capitalized word sequences (potential proper nouns)
+        are either already in the known mappings or in the stoplist.
+        This means the LLM would find nothing new — we can just apply
+        existing mappings directly and save an API call.
+        """
+        if not known_originals:
+            return False
+
+        # Find all capitalized word sequences (potential proper nouns)
+        candidates = cls._CAPITALIZED_WORD_RE.findall(text)
+        if not candidates:
+            # No capitalized words at all → nothing to anonymize
+            return True
+
+        for candidate in candidates:
+            candidate_clean = candidate.strip()
+            if len(candidate_clean) < _MIN_ENTITY_LENGTH:
+                continue
+            if candidate_clean.lower() in _STOPLIST_LOWER:
+                continue
+            if candidate_clean in known_originals:
+                continue
+            # Check partial matches (e.g., "Jean" is part of "Jean Dupont")
+            if any(candidate_clean in orig for orig in known_originals):
+                continue
+            # Found a capitalized sequence not in mappings or stoplist
+            # → might be a new entity, need LLM
+            return False
+
+        return True
+
     @classmethod
     async def _detect_entities_llm(cls, text: str) -> List[Tuple[str, str, int, int]]:
-        """Detect entities using the local LLM via Ollama.
+        """Detect entities in a single text using the local LLM via Ollama.
 
         Returns list of (entity_text, label, start_char, end_char).
         """
         if not text.strip():
             return []
+
+        results = await cls._detect_entities_llm_grouped([text])
+        return results[0] if results else []
+
+    @classmethod
+    async def _detect_entities_llm_grouped(
+        cls,
+        texts: List[str],
+    ) -> List[List[Tuple[str, str, int, int]]]:
+        """Detect entities across multiple texts in a single LLM call.
+
+        Groups texts with delimiters so the LLM processes them all at once,
+        paying the system prompt cost only once per group instead of per chunk.
+        With 4 chunks per group, this reduces LLM calls by ~75%.
+
+        Returns a list of entity lists, one per input text.
+        """
+        results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
+
+        if not any(t.strip() for t in texts):
+            return results
+
+        # Build the grouped prompt with block delimiters
+        if len(texts) == 1:
+            user_content = f"Texte à analyser :\n\n{texts[0]}"
+        else:
+            parts = []
+            for i, text in enumerate(texts, 1):
+                parts.append(f"--- BLOC {i} ---\n{text}")
+            user_content = "Textes à analyser :\n\n" + _CHUNK_SEPARATOR.join(parts)
 
         client = await cls._get_http_client()
 
@@ -343,12 +420,12 @@ class AnonymizationService:
                     "model": _OLLAMA_MODEL,
                     "messages": [
                         {"role": "system", "content": _NER_SYSTEM_PROMPT},
-                        {"role": "user", "content": f"Texte à analyser :\n\n{text}"},
+                        {"role": "user", "content": user_content},
                     ],
                     "stream": False,
                     "options": {
                         "temperature": 0.0,
-                        "num_predict": 2048,
+                        "num_predict": 4096,
                     },
                     "format": "json",
                 },
@@ -357,93 +434,150 @@ class AnonymizationService:
             result = resp.json()
             raw_content = result.get("message", {}).get("content", "[]")
 
-            # Parse the JSON response
             entities_data = _parse_llm_json(raw_content)
             if not entities_data:
-                return []
+                return results
 
-            # Map LLM output to (text, label, start, end) tuples
-            entities = []
             for item in entities_data:
                 entity_text = item.get("text", "").strip()
                 entity_type = item.get("type", "").lower().strip()
+                # Default to block 1 for single-text mode
+                block_num = item.get("block", 1)
 
                 if not entity_text or not entity_type:
                     continue
-
                 if entity_type not in LABEL_TO_ENTITY_TYPE:
                     continue
-
                 if not _should_keep_entity(entity_text, entity_type):
                     continue
 
-                # Find all occurrences in the original text
-                start = 0
-                while True:
-                    idx = text.find(entity_text, start)
-                    if idx == -1:
-                        break
-                    entities.append((entity_text, entity_type, idx, idx + len(entity_text)))
-                    start = idx + len(entity_text)
+                # Determine which text(s) this entity belongs to
+                if len(texts) == 1:
+                    target_indices = [0]
+                elif isinstance(block_num, int) and 1 <= block_num <= len(texts):
+                    target_indices = [block_num - 1]
+                else:
+                    # Block not specified or invalid — search all texts
+                    target_indices = list(range(len(texts)))
 
-            # Deduplicate by (text, start)
-            seen = set()
-            unique_entities = []
-            for e in entities:
-                key = (e[0], e[2])
-                if key not in seen:
-                    seen.add(key)
-                    unique_entities.append(e)
+                for text_idx in target_indices:
+                    text = texts[text_idx]
+                    start = 0
+                    while True:
+                        idx = text.find(entity_text, start)
+                        if idx == -1:
+                            break
+                        results[text_idx].append(
+                            (entity_text, entity_type, idx, idx + len(entity_text))
+                        )
+                        start = idx + len(entity_text)
 
-            unique_entities.sort(key=lambda x: x[2])
-            return unique_entities
+            # Deduplicate per text
+            for text_idx in range(len(texts)):
+                seen = set()
+                unique = []
+                for e in results[text_idx]:
+                    key = (e[0], e[2])
+                    if key not in seen:
+                        seen.add(key)
+                        unique.append(e)
+                unique.sort(key=lambda x: x[2])
+                results[text_idx] = unique
+
+            return results
 
         except httpx.TimeoutException:
-            logger.warning("Ollama request timed out after %ds", _OLLAMA_TIMEOUT)
-            return []
+            logger.warning("Ollama grouped request timed out after %ds", _OLLAMA_TIMEOUT)
+            return results
         except httpx.HTTPStatusError as e:
             logger.warning("Ollama HTTP error: %s", e)
-            return []
+            return results
         except Exception as e:
-            logger.error("LLM entity detection failed: %s", e, exc_info=True)
-            return []
+            logger.error("LLM grouped entity detection failed: %s", e, exc_info=True)
+            return results
 
     @classmethod
     async def _batch_detect_entities(
         cls,
         texts: List[str],
         progress_callback=None,
+        known_originals: Optional[set] = None,
     ) -> List[List[Tuple[str, str, int, int]]]:
         """Detect entities across multiple texts using the LLM.
 
-        Uses a semaphore to limit concurrent Ollama requests.
+        Optimizations applied:
+        1. Smart cache: chunks where all proper nouns are already known are
+           skipped (no LLM call needed).
+        2. Chunk grouping: remaining chunks are grouped N-at-a-time into
+           single LLM calls, reducing total calls by ~75%.
+        3. Concurrency: groups are processed concurrently via semaphore.
+
         Falls back to regex-only if Ollama is unavailable.
         """
         results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
+        known = known_originals or set()
 
         ollama_ok = await cls._check_ollama()
 
         if ollama_ok:
+            # ── Step 1: Identify which chunks need LLM analysis ──
+            needs_llm: List[int] = []  # indices of chunks that need LLM
+            skipped_count = 0
+
+            for idx, text in enumerate(texts):
+                if cls._can_skip_llm(text, known):
+                    skipped_count += 1
+                else:
+                    needs_llm.append(idx)
+
+            if skipped_count > 0:
+                logger.info(
+                    "[batch_detect] Smart cache: skipped %d/%d chunks (all entities already known)",
+                    skipped_count, len(texts),
+                )
+
+            # ── Step 2: Group remaining chunks into batches of N ──
+            groups: List[List[int]] = []
+            for i in range(0, len(needs_llm), _CHUNKS_PER_GROUP):
+                groups.append(needs_llm[i:i + _CHUNKS_PER_GROUP])
+
+            total_groups = len(groups)
+            logger.info(
+                "[batch_detect] Processing %d chunks in %d LLM calls (group size=%d, skipped=%d)",
+                len(needs_llm), total_groups, _CHUNKS_PER_GROUP, skipped_count,
+            )
+
+            # ── Step 3: Process groups concurrently ──
             semaphore = asyncio.Semaphore(_OLLAMA_CONCURRENCY)
-            done_count = 0
+            done_groups = 0
 
-            async def _process_one(idx: int, text: str):
-                nonlocal done_count
+            async def _process_group(group_indices: List[int]):
+                nonlocal done_groups
                 async with semaphore:
-                    entities = await cls._detect_entities_llm(text)
-                    results[idx] = entities
-                    done_count += 1
+                    group_texts = [texts[idx] for idx in group_indices]
+                    group_results = await cls._detect_entities_llm_grouped(group_texts)
+                    for i, idx in enumerate(group_indices):
+                        results[idx] = group_results[i]
+                    done_groups += 1
                     if progress_callback:
-                        progress_callback(done_count, len(texts))
+                        # Report progress based on chunks done
+                        chunks_done = skipped_count + min(
+                            done_groups * _CHUNKS_PER_GROUP, len(needs_llm)
+                        )
+                        progress_callback(chunks_done, len(texts))
 
-            # Process all texts concurrently (limited by semaphore)
-            tasks = [_process_one(idx, text) for idx, text in enumerate(texts)]
+            tasks = [_process_group(group) for group in groups]
             await asyncio.gather(*tasks, return_exceptions=True)
+
+            # Final progress report
+            if progress_callback:
+                progress_callback(len(texts), len(texts))
 
             total_entities = sum(len(r) for r in results)
             logger.info(
-                "[batch_detect] LLM NER: %d entities across %d texts",
-                total_entities, len(texts),
+                "[batch_detect] LLM NER done: %d entities across %d texts "
+                "(%d LLM calls, %d skipped via cache)",
+                total_entities, len(texts), total_groups, skipped_count,
             )
         else:
             logger.info("[batch_detect] Ollama unavailable, using regex-only fallback")
@@ -590,8 +724,13 @@ class AnonymizationService:
         for mapping in existing_mappings.values():
             type_counts[mapping.entity_type] += 1
 
-        # Batch NER across all texts
-        all_entities = await cls._batch_detect_entities(texts, progress_callback)
+        # Build set of known original values for the smart cache
+        known_originals = set(existing_mappings.keys())
+
+        # Batch NER across all texts (smart cache + chunk grouping + concurrency)
+        all_entities = await cls._batch_detect_entities(
+            texts, progress_callback, known_originals=known_originals,
+        )
 
         results = []
         for text, entities in zip(texts, all_entities):
