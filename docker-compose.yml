@@ -69,8 +69,8 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      # Ollama on the Mac host — GPU-accelerated via Metal
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      # Ollama on the DGX Spark (local network)
+      - OLLAMA_BASE_URL=http://192.168.10.170:11434
       - OLLAMA_NER_MODEL=${OLLAMA_NER_MODEL:-gemma3:4b}
       - OLLAMA_NER_TIMEOUT=60
       - OLLAMA_NER_CONCURRENCY=3
@@ -129,7 +129,7 @@ services:
       - REDIS_URL=redis://redis:6379/0
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+      - OLLAMA_BASE_URL=http://192.168.10.170:11434
       - OLLAMA_NER_MODEL=${OLLAMA_NER_MODEL:-gemma3:4b}
       - OLLAMA_NER_TIMEOUT=60
       - OLLAMA_NER_CONCURRENCY=3

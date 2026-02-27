@@ -29,9 +29,8 @@ class Settings(BaseSettings):
     embedding_model: str = "intfloat/multilingual-e5-base"
 
     # Ollama (local LLM for anonymization NER)
-    # On Docker Desktop for Mac: host.docker.internal points to the Mac host
-    # where Ollama runs natively with Metal GPU acceleration.
-    ollama_base_url: str = "http://host.docker.internal:11434"
+    # Ollama on DGX Spark (local network GPU server)
+    ollama_base_url: str = "http://192.168.10.170:11434"
     ollama_ner_model: str = "gemma3:4b"
     ollama_ner_timeout: int = 60
     ollama_ner_concurrency: int = 3
