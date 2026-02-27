@@ -202,9 +202,35 @@ class ProgressTracker:
             current["step_label"] = step["label"]
             current["progress"] = step["pct"]
             current["updated_at"] = time.time()
+            # Clear sub-progress state from previous step
+            current.pop("step_base_label", None)
             r.set(key, json.dumps(current, default=str), ex=_TTL_SECONDS)
 
         _safe_redis_op(_atomic_update)
+
+    @classmethod
+    def update_sub_progress(cls, document_id: str, done: int, total: int) -> None:
+        """Update the step label with sub-step progress (e.g., '12/30 chunks').
+
+        Only updates the label field — does not change step or percentage.
+        This is used during long phases like anonymization to show fine-grained
+        progress without affecting the overall progress bar.
+        """
+        def _op():
+            r = _get_redis()
+            key = _key("document", document_id)
+            raw = r.get(key)
+            if not raw:
+                return
+            current = json.loads(raw)
+            base_label = current.get("step_base_label") or current.get("step_label", "")
+            # Save the base label on first sub-progress update
+            if "step_base_label" not in current:
+                current["step_base_label"] = base_label
+            current["step_label"] = f"{base_label} ({done}/{total})"
+            current["updated_at"] = time.time()
+            r.set(key, json.dumps(current, default=str), ex=_TTL_SECONDS)
+        _safe_redis_op(_op)
 
     @classmethod
     def fail(cls, document_id: str, error: str) -> None:
