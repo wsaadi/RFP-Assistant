@@ -112,6 +112,8 @@ export interface DocumentProgress {
   step: string;
   step_label: string;
   progress: number;
+  /** Authoritative status from the database (pending/processing/completed/failed) */
+  db_status?: string;
 }
 
 export interface DocumentImage {

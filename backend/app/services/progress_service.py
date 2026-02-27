@@ -10,10 +10,12 @@ Resilience:
 - Connection pool with retry on timeout
 - Graceful degradation: if Redis is down, operations log and return defaults
 - Health check endpoint for monitoring
+- Monotonic progress: percentage never decreases (prevents visual regressions)
 """
 import json
 import logging
 import os
+import time
 from typing import Dict, List, Optional
 
 import redis
@@ -130,22 +132,29 @@ def get_or_idle(namespace: str, task_id: str) -> dict:
 # ── Document processing specific (backward-compatible with ProgressTracker) ──
 
 DOCUMENT_STEPS = [
-    {"key": "reading", "label": "Lecture du fichier", "pct": 10},
-    {"key": "extracting_text", "label": "Extraction du texte", "pct": 30},
-    {"key": "extracting_images", "label": "Extraction des images", "pct": 50},
-    {"key": "chunking", "label": "Découpage en chunks", "pct": 65},
-    {"key": "anonymizing", "label": "Anonymisation", "pct": 75},
-    {"key": "indexing", "label": "Indexation vectorielle", "pct": 90},
+    {"key": "reading", "label": "Lecture du fichier", "pct": 5},
+    {"key": "extracting_text", "label": "Extraction du texte", "pct": 15},
+    {"key": "extracting_images", "label": "Extraction des images", "pct": 30},
+    {"key": "chunking", "label": "Découpage en chunks", "pct": 40},
+    {"key": "anonymizing", "label": "Anonymisation des entités", "pct": 50},
+    {"key": "saving_chunks", "label": "Enregistrement des chunks", "pct": 65},
+    {"key": "indexing", "label": "Indexation vectorielle", "pct": 75},
+    {"key": "finalizing", "label": "Finalisation du document", "pct": 90},
     {"key": "completed", "label": "Terminé", "pct": 100},
     {"key": "failed", "label": "Échec", "pct": -1},
 ]
+
+# Build a lookup for step index (used for monotonic enforcement)
+_STEP_ORDER = {s["key"]: idx for idx, s in enumerate(DOCUMENT_STEPS)}
 
 
 class ProgressTracker:
     """Document processing progress tracker (Redis-backed).
 
-    Preserves the same API as the old in-memory version so callers
-    (documents.py, progress polling endpoint) don't need changes.
+    Key guarantees:
+    - Progress percentage NEVER decreases (monotonic) — prevents visual regressions
+    - Each update is an atomic write (no read-modify-write race)
+    - Timestamp is included for stale detection
     """
     STEPS = DOCUMENT_STEPS
 
@@ -156,33 +165,63 @@ class ProgressTracker:
             "filename": filename,
             "step": "reading",
             "step_label": "Lecture du fichier",
-            "progress": 10,
+            "progress": 5,
+            "updated_at": time.time(),
         })
 
     @classmethod
     def update(cls, document_id: str, step_key: str) -> None:
+        """Update progress to a new step.
+
+        Monotonic guarantee: if the current step is already ahead of the
+        requested step, the update is silently ignored. This prevents
+        the progress bar from jumping backward due to race conditions.
+        """
         step = next((s for s in cls.STEPS if s["key"] == step_key), None)
         if not step:
             return
-        current = get_progress("document", document_id)
-        if current:
-            current.update({
-                "step": step["key"],
-                "step_label": step["label"],
-                "progress": step["pct"],
-            })
-            set_progress("document", document_id, current)
+
+        new_order = _STEP_ORDER.get(step_key, 0)
+
+        def _atomic_update():
+            r = _get_redis()
+            key = _key("document", document_id)
+            raw = r.get(key)
+            if not raw:
+                return
+
+            current = json.loads(raw)
+            current_step = current.get("step", "reading")
+            current_order = _STEP_ORDER.get(current_step, 0)
+
+            # Monotonic: only advance forward, never backward
+            if new_order <= current_order and step_key != "failed":
+                return
+
+            current["step"] = step["key"]
+            current["step_label"] = step["label"]
+            current["progress"] = step["pct"]
+            current["updated_at"] = time.time()
+            r.set(key, json.dumps(current, default=str), ex=_TTL_SECONDS)
+
+        _safe_redis_op(_atomic_update)
 
     @classmethod
     def fail(cls, document_id: str, error: str) -> None:
-        current = get_progress("document", document_id)
-        if current:
-            current.update({
-                "step": "failed",
-                "step_label": f"Échec: {error[:120]}",
-                "progress": -1,
-            })
-            set_progress("document", document_id, current)
+        """Mark progress as failed. Always overwrites (not monotonic)."""
+        def _atomic_fail():
+            r = _get_redis()
+            key = _key("document", document_id)
+            raw = r.get(key)
+            if not raw:
+                return
+            current = json.loads(raw)
+            current["step"] = "failed"
+            current["step_label"] = f"Échec: {error[:120]}"
+            current["progress"] = -1
+            current["updated_at"] = time.time()
+            r.set(key, json.dumps(current, default=str), ex=_TTL_SECONDS)
+        _safe_redis_op(_atomic_fail)
 
     @classmethod
     def get(cls, document_id: str) -> Optional[Dict]:

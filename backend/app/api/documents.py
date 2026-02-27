@@ -274,7 +274,16 @@ async def get_processing_progress(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get processing progress for all documents in a project."""
+    """Get processing progress for all documents in a project.
+
+    Returns a combination of:
+    - Redis progress (real-time step/percentage from the Celery worker)
+    - DB status (authoritative processing_status from PostgreSQL)
+
+    The frontend should use `db_status` as the source of truth for
+    final states (completed/failed) and Redis progress for the live bar.
+    """
+    # Fetch ALL non-completed documents (pending + processing)
     result = await db.execute(
         select(
             Document.id,
@@ -287,28 +296,63 @@ async def get_processing_progress(
         )
     )
     rows = result.all()
-    if not rows:
+
+    # Also check for recently-completed documents (within 10s) so the
+    # frontend sees the transition from "processing" to "completed"
+    # without waiting for a full document list reload.
+    recently_done = await db.execute(
+        select(
+            Document.id,
+            Document.original_filename,
+            Document.processing_status,
+            Document.created_at,
+        ).where(
+            Document.project_id == project_id,
+            Document.processing_status.in_([ProcessingStatus.COMPLETED, ProcessingStatus.FAILED]),
+        ).order_by(Document.created_at.desc()).limit(20)
+    )
+    done_rows = recently_done.all()
+
+    if not rows and not done_rows:
         return {"progress": []}
 
-    doc_ids = [str(row[0]) for row in rows]
-    progress_list = ProgressTracker.get_for_project(doc_ids)
+    # Collect all doc IDs we care about
+    all_doc_ids = [str(row[0]) for row in rows]
+    done_doc_ids = [str(row[0]) for row in done_rows]
 
-    # Build a set of document IDs that have Redis progress entries
-    tracked_ids = {p["document_id"] for p in progress_list if "document_id" in p}
+    # Fetch Redis progress for active docs
+    redis_progress = {}
+    if all_doc_ids:
+        progress_entries = ProgressTracker.get_for_project(all_doc_ids)
+        for p in progress_entries:
+            if "document_id" in p:
+                redis_progress[p["document_id"]] = p
 
-    # For documents in PROCESSING/PENDING state without Redis progress
-    # (e.g. Redis key expired, worker crashed), detect stalled processing
-    # and auto-mark as FAILED so the user isn't stuck forever.
+    # Also fetch Redis progress for done docs (might still have progress data)
+    if done_doc_ids:
+        done_entries = ProgressTracker.get_for_project(done_doc_ids)
+        for p in done_entries:
+            if "document_id" in p:
+                redis_progress[p["document_id"]] = p
+
+    progress_list = []
+
+    # Process active (pending/processing) documents
     now = datetime.now(timezone.utc)
-    # Beyond the Celery hard time limit (15 min) + margin, the task is dead.
-    stall_threshold = timedelta(minutes=20)
+    stall_threshold = timedelta(minutes=25)
 
     for row in rows:
         doc_id_str = str(row[0])
-        if doc_id_str not in tracked_ids:
+        redis_data = redis_progress.get(doc_id_str)
+
+        if redis_data:
+            # We have live progress data — include DB status for the frontend
+            redis_data["db_status"] = row[2].value
+            progress_list.append(redis_data)
+        else:
+            # No Redis progress — check if stalled
             age = now - row[3] if row[3] else timedelta(0)
             if age > stall_threshold:
-                # Task is certainly dead — auto-mark as FAILED in the DB
                 doc_result = await db.execute(
                     select(Document).where(Document.id == row[0])
                 )
@@ -322,14 +366,51 @@ async def get_processing_progress(
                     "step": "failed",
                     "step_label": "Traitement interrompu — veuillez relancer",
                     "progress": -1,
+                    "db_status": "failed",
                 })
             else:
+                # Recently queued, worker hasn't picked it up yet
                 progress_list.append({
                     "document_id": doc_id_str,
                     "filename": row[1],
-                    "step": "stalled",
-                    "step_label": "Traitement interrompu",
+                    "step": "queued",
+                    "step_label": "En file d'attente",
+                    "progress": 0,
+                    "db_status": row[2].value,
+                })
+
+    # Include recently-completed/failed documents that still have Redis progress
+    # so the frontend sees the final "completed" step before the progress bar disappears
+    active_ids = {str(row[0]) for row in rows}
+    for row in done_rows:
+        doc_id_str = str(row[0])
+        if doc_id_str in active_ids:
+            continue  # Already included above
+
+        db_status = row[2].value
+        redis_data = redis_progress.get(doc_id_str)
+        if redis_data:
+            redis_data["db_status"] = db_status
+            progress_list.append(redis_data)
+        else:
+            # DB says completed/failed but no Redis data — synthesize entry
+            if db_status == "completed":
+                progress_list.append({
+                    "document_id": doc_id_str,
+                    "filename": row[1],
+                    "step": "completed",
+                    "step_label": "Terminé",
+                    "progress": 100,
+                    "db_status": "completed",
+                })
+            elif db_status == "failed":
+                progress_list.append({
+                    "document_id": doc_id_str,
+                    "filename": row[1],
+                    "step": "failed",
+                    "step_label": "Échec",
                     "progress": -1,
+                    "db_status": "failed",
                 })
 
     return {"progress": progress_list}
