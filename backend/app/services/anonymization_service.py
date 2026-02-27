@@ -61,6 +61,157 @@ REGEX_PATTERNS = {
     EntityType.EMAIL: r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
 }
 
+# ---------------------------------------------------------------------------
+# Post-detection filtering to reduce false positives
+# ---------------------------------------------------------------------------
+
+# Common French words, roles, generic terms that should NEVER be anonymized.
+# Matched case-insensitively against the detected entity text (stripped).
+_STOPLIST_LOWER: set = {
+    # Generic role nouns often misdetected as person names
+    "personne", "personnes", "personne physique", "personnes physiques",
+    "titulaire", "le titulaire", "la titulaire", "titulaires",
+    "candidat", "candidats", "candidate", "candidates", "le candidat",
+    "sous-traitant", "sous-traitants", "sous-traitance", "le sous-traitant",
+    "bénéficiaire", "bénéficiaires", "projet bénéficiaire",
+    "facilitateur", "facilitateurs",
+    "éditeur", "éditeurs", "partenaires éditeurs", "l'éditeur",
+    "prestataire", "prestataires", "le prestataire",
+    "fournisseur", "fournisseurs",
+    "attributaire", "attributaires",
+    "demandeur", "demandeurs",
+    "destinataire", "destinataires",
+    "utilisateur", "utilisateurs", "l'utilisateur",
+    "interlocuteur", "interlocuteurs",
+    "correspondant", "correspondants",
+    "mandataire", "mandataires",
+    "signataire", "signataires",
+    "transitaire", "transitaires",
+    "cocontractant", "cocontractants",
+    "cotraitant", "cotraitants",
+    "adjudicataire", "adjudicataires",
+    "acheteur", "acheteurs", "l'acheteur",
+    "pouvoir adjudicateur", "le pouvoir adjudicateur",
+    "maître d'ouvrage", "maître d'oeuvre", "maître d'œuvre",
+    "maîtrise d'ouvrage", "maîtrise d'oeuvre", "maîtrise d'œuvre",
+    "client", "clients", "le client",
+    "membre", "membres",
+    "partie", "parties", "les parties",
+    "tiers", "le tiers",
+    "autorité", "autorités",
+    "entité", "entités",
+    "organisme", "organismes",
+    "structure", "structures",
+    "service", "services",
+    "direction", "directions",
+    "division", "divisions",
+    "département", "départements",
+    "pôle", "pôles",
+    "bureau", "bureaux",
+    # Gender terms
+    "femme", "homme", "femme/homme", "homme/femme", "h/f", "f/h",
+    "madame", "monsieur", "mesdames", "messieurs",
+    # Job titles / functions
+    "directeur", "directrice", "directeurs",
+    "responsable", "responsables",
+    "chef de projet", "chefs de projet",
+    "dsi", "dpo", "rssi", "rsi", "dga", "dgs",
+    "délégué à la protection des données",
+    "administrateur", "administrateurs",
+    "gestionnaire", "gestionnaires",
+    "ingénieur", "ingénieurs",
+    "technicien", "techniciens",
+    "consultant", "consultants",
+    "expert", "experts",
+    "analyste", "analystes",
+    "architecte", "architectes",
+    "développeur", "développeurs",
+    "coordonnateur", "coordinateur",
+    "pilote", "pilotes",
+    "référent", "référents",
+    "rapporteur", "rapporteurs",
+    # Generic IT / business terms
+    "infrastructure as a service", "iaas",
+    "platform as a service", "paas",
+    "software as a service", "saas",
+    "tierce maintenance applicative", "tma",
+    "assistance à maîtrise d'ouvrage", "amoa", "amoe",
+    "centre de services", "centres de services",
+    "cloud", "datacenter", "data center",
+    "lot", "lots", "tranche", "tranches",
+    "marché", "marchés", "accord-cadre",
+    "promesse web",
+    # Legal / regulatory references
+    "code du travail", "code de la commande publique",
+    "code des marchés publics", "code civil", "code pénal",
+    "code général des collectivités territoriales",
+    "ccag", "ccag/tic", "ccag-tic", "ccag tic", "ccag-fcs", "ccag-pi",
+    "ccap", "cctp", "rc", "ae", "bpu", "dpgf", "aqe",
+    "rgpd", "rgaa", "rgs", "rgi",
+    "règlement général sur la protection des données",
+    "numéro de la commande",
+    # Public institutions / international bodies (not sensitive)
+    "cnil", "w3c", "iso", "afnor", "iana",
+    "unece", "united nations economic commission for europe",
+    "united nations", "nations unies",
+    "union européenne", "commission européenne", "parlement européen",
+    "aife", "dgfip", "dinum", "anssi", "arcep", "cnam", "cpam",
+    "cerfa", "légifrance",
+    "état", "l'état", "france", "république française",
+    # Well-known public product/system names
+    "helios", "chorus", "chorus pro",
+}
+
+# Regex patterns that should cause an entity to be REJECTED.
+_REJECT_PATTERNS: list = [
+    re.compile(r"^ISO\s*\d", re.IGNORECASE),          # ISO 27001, ISO 9001 …
+    re.compile(r"^NF\s", re.IGNORECASE),               # NF EN, NF Z42-013 …
+    re.compile(r"^J\s*[+-]\s*\d+$", re.IGNORECASE),   # J+1, J+2, J-1 …
+    re.compile(r"^\d{4,5}$"),                           # Postal codes: 50110, 75001
+    re.compile(r"^\d+$"),                               # Pure numbers
+    re.compile(r"^(article|articles)\s+\d", re.IGNORECASE),  # Article 35, Articles 6 …
+    re.compile(r"^(annexe|annexes)\s+\d", re.IGNORECASE),    # Annexe 1, Annexes 2 …
+    re.compile(r"^(chapitre|chapitres)\s+\d", re.IGNORECASE),
+    re.compile(r"^(alinéa|alinéas)\s+\d", re.IGNORECASE),
+    re.compile(r"^n°\s*\d", re.IGNORECASE),            # n° 2024-xxx …
+    re.compile(r"^v\d+(\.\d+)*$", re.IGNORECASE),      # V1, V2.0, v3.1.2 …
+]
+
+# Minimum character length for an entity to be kept (after stripping)
+_MIN_ENTITY_LENGTH = 3
+
+
+def _should_keep_entity(entity_text: str, label: str) -> bool:
+    """Return True if the detected entity is likely a real sensitive entity.
+
+    Applies stoplist, regex rejection patterns, and length checks.
+    """
+    cleaned = entity_text.strip()
+
+    # Too short
+    if len(cleaned) < _MIN_ENTITY_LENGTH:
+        return False
+
+    # Stoplist (case-insensitive)
+    if cleaned.lower() in _STOPLIST_LOWER:
+        return False
+
+    # Regex rejection patterns
+    for pattern in _REJECT_PATTERNS:
+        if pattern.search(cleaned):
+            return False
+
+    # For "person" label: reject if it looks like a generic noun (no uppercase
+    # start or contains only lowercase common words).  Real person names in
+    # French almost always start with an uppercase letter.
+    if label in ("person",):
+        # If every word starts with lowercase → probably a common noun
+        words = cleaned.split()
+        if all(w[0].islower() for w in words if w):
+            return False
+
+    return True
+
 
 class AnonymizationService:
     """Service for anonymizing/pseudonymizing sensitive content."""
@@ -145,13 +296,17 @@ class AnonymizationService:
     _GLINER_SEGMENT_WORDS = 150
     _GLINER_OVERLAP_WORDS = 20
     # Confidence threshold for GLiNER predictions.
-    # 0.3 gives better recall on short entities (acronyms like EDF, SNCF) while
-    # keeping acceptable precision.
-    _GLINER_THRESHOLD = 0.3
+    # 0.55 balances recall vs precision — avoids flooding results with
+    # common nouns and generic terms while still catching real entities.
+    _GLINER_THRESHOLD = 0.55
 
     @classmethod
     def _predict_on_segments(cls, model, text: str) -> List[Tuple[str, str, int, int]]:
-        """Run GLiNER prediction on overlapping text segments to avoid truncation."""
+        """Run GLiNER prediction on overlapping text segments to avoid truncation.
+
+        Applies post-detection filtering via ``_should_keep_entity`` to discard
+        common nouns, generic terms, legal references, etc.
+        """
         # Build word boundary list: [(word_start_char, word_end_char), ...]
         word_spans = [(m.start(), m.end()) for m in re.finditer(r'\S+', text)]
 
@@ -160,6 +315,7 @@ class AnonymizationService:
             return [
                 (p["text"], p["label"], p["start"], p["end"])
                 for p in predictions
+                if _should_keep_entity(p["text"], p["label"])
             ]
 
         entities = []
@@ -174,6 +330,8 @@ class AnonymizationService:
 
             predictions = model.predict_entities(segment_text, GLINER_LABELS, threshold=cls._GLINER_THRESHOLD)
             for pred in predictions:
+                if not _should_keep_entity(pred["text"], pred["label"]):
+                    continue
                 abs_start = seg_char_start + pred["start"]
                 abs_end = seg_char_start + pred["end"]
                 key = (pred["text"], abs_start)
@@ -240,7 +398,7 @@ class AnonymizationService:
                         progress_callback(done_count, len(texts))
 
         total_entities = sum(len(r) for r in results)
-        logger.debug("[batch_detect] Total entities detected: %d across %d texts", total_entities, len(texts))
+        logger.warning("[batch_detect] Kept %d entities across %d texts (after filtering)", total_entities, len(texts))
 
         # Apply regex patterns per text
         for text_idx, text in enumerate(texts):
@@ -318,7 +476,7 @@ class AnonymizationService:
         replacements = []
         for entity_text, label, start, end in entities:
             entity_text_clean = entity_text.strip()
-            if len(entity_text_clean) < 2:
+            if not _should_keep_entity(entity_text_clean, label):
                 continue
 
             if entity_text_clean in existing_mappings:
@@ -383,7 +541,7 @@ class AnonymizationService:
             replacements = []
             for entity_text, label, start, end in entities:
                 entity_text_clean = entity_text.strip()
-                if len(entity_text_clean) < 2:
+                if not _should_keep_entity(entity_text_clean, label):
                     continue
 
                 if entity_text_clean in existing_mappings:
