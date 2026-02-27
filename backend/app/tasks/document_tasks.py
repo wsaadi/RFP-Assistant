@@ -5,9 +5,33 @@ import uuid
 from ..celery_app import celery
 
 
-@celery.task(name="tasks.process_document", bind=True, max_retries=2)
+@celery.task(
+    name="tasks.process_document",
+    bind=True,
+    max_retries=2,
+    reject_on_worker_lost=True,
+)
 def process_document_task(self, document_id: str, project_id: str):
-    """Celery wrapper — runs the async processing pipeline in its own event loop."""
+    """Celery wrapper — runs the async processing pipeline in its own event loop.
+
+    ``reject_on_worker_lost`` prevents infinite redelivery when the worker
+    is killed (OOM, hard time-limit SIGKILL, etc.) while
+    ``task_acks_late`` is enabled.
+    """
+    # Guard against silent redelivery loops: if the broker keeps
+    # re-dispatching this message (e.g. worker crash before ack), the
+    # delivery_info count will increment.  After 3 deliveries we give up.
+    delivery_info = self.request.delivery_info or {}
+    redelivered = getattr(self.request, "redelivered", False)
+    retries = self.request.retries or 0
+    if redelivered and retries >= self.max_retries:
+        print(
+            f"[document_tasks] Giving up on document {document_id}: "
+            f"redelivered after {retries} retries"
+        )
+        asyncio.run(_mark_document_failed(document_id, "Échec après plusieurs tentatives"))
+        return
+
     asyncio.run(_process_document_async(document_id, project_id))
 
 
@@ -215,3 +239,24 @@ async def _process_document_async(document_id: str, project_id: str):
             except Exception as db_err:
                 print(f"Failed to mark document {document_id} as FAILED (attempt {_attempt + 1}): {db_err}")
                 await asyncio.sleep(1)
+
+
+async def _mark_document_failed(document_id: str, reason: str):
+    """Mark a document as FAILED (used by the redelivery guard)."""
+    from sqlalchemy import select
+    from ..database import async_session
+    from ..models.document import Document, ProcessingStatus
+    from ..services.progress_service import ProgressTracker
+
+    ProgressTracker.fail(document_id, reason)
+    try:
+        async with async_session() as db:
+            result = await db.execute(
+                select(Document).where(Document.id == uuid.UUID(document_id))
+            )
+            document = result.scalar_one_or_none()
+            if document and document.processing_status != ProcessingStatus.FAILED:
+                document.processing_status = ProcessingStatus.FAILED
+                await db.commit()
+    except Exception as e:
+        print(f"[document_tasks] Could not mark document {document_id} as FAILED: {e}")
