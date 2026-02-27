@@ -1,6 +1,7 @@
 """RFP Project API routes."""
 import io
 import os
+import re
 import uuid
 import asyncio
 import logging
@@ -2981,7 +2982,6 @@ async def re_anonymize_project(
 
     def apply_mappings(text: str) -> str:
         """Apply all mappings to a text, longest match first, case-insensitive."""
-        import re
         result_text = text
         for m in active_with_value:
             pattern = re.compile(re.escape(m.original_value), re.IGNORECASE)
