@@ -469,8 +469,9 @@ class AnonymizationService:
         for mapping in existing_mappings.values():
             type_counts[mapping.entity_type] += 1
 
-        # Detect entities
-        entities = cls.detect_entities(text)
+        # Detect entities (run in thread to avoid blocking the event loop
+        # — GLiNER inference is CPU-bound)
+        entities = await asyncio.to_thread(cls.detect_entities, text)
 
         # Build replacement list (process from end to start to preserve positions)
         replacements = []

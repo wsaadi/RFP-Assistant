@@ -1,4 +1,5 @@
 """Document API routes for upload, processing, and search."""
+import asyncio
 import uuid
 import os
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
@@ -54,47 +55,68 @@ async def process_document_background(document_id: str, project_id: str):
         # DB released
 
         # ── Phase 2: File I/O + text extraction + chunking (NO DB held) ──
-        with open(file_path, "rb") as f:
-            file_content = f.read()
-
-        text = ""
-        pages_data = None
-        images_data = []
-        page_count = None
-
+        # Run all CPU-bound / blocking I/O work in a thread to keep the
+        # asyncio event loop free for other users' HTTP requests.
         ProgressTracker.update(document_id, "extracting_text")
 
-        if file_type == FileType.PDF:
-            text, page_count, pages_data = DocumentProcessor.extract_text_from_pdf(file_content)
-            ProgressTracker.update(document_id, "extracting_images")
-            images_data = DocumentProcessor.extract_images_from_pdf(file_content, document_id)
+        def _extract_and_chunk():
+            """Synchronous extraction work — executed in thread pool."""
+            with open(file_path, "rb") as f:
+                file_content = f.read()
 
-        elif file_type == FileType.DOC:
-            try:
-                docx_content = DocumentProcessor.convert_doc_to_docx(file_content)
-                text, sections = DocumentProcessor.extract_text_from_docx(docx_content)
-                page_count = max(1, len(text.split()) // 300)
+            _text = ""
+            _pages_data = None
+            _images_data = []
+            _page_count = None
+
+            if file_type == FileType.PDF:
+                _text, _page_count, _pages_data = DocumentProcessor.extract_text_from_pdf(file_content)
                 ProgressTracker.update(document_id, "extracting_images")
-                images_data = DocumentProcessor.extract_images_from_docx(docx_content, document_id)
-            except Exception as doc_err:
-                print(f"DOC conversion/parsing failed: {doc_err}")
-                text = ""
+                _images_data = DocumentProcessor.extract_images_from_pdf(file_content, document_id)
 
-        elif file_type == FileType.DOCX:
-            try:
-                text, sections = DocumentProcessor.extract_text_from_docx(file_content)
-                page_count = max(1, len(text.split()) // 300)
-                ProgressTracker.update(document_id, "extracting_images")
-                images_data = DocumentProcessor.extract_images_from_docx(file_content, document_id)
-            except (ValueError, Exception) as docx_err:
-                print(f"DOCX parsing failed: {docx_err}")
-                text = ""
+            elif file_type == FileType.DOC:
+                try:
+                    docx_content = DocumentProcessor.convert_doc_to_docx(file_content)
+                    _text, _sections = DocumentProcessor.extract_text_from_docx(docx_content)
+                    _page_count = max(1, len(_text.split()) // 300)
+                    ProgressTracker.update(document_id, "extracting_images")
+                    _images_data = DocumentProcessor.extract_images_from_docx(docx_content, document_id)
+                except Exception as doc_err:
+                    print(f"DOC conversion/parsing failed: {doc_err}")
+                    _text = ""
 
-        elif file_type in (FileType.XLSX, FileType.XLS):
-            text, pages_data = DocumentProcessor.extract_text_from_excel(file_content)
-            page_count = max(1, len(pages_data))
+            elif file_type == FileType.DOCX:
+                try:
+                    _text, _sections = DocumentProcessor.extract_text_from_docx(file_content)
+                    _page_count = max(1, len(_text.split()) // 300)
+                    ProgressTracker.update(document_id, "extracting_images")
+                    _images_data = DocumentProcessor.extract_images_from_docx(file_content, document_id)
+                except (ValueError, Exception) as docx_err:
+                    print(f"DOCX parsing failed: {docx_err}")
+                    _text = ""
 
-        if not text.strip():
+            elif file_type in (FileType.XLSX, FileType.XLS):
+                _text, _pages_data = DocumentProcessor.extract_text_from_excel(file_content)
+                _page_count = max(1, len(_pages_data))
+
+            if not _text.strip():
+                return None, None, None, None, None
+
+            ProgressTracker.update(document_id, "chunking")
+            _chunks = DocumentProcessor.create_chunks(
+                text=_text,
+                document_id=document_id,
+                document_name=original_filename,
+                category=category_value,
+                pages_data=_pages_data,
+            )
+            return _text, _pages_data, _images_data, _page_count, _chunks
+
+        text, pages_data, images_data, page_count, chunks = await asyncio.to_thread(
+            _extract_and_chunk
+        )
+
+        if text is None:
             ProgressTracker.fail(document_id, "Aucun texte extrait du document")
             async with async_session() as db:
                 result = await db.execute(select(Document).where(Document.id == uuid.UUID(document_id)))
@@ -102,15 +124,6 @@ async def process_document_background(document_id: str, project_id: str):
                 doc.processing_status = ProcessingStatus.FAILED
                 await db.commit()
             return
-
-        ProgressTracker.update(document_id, "chunking")
-        chunks = DocumentProcessor.create_chunks(
-            text=text,
-            document_id=document_id,
-            document_name=original_filename,
-            category=category_value,
-            pages_data=pages_data,
-        )
 
         # ── Phase 3: Anonymize + save everything (DB session for writes) ──
         ProgressTracker.update(document_id, "anonymizing")
@@ -134,7 +147,7 @@ async def process_document_background(document_id: str, project_id: str):
                 )
                 db.add(db_chunk)
 
-            # Index anonymized chunks in vector DB (no DB needed, but fast)
+            # Index anonymized chunks in vector DB (run in thread — ChromaDB is synchronous)
             ProgressTracker.update(document_id, "indexing")
             vector_chunks = [
                 {
@@ -149,7 +162,7 @@ async def process_document_background(document_id: str, project_id: str):
                 }
                 for chunk_data in chunks
             ]
-            VectorService.index_chunks(project_id, vector_chunks)
+            await asyncio.to_thread(VectorService.index_chunks, project_id, vector_chunks)
 
             # Store extracted images
             for img_data in images_data:
