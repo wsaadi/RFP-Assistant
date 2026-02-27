@@ -5,6 +5,8 @@ import { MatCardModule } from '@angular/material/card';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatButtonToggleModule } from '@angular/material/button-toggle';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { ApiService } from '../../services/api.service';
 import { renderMarkdown } from '../../services/markdown.service';
 import { DocumentPreview, PreviewChapter } from '../../models/report.model';
@@ -12,33 +14,51 @@ import { DocumentPreview, PreviewChapter } from '../../models/report.model';
 @Component({
   selector: 'app-preview',
   standalone: true,
-  imports: [CommonModule, RouterLink, MatCardModule, MatButtonModule, MatIconModule, MatProgressSpinnerModule],
+  imports: [
+    CommonModule, RouterLink, MatCardModule, MatButtonModule, MatIconModule,
+    MatProgressSpinnerModule, MatButtonToggleModule, MatTooltipModule,
+  ],
   encapsulation: ViewEncapsulation.None,
   template: `
     <div class="preview-container" *ngIf="preview">
       <div class="preview-header no-print">
         <button mat-icon-button [routerLink]="['/project', projectId]"><mat-icon>arrow_back</mat-icon></button>
-        <h1>Aperçu du document</h1>
+        <h1>Apercu du document</h1>
+
+        <mat-button-toggle-group [(value)]="viewMode" (change)="onViewModeChange($event.value)" class="view-mode-toggle">
+          <mat-button-toggle value="final" matTooltip="Contenu final avec les vraies valeurs">
+            <mat-icon>visibility</mat-icon> Final
+          </mat-button-toggle>
+          <mat-button-toggle value="anonymized" matTooltip="Ce que l'IA Mistral voit (donnees sensibles masquees)">
+            <mat-icon>security</mat-icon> Vue IA
+          </mat-button-toggle>
+        </mat-button-toggle-group>
+
         <button mat-raised-button color="primary" (click)="printPreview()">
           <mat-icon>print</mat-icon> Imprimer
         </button>
       </div>
 
-      <div class="document-preview">
+      <div *ngIf="viewMode === 'anonymized'" class="anon-banner no-print">
+        <mat-icon>security</mat-icon>
+        <span>Vue anonymisee — C'est ce que l'IA Mistral voit. Les donnees sensibles sont remplacees par des placeholders.</span>
+      </div>
+
+      <div class="document-preview" [class.anon-mode]="viewMode === 'anonymized'">
         <!-- Cover page -->
         <div class="page cover-page">
-          <h1 class="doc-title">RÉPONSE À L'APPEL D'OFFRES</h1>
-          <h2 *ngIf="preview.rfp_reference">Référence: {{ preview.rfp_reference }}</h2>
-          <h2 class="project-name">{{ preview.project_name }}</h2>
+          <h1 class="doc-title">REPONSE A L'APPEL D'OFFRES</h1>
+          <h2 *ngIf="currentPreview.rfp_reference">Reference: {{ currentPreview.rfp_reference }}</h2>
+          <h2 class="project-name">{{ currentPreview.project_name }}</h2>
           <div class="separator"></div>
-          <p *ngIf="preview.client_name">Client: {{ preview.client_name }}</p>
+          <p *ngIf="currentPreview.client_name">Client: {{ currentPreview.client_name }}</p>
           <p class="confidential">DOCUMENT CONFIDENTIEL</p>
         </div>
 
         <!-- TOC -->
         <div class="page toc-page">
           <h2>SOMMAIRE</h2>
-          <div *ngFor="let ch of preview.chapters" class="toc-entry" [class.toc-sub]="ch.level > 1">
+          <div *ngFor="let ch of currentPreview.chapters" class="toc-entry" [class.toc-sub]="ch.level > 1">
             <span>{{ ch.numbering }} {{ ch.title }}</span>
             <ng-container *ngIf="ch.children?.length">
               <div *ngFor="let sub of ch.children" class="toc-entry toc-sub">
@@ -49,16 +69,16 @@ import { DocumentPreview, PreviewChapter } from '../../models/report.model';
         </div>
 
         <!-- Chapters -->
-        <ng-container *ngFor="let ch of preview.chapters">
+        <ng-container *ngFor="let ch of currentPreview.chapters">
           <div class="page">
             <h2 class="chapter-title">{{ ch.numbering }} {{ ch.title }}</h2>
             <div class="chapter-content" *ngIf="ch.content" [innerHTML]="renderMarkdown(ch.content)"></div>
-            <p *ngIf="!ch.content" class="empty-content">[Section à compléter]</p>
+            <p *ngIf="!ch.content" class="empty-content">[Section a completer]</p>
 
             <ng-container *ngFor="let sub of ch.children">
               <h3 class="sub-title">{{ sub.numbering }} {{ sub.title }}</h3>
               <div class="chapter-content" *ngIf="sub.content" [innerHTML]="renderMarkdown(sub.content)"></div>
-              <p *ngIf="!sub.content" class="empty-content">[Section à compléter]</p>
+              <p *ngIf="!sub.content" class="empty-content">[Section a completer]</p>
             </ng-container>
           </div>
         </ng-container>
@@ -71,7 +91,12 @@ import { DocumentPreview, PreviewChapter } from '../../models/report.model';
     .preview-container { max-width: 900px; margin: 0 auto; }
     .preview-header { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
     .preview-header h1 { flex: 1; margin: 0; color: #1B3A5C; }
+    .view-mode-toggle .mat-button-toggle-label-content { display: flex; align-items: center; gap: 4px; font-size: 13px; }
+    .view-mode-toggle mat-icon { font-size: 18px; width: 18px; height: 18px; }
+    .anon-banner { display: flex; align-items: center; gap: 8px; padding: 10px 16px; margin-bottom: 12px; background: #e8f5e9; border: 1px solid #a5d6a7; border-radius: 8px; color: #2e7d32; font-size: 13px; }
+    .anon-banner mat-icon { color: #2e7d32; }
     .document-preview { background: white; box-shadow: 0 2px 8px rgba(0,0,0,0.1); border-radius: 4px; overflow: hidden; }
+    .document-preview.anon-mode { border: 2px solid #a5d6a7; }
     .page { padding: 48px 56px; min-height: 600px; border-bottom: 1px solid #e0e0e0; }
     .cover-page { text-align: center; display: flex; flex-direction: column; justify-content: center; align-items: center; min-height: 700px; background: linear-gradient(180deg, #f8fafd 0%, #ffffff 100%); }
     .doc-title { font-size: 28px; color: #1B3A5C; letter-spacing: 0.5px; }
@@ -111,9 +136,15 @@ import { DocumentPreview, PreviewChapter } from '../../models/report.model';
 export class PreviewComponent implements OnInit {
   projectId = '';
   preview: DocumentPreview | null = null;
+  anonPreview: DocumentPreview | null = null;
   loading = true;
+  viewMode: 'final' | 'anonymized' = 'final';
 
   constructor(private route: ActivatedRoute, private api: ApiService) {}
+
+  get currentPreview(): DocumentPreview {
+    return (this.viewMode === 'anonymized' && this.anonPreview) ? this.anonPreview : this.preview!;
+  }
 
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
@@ -121,6 +152,17 @@ export class PreviewComponent implements OnInit {
       next: (p) => { this.preview = p; this.loading = false; },
       error: () => { this.loading = false; },
     });
+  }
+
+  onViewModeChange(mode: 'final' | 'anonymized'): void {
+    this.viewMode = mode;
+    if (mode === 'anonymized' && !this.anonPreview) {
+      this.loading = true;
+      this.api.getPreview(this.projectId, true).subscribe({
+        next: (p) => { this.anonPreview = p; this.loading = false; },
+        error: () => { this.loading = false; },
+      });
+    }
   }
 
   printPreview(): void {

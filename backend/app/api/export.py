@@ -370,10 +370,15 @@ async def import_project_backup(
 @router.get("/{project_id}/preview")
 async def preview_document(
     project_id: uuid.UUID,
+    anonymized: bool = False,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Get a full preview of the document content (deanonymized)."""
+    """Get a full preview of the document content.
+
+    Pass ``?anonymized=true`` to get the anonymized view (what the AI sees).
+    Default returns the de-anonymized (final) content.
+    """
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
@@ -386,14 +391,31 @@ async def preview_document(
     )
     all_chapters = chapters_result.scalars().all()
 
+    # Build anonymization and de-anonymization maps
+    anon_mappings = await AnonymizationService.get_mappings(db, project_id)
     deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
+
+    def anonymize(text: str) -> str:
+        """Apply all active mappings to produce the anonymized view."""
+        if not text or not anon_mappings:
+            return text
+        # Replace longest originals first to avoid partial matches
+        for original, mapping in sorted(
+            anon_mappings.items(), key=lambda x: len(x[0]), reverse=True
+        ):
+            if original and mapping.is_active:
+                text = text.replace(original, mapping.anonymized_value)
+        return text
 
     def deanonymize(text: str) -> str:
         if not text or not deanon_map:
             return text
         for placeholder, original in deanon_map.items():
-            text = text.replace(placeholder, original)
+            if original:
+                text = text.replace(placeholder, original)
         return text
+
+    transform = anonymize if anonymized else deanonymize
 
     children_map = {}
     root_chapters = []
@@ -411,7 +433,7 @@ async def preview_document(
             "title": chapter.title,
             "numbering": numbering,
             "level": level,
-            "content": deanonymize(chapter.content or ""),
+            "content": transform(chapter.content or ""),
             "status": chapter.status.value if hasattr(chapter.status, 'value') else str(chapter.status),
             "chapter_type": chapter.chapter_type.value if hasattr(chapter.chapter_type, 'value') else str(chapter.chapter_type),
             "children": [
