@@ -704,6 +704,14 @@ class AnonymizationService:
         for start, end, placeholder in reversed(replacements):
             result = result[:start] + placeholder + result[end:]
 
+        # Safety-net: apply all known mappings by string replacement
+        # to catch anything the LLM missed.
+        for original, mapping in sorted(
+            existing_mappings.items(), key=lambda x: len(x[0]), reverse=True
+        ):
+            if original and mapping.is_active:
+                result = result.replace(original, mapping.anonymized_value)
+
         await db.flush()
         return result
 
@@ -762,6 +770,17 @@ class AnonymizationService:
             result = text
             for start, end, placeholder in reversed(replacements):
                 result = result[:start] + placeholder + result[end:]
+
+            # Second pass: apply ALL known mappings by string replacement.
+            # This catches entities in chunks that were skipped by the smart
+            # cache (no LLM call) or that the LLM missed. Longest-first
+            # prevents partial replacements (e.g., "Jean" inside "Jean Dupont").
+            for original, mapping in sorted(
+                existing_mappings.items(), key=lambda x: len(x[0]), reverse=True
+            ):
+                if original and mapping.is_active:
+                    result = result.replace(original, mapping.anonymized_value)
+
             results.append(result)
 
         await db.flush()
