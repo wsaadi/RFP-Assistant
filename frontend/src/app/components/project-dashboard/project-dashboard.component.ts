@@ -1371,7 +1371,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
           this.api.getDocuments(this.projectId).subscribe({
             next: (d) => { this.documents = d; this._refreshDocsByCategory(); },
           });
-        } else if (res.progress.every(p => p.step === 'completed' || p.step === 'failed')) {
+        } else if (res.progress.every(p => p.step === 'completed' || p.step === 'failed' || p.step === 'stalled')) {
           this.stopPolling();
           this.loadAll();
         }

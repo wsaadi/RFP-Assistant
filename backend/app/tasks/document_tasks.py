@@ -173,7 +173,10 @@ async def _process_document_async(document_id: str, project_id: str):
                 )
                 db.add(db_image)
 
-            anonymized_full_text = await AnonymizationService.anonymize_text(
+            # Reuse mappings already created by anonymize_chunks_batch
+            # instead of running GLiNER again on the full text (which would
+            # double processing time and risk hitting Celery time limits).
+            anonymized_full_text = await AnonymizationService.apply_existing_mappings(
                 text, uuid.UUID(project_id), db
             )
 
@@ -191,16 +194,24 @@ async def _process_document_async(document_id: str, project_id: str):
             await db.commit()
 
     except Exception as e:
+        import traceback
         print(f"Error processing document {document_id}: {e}")
+        traceback.print_exc()
         ProgressTracker.fail(document_id, str(e))
-        try:
-            async with async_session() as db:
-                result = await db.execute(
-                    select(Document).where(Document.id == uuid.UUID(document_id))
-                )
-                document = result.scalar_one_or_none()
-                if document:
-                    document.processing_status = ProcessingStatus.FAILED
-                    await db.commit()
-        except Exception:
-            pass
+        # Try to mark the document as FAILED in the database.
+        # Use multiple attempts with fresh sessions to handle transient
+        # DB issues that could otherwise leave the document stuck forever.
+        for _attempt in range(3):
+            try:
+                async with async_session() as db:
+                    result = await db.execute(
+                        select(Document).where(Document.id == uuid.UUID(document_id))
+                    )
+                    document = result.scalar_one_or_none()
+                    if document and document.processing_status != ProcessingStatus.FAILED:
+                        document.processing_status = ProcessingStatus.FAILED
+                        await db.commit()
+                break  # success
+            except Exception as db_err:
+                print(f"Failed to mark document {document_id} as FAILED (attempt {_attempt + 1}): {db_err}")
+                await asyncio.sleep(1)

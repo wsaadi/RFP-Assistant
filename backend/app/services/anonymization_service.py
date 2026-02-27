@@ -913,6 +913,37 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
         return {"merged": merged_count, "groups": merge_results}
 
     @classmethod
+    async def apply_existing_mappings(
+        cls,
+        text: str,
+        project_id: uuid.UUID,
+        db: AsyncSession,
+    ) -> str:
+        """Replace known entities in text using existing DB mappings only (no NER).
+
+        This is much faster than ``anonymize_text`` because it skips GLiNER
+        inference entirely.  Useful for the full-document text after chunks
+        have already been processed through the full NER pipeline.
+        """
+        if not text:
+            return text
+
+        existing_mappings = await cls.get_mappings(db, project_id)
+        if not existing_mappings:
+            return text
+
+        result = text
+        # Sort by length descending so longer originals are replaced first,
+        # avoiding partial matches (e.g. "Jean Dupont" before "Jean").
+        for original, mapping in sorted(
+            existing_mappings.items(), key=lambda x: len(x[0]), reverse=True
+        ):
+            if original:
+                result = result.replace(original, mapping.anonymized_value)
+
+        return result
+
+    @classmethod
     async def anonymize_prompt(
         cls,
         prompt: str,
