@@ -169,6 +169,8 @@ class AnonymizationService:
         seen: List[set] = [set() for _ in texts]
 
         model = cls._get_model()
+        logger.warning("[batch_detect] GLiNER model available: %s, processing %d texts", model is not None, len(texts))
+
         if model is not None:
             # Build all segments from all texts
             all_segments: List[Tuple[int, int, str]] = []  # (text_idx, seg_char_start, segment_text)
@@ -186,12 +188,32 @@ class AnonymizationService:
                         seg_end = span_slice[-1][1]
                         all_segments.append((text_idx, seg_start, text[seg_start:seg_end]))
 
+            logger.warning("[batch_detect] Built %d segments from %d texts, labels=%s, threshold=%s",
+                          len(all_segments), len(texts), GLINER_LABELS, cls._GLINER_THRESHOLD)
+
             if all_segments:
                 segment_texts = [s[2] for s in all_segments]
                 try:
                     batch_predictions = model.predict_entities(
                         segment_texts, GLINER_LABELS, threshold=cls._GLINER_THRESHOLD
                     )
+                    # Debug: log what predict_entities returned
+                    pred_type = type(batch_predictions).__name__
+                    if isinstance(batch_predictions, list) and len(batch_predictions) > 0:
+                        first_elem_type = type(batch_predictions[0]).__name__
+                        total_preds = sum(len(p) if isinstance(p, list) else 1 for p in batch_predictions)
+                        logger.warning("[batch_detect] predict_entities returned %s of %d items, first_elem=%s, total_predictions=%d",
+                                      pred_type, len(batch_predictions), first_elem_type, total_preds)
+                        # Log first few predictions for debugging
+                        for i, p in enumerate(batch_predictions[:3]):
+                            if isinstance(p, list):
+                                logger.warning("[batch_detect]   segment[%d]: %d entities: %s", i,
+                                              len(p), [f"{e.get('text','?')}({e.get('label','?')})" for e in p[:5]])
+                            else:
+                                logger.warning("[batch_detect]   segment[%d]: raw=%s", i, str(p)[:200])
+                    else:
+                        logger.warning("[batch_detect] predict_entities returned %s: %s", pred_type, str(batch_predictions)[:200])
+
                     # predict_entities returns list-of-lists when given a list input
                     for (text_idx, seg_start, _), preds in zip(all_segments, batch_predictions):
                         for pred in preds:
@@ -205,6 +227,9 @@ class AnonymizationService:
                                 )
                 except Exception as e:
                     logger.error("GLiNER batch prediction error: %s", e, exc_info=True)
+
+        total_entities = sum(len(r) for r in results)
+        logger.warning("[batch_detect] Total entities detected across all texts: %d", total_entities)
 
         # Apply regex patterns per text
         for text_idx, text in enumerate(texts):
