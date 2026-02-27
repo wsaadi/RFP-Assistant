@@ -1,4 +1,4 @@
-import { Component, OnInit } from '@angular/core';
+import { Component, OnInit, OnDestroy } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, RouterLink } from '@angular/router';
@@ -16,6 +16,8 @@ import { MatSelectModule } from '@angular/material/select';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatSlideToggleModule } from '@angular/material/slide-toggle';
+import { Subscription, timer } from 'rxjs';
+import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '../../models/report.model';
 
@@ -132,6 +134,10 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
             <mat-spinner *ngIf="reAnonymizing" diameter="18"></mat-spinner>
             <mat-icon *ngIf="!reAnonymizing">sync</mat-icon> Re-anonymiser tout
           </button>
+          <div *ngIf="reAnonymizing && reanonProgress" class="reanon-progress">
+            <mat-progress-bar mode="determinate" [value]="reanonProgress.progress"></mat-progress-bar>
+            <span class="reanon-progress-label">{{ reanonProgress.message }}</span>
+          </div>
           <button mat-raised-button color="warn" (click)="purgeAnonymization()" [disabled]="purging"
             matTooltip="Supprimer TOUTES les anonymisations et restaurer le texte original des chapitres">
             <mat-spinner *ngIf="purging" diameter="18"></mat-spinner>
@@ -342,9 +348,12 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
     .empty-card mat-icon { color: #2C5F8A; }
 
     mat-expansion-panel { margin-bottom: 8px; }
+    .reanon-progress { margin-top: 8px; width: 100%; }
+    .reanon-progress mat-progress-bar { margin-bottom: 4px; }
+    .reanon-progress-label { font-size: 12px; color: #666; }
   `],
 })
-export class StatisticsComponent implements OnInit {
+export class StatisticsComponent implements OnInit, OnDestroy {
   projectId = '';
   stats: ProjectStatistics | null = null;
   anonReport: AnonymizationReport | null = null;
@@ -356,6 +365,8 @@ export class StatisticsComponent implements OnInit {
   purging = false;
   addingMapping = false;
   mappingColumns = ['original', 'anonymized', 'active', 'actions'];
+  reanonProgress: { progress: number; message: string } | null = null;
+  private reanonPollSub: Subscription | null = null;
 
   // New mapping form
   newMapping = { entity_type: 'company', original_value: '', anonymized_value: '' };
@@ -382,6 +393,10 @@ export class StatisticsComponent implements OnInit {
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
     this.loadAll();
+  }
+
+  ngOnDestroy(): void {
+    this.reanonPollSub?.unsubscribe();
   }
 
   loadAll(): void {
@@ -476,19 +491,46 @@ export class StatisticsComponent implements OnInit {
   }
 
   reAnonymize(): void {
-    if (!confirm('Re-anonymiser tous les documents et chapitres ? La detection NER sera relancee sur les documents pour decouvrir de nouvelles entites.')) return;
+    if (!confirm('Re-anonymiser tous les documents et chapitres ? La detection NER sera relancee sur les documents pour decouvrir de nouvelles entites. Cette operation peut prendre plusieurs minutes.')) return;
     this.reAnonymizing = true;
+    this.reanonProgress = { progress: 0, message: 'Lancement...' };
     this.api.reAnonymizeProject(this.projectId).subscribe({
-      next: (res: any) => {
-        const newMsg = res.new_entities ? `, ${res.new_entities} nouvelle(s) entite(s) detectee(s)` : '';
-        const nerWarn = res.ner_available === false ? ' ⚠ Modele NER non disponible (seuls les emails sont detectes par regex). Verifiez que GLiNER est installe.' : '';
-        this.snackBar.open(`Re-anonymisation terminee : ${res.updated_chunks} chunks, ${res.updated_chapters} chapitres${newMsg}${nerWarn}`, 'OK', { duration: nerWarn ? 10000 : 6000 });
-        this.reAnonymizing = false;
-        this.loadAnonReport();
+      next: () => {
+        this._startReAnonPolling();
       },
       error: (err) => {
         this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
         this.reAnonymizing = false;
+        this.reanonProgress = null;
+      },
+    });
+  }
+
+  private _startReAnonPolling(): void {
+    this.reanonPollSub?.unsubscribe();
+    this.reanonPollSub = timer(500, 2000).pipe(
+      switchMap(() => this.api.getReAnonymizeStatus(this.projectId))
+    ).subscribe({
+      next: (res: any) => {
+        if (res.status === 'running') {
+          this.reanonProgress = { progress: res.progress || 0, message: res.message || '' };
+        } else if (res.status === 'done') {
+          this.reanonPollSub?.unsubscribe();
+          this.reAnonymizing = false;
+          this.reanonProgress = null;
+          const newMsg = res.new_entities ? `, ${res.new_entities} nouvelle(s) entite(s) detectee(s)` : '';
+          const nerWarn = res.ner_available === false ? ' ⚠ Modele NER non disponible.' : '';
+          this.snackBar.open(`Re-anonymisation terminee : ${res.updated_chunks} chunks, ${res.updated_chapters} chapitres${newMsg}${nerWarn}`, 'OK', { duration: 8000 });
+          this.loadAnonReport();
+        } else if (res.status === 'error') {
+          this.reanonPollSub?.unsubscribe();
+          this.reAnonymizing = false;
+          this.reanonProgress = null;
+          this.snackBar.open(res.message || 'Erreur lors de la re-anonymisation', 'OK', { duration: 5000 });
+        }
+      },
+      error: () => {
+        // Polling error – keep trying silently
       },
     });
   }

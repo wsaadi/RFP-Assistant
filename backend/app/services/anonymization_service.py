@@ -159,17 +159,23 @@ class AnonymizationService:
         return entities
 
     @classmethod
-    def _batch_detect_entities(cls, texts: List[str]) -> List[List[Tuple[str, str, int, int]]]:
-        """Detect entities across multiple texts using batched GLiNER inference.
+    def _batch_detect_entities(
+        cls,
+        texts: List[str],
+        progress_callback=None,
+    ) -> List[List[Tuple[str, str, int, int]]]:
+        """Detect entities across multiple texts using GLiNER inference.
 
-        Much faster than calling detect_entities() per text, because GLiNER
-        batches the transformer forward pass across all segments.
+        Args:
+            texts: List of texts to analyze.
+            progress_callback: Optional callable(current_idx, total) called
+                after each text is processed, for progress reporting.
         """
         results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
         seen: List[set] = [set() for _ in texts]
 
         model = cls._get_model()
-        logger.warning("[batch_detect] GLiNER model available: %s, processing %d texts", model is not None, len(texts))
+        logger.debug("[batch_detect] GLiNER model available: %s, processing %d texts", model is not None, len(texts))
 
         if model is not None:
             # Process each text individually using single-text predict_entities
@@ -184,9 +190,11 @@ class AnonymizationService:
                             results[text_idx].append((entity_text, label, start, end))
                 except Exception as e:
                     logger.error("GLiNER prediction error on text %d: %s", text_idx, e)
+                if progress_callback is not None:
+                    progress_callback(text_idx + 1, len(texts))
 
         total_entities = sum(len(r) for r in results)
-        logger.warning("[batch_detect] Total entities detected: %d across %d texts", total_entities, len(texts))
+        logger.debug("[batch_detect] Total entities detected: %d across %d texts", total_entities, len(texts))
 
         # Apply regex patterns per text
         for text_idx, text in enumerate(texts):
@@ -302,10 +310,12 @@ class AnonymizationService:
         texts: List[str],
         project_id: uuid.UUID,
         db: AsyncSession,
+        progress_callback=None,
     ) -> List[str]:
         """Anonymize multiple texts in one pass (batch NER + single DB round-trip).
 
-        Much faster than calling anonymize_text() per chunk.
+        Args:
+            progress_callback: Optional callable(current_idx, total) for progress.
         """
         if not texts:
             return []
@@ -317,7 +327,7 @@ class AnonymizationService:
             type_counts[mapping.entity_type] += 1
 
         # Batch NER across all texts
-        all_entities = cls._batch_detect_entities(texts)
+        all_entities = cls._batch_detect_entities(texts, progress_callback=progress_callback)
 
         # Process each text
         results = []
