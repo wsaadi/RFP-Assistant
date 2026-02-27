@@ -67,7 +67,6 @@ class AnonymizationService:
     _model = None
     _model_load_failed = False  # sentinel to avoid retrying a broken model
     _device = "cpu"  # "cpu", "mps" (Apple Silicon), or "cuda"
-    _using_onnx = False
 
     @classmethod
     def _detect_device(cls) -> str:
@@ -94,77 +93,20 @@ class AnonymizationService:
             from ..config import settings
 
             cls._device = cls._detect_device()
-            use_onnx = settings.gliner_use_onnx
 
-            if use_onnx:
-                cls._model = cls._load_onnx_model(GLiNER, settings.gliner_model)
-            else:
-                logger.info("Loading GLiNER model: %s on device: %s ...", settings.gliner_model, cls._device)
-                cls._model = GLiNER.from_pretrained(settings.gliner_model)
-                if cls._device != "cpu":
-                    cls._model = cls._model.to(cls._device)
-                logger.info("GLiNER model loaded successfully on %s", cls._device)
+            # Always load PyTorch model first (guaranteed to work)
+            logger.warning("Loading GLiNER model: %s on device: %s ...", settings.gliner_model, cls._device)
+            cls._model = GLiNER.from_pretrained(settings.gliner_model)
+
+            if cls._device != "cpu":
+                cls._model = cls._model.to(cls._device)
+
+            logger.warning("GLiNER model loaded successfully on %s", cls._device)
         except Exception as e:
             logger.error("Could not load GLiNER model: %s", e, exc_info=True)
             cls._model = None
             cls._model_load_failed = True
         return cls._model
-
-    @classmethod
-    def _load_onnx_model(cls, GLiNER, model_name: str):
-        """Load GLiNER as ONNX, converting from PyTorch on first run."""
-        from huggingface_hub import hf_hub_download, HfFileSystemResolvedPath
-        import pathlib
-
-        # Find the cached model snapshot dir
-        try:
-            # hf_hub_download returns the path to a file; we just need the snapshot dir
-            config_path = hf_hub_download(model_name, "gliner_config.json")
-            snapshot_dir = pathlib.Path(config_path).parent
-        except Exception:
-            # Fallback: load PyTorch model to trigger download, then find dir
-            logger.info("Downloading model %s ...", model_name)
-            tmp_model = GLiNER.from_pretrained(model_name)
-            snapshot_dir = None
-            # Try common HF cache locations
-            import glob
-            hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
-            pattern = os.path.join(hf_home, "hub", f"models--{model_name.replace('/', '--')}", "snapshots", "*")
-            dirs = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-            if dirs:
-                snapshot_dir = pathlib.Path(dirs[0])
-            if not snapshot_dir:
-                logger.warning("Could not find snapshot dir, falling back to PyTorch")
-                return tmp_model
-
-        onnx_path = snapshot_dir / "model.onnx"
-
-        if not onnx_path.exists():
-            logger.info("ONNX model not found at %s, converting from PyTorch (one-time)...", onnx_path)
-            # Load PyTorch model to convert
-            pt_model = GLiNER.from_pretrained(model_name)
-            try:
-                from gliner.model import convert_to_onnx
-                convert_to_onnx(pt_model.model, str(snapshot_dir))
-                logger.info("ONNX conversion complete: %s", onnx_path)
-            except (ImportError, AttributeError):
-                # Fallback: use save_pretrained with onnx flag if available
-                try:
-                    pt_model.save_pretrained(str(snapshot_dir), save_onnx=True)
-                    logger.info("ONNX export via save_pretrained complete")
-                except Exception as e2:
-                    logger.warning("Could not convert to ONNX (%s), falling back to PyTorch", e2)
-                    return pt_model
-
-        logger.info("Loading GLiNER ONNX model from %s ...", snapshot_dir)
-        model = GLiNER.from_pretrained(
-            str(snapshot_dir),
-            load_onnx_model=True,
-            load_tokenizer=True,
-        )
-        cls._using_onnx = True
-        logger.info("GLiNER ONNX model loaded successfully")
-        return model
 
     @classmethod
     def is_ner_available(cls) -> bool:
@@ -263,14 +205,10 @@ class AnonymizationService:
 
         model = cls._get_model()
         # GPU is not thread-safe → 1 worker.
-        # ONNX Runtime handles its own parallelism internally → 1 worker.
         # CPU PyTorch benefits from thread-level parallelism → multiple workers.
-        if cls._device != "cpu" or cls._using_onnx:
-            n_workers = 1
-        else:
-            n_workers = min(os.cpu_count() or 4, 4)
-        logger.debug("[batch_detect] GLiNER on %s (onnx=%s), processing %d texts with %d workers",
-                     cls._device, cls._using_onnx, len(texts), n_workers)
+        n_workers = 1 if cls._device != "cpu" else min(os.cpu_count() or 4, 4)
+        logger.debug("[batch_detect] GLiNER on %s, processing %d texts with %d workers",
+                     cls._device, len(texts), n_workers)
 
         if model is not None:
             done_count = 0

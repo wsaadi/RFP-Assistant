@@ -30,7 +30,6 @@ class Settings(BaseSettings):
 
     # GLiNER model
     gliner_model: str = "urchade/gliner_multi-v2.1"
-    gliner_use_onnx: bool = False  # set True for faster CPU inference via ONNX Runtime
 
     # HuggingFace
     hf_token: Optional[str] = None
