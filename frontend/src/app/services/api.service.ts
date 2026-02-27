@@ -436,8 +436,9 @@ export class ApiService {
     return this.http.post(`${this.baseUrl}/export/import/${workspaceId}`, formData);
   }
 
-  getPreview(projectId: string): Observable<DocumentPreview> {
-    return this.http.get<DocumentPreview>(`${this.baseUrl}/export/${projectId}/preview`);
+  getPreview(projectId: string, anonymized = false): Observable<DocumentPreview> {
+    const params = anonymized ? '?anonymized=true' : '';
+    return this.http.get<DocumentPreview>(`${this.baseUrl}/export/${projectId}/preview${params}`);
   }
 
   // ── Admin ──

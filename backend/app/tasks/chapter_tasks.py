@@ -124,7 +124,12 @@ async def _run_chapter_generation(
                         f"{ch_title} {ch_rfp_requirement}",
                         top_k=3,
                     )
-                    context_chunks_text = "\n\n".join([r["content"] for r in context_results]) if context_results else ""
+                    # Anonymize context chunks too — Mistral must never see raw secrets
+                    if context_results:
+                        raw_context = "\n\n".join([r["content"] for r in context_results])
+                        context_chunks_text = await AnonymizationService.anonymize_text(raw_context, project_id, db)
+                    else:
+                        context_chunks_text = ""
                     if search_results:
                         raw_old = "\n\n".join([r["content"] for r in search_results])
                         old_response_content = await AnonymizationService.anonymize_text(raw_old, project_id, db)

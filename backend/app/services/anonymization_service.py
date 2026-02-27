@@ -86,15 +86,50 @@ Réponds UNIQUEMENT avec un tableau JSON (sans markdown, sans explication) :
 
 Si aucune entité sensible n'est trouvée, réponds : []"""
 
-# Mapping from LLM entity types to our internal EntityType
+# Mapping from LLM entity types to our internal EntityType.
+# Must accept both the English labels asked in the prompt AND French
+# variants / synonyms that small models (Gemma, Mistral, etc.) commonly return.
 LABEL_TO_ENTITY_TYPE = {
+    # English (prompt canonical labels)
     "person": EntityType.PERSON,
-    "organization": EntityType.COMPANY,
     "company": EntityType.COMPANY,
     "email": EntityType.EMAIL,
-    "email address": EntityType.EMAIL,
     "address": EntityType.ADDRESS,
     "project_code": EntityType.PROJECT_CODE,
+    # English synonyms/variants
+    "organization": EntityType.COMPANY,
+    "organisation": EntityType.COMPANY,
+    "email address": EntityType.EMAIL,
+    "email_address": EntityType.EMAIL,
+    "phone": EntityType.PHONE,
+    "phone_number": EntityType.PHONE,
+    "telephone": EntityType.PHONE,
+    # French variants (models sometimes answer in French despite the prompt)
+    "personne": EntityType.PERSON,
+    "nom": EntityType.PERSON,
+    "nom_personne": EntityType.PERSON,
+    "prénom": EntityType.PERSON,
+    "entreprise": EntityType.COMPANY,
+    "société": EntityType.COMPANY,
+    "societe": EntityType.COMPANY,
+    "organisation": EntityType.COMPANY,
+    "adresse": EntityType.ADDRESS,
+    "adresse_postale": EntityType.ADDRESS,
+    "adresse postale": EntityType.ADDRESS,
+    "téléphone": EntityType.PHONE,
+    "telephone": EntityType.PHONE,
+    "numéro de téléphone": EntityType.PHONE,
+    "code_projet": EntityType.PROJECT_CODE,
+    "code projet": EntityType.PROJECT_CODE,
+    "code_ao": EntityType.RFP_CODE,
+    "code ao": EntityType.RFP_CODE,
+    "rfp_code": EntityType.RFP_CODE,
+    "solution": EntityType.SOLUTION_NAME,
+    "solution_name": EntityType.SOLUTION_NAME,
+    "nom_solution": EntityType.SOLUTION_NAME,
+    "date": EntityType.DATE,
+    "montant": EntityType.AMOUNT,
+    "amount": EntityType.AMOUNT,
 }
 
 # Prefixes for anonymized placeholders
@@ -118,6 +153,8 @@ PREFIX_TO_ENTITY_TYPE = {v: k for k, v in ENTITY_PREFIXES.items()}
 # Regex patterns for entities the LLM might miss (deterministic fallback)
 REGEX_PATTERNS = {
     EntityType.EMAIL: r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
+    # French phone numbers: 01 23 45 67 89, +33 1 23 45 67 89, 0123456789
+    EntityType.PHONE: r'(?:\+33\s*|0)[1-9](?:[\s.-]?\d{2}){4}\b',
 }
 
 # ---------------------------------------------------------------------------
@@ -436,7 +473,10 @@ class AnonymizationService:
 
             entities_data = _parse_llm_json(raw_content)
             if not entities_data:
+                logger.info("[NER-LLM] Model returned no entities (raw: %s)", raw_content[:300])
                 return results
+
+            logger.info("[NER-LLM] Model returned %d raw entities", len(entities_data))
 
             for item in entities_data:
                 entity_text = item.get("text", "").strip()
@@ -445,10 +485,16 @@ class AnonymizationService:
                 block_num = item.get("block", 1)
 
                 if not entity_text or not entity_type:
+                    logger.debug("[NER-LLM] Skipped empty entity: %s", item)
                     continue
                 if entity_type not in LABEL_TO_ENTITY_TYPE:
+                    logger.warning(
+                        "[NER-LLM] Unknown entity type '%s' for '%s' — add it to LABEL_TO_ENTITY_TYPE?",
+                        entity_type, entity_text,
+                    )
                     continue
                 if not _should_keep_entity(entity_text, entity_type):
+                    logger.debug("[NER-LLM] Filtered out entity '%s' (type=%s)", entity_text, entity_type)
                     continue
 
                 # Determine which text(s) this entity belongs to
@@ -800,42 +846,43 @@ class AnonymizationService:
         all_found = set(cls._PLACEHOLDER_RE.findall(text))
         return all_found - known_placeholders
 
+    # Generic replacement terms for AI-invented placeholders, keyed by prefix.
+    _GENERIC_TERMS: Dict[str, str] = {
+        "ENTREPRISE": "l'entreprise",
+        "PERSONNE": "le responsable",
+        "SOLUTION": "la solution proposée",
+        "EMAIL": "l'adresse de contact",
+        "TELEPHONE": "le numéro de contact",
+        "ADRESSE": "l'adresse indiquée",
+        "CODE_PROJET": "le projet",
+        "CODE_AO": "l'appel d'offres",
+        "DATE": "la date prévue",
+        "MONTANT": "le montant",
+        "ENTITE": "l'entité concernée",
+    }
+
     @classmethod
-    async def register_unknown_placeholders(
-        cls,
-        text: str,
-        project_id: uuid.UUID,
-        db: AsyncSession,
-        known_placeholders: set,
-    ) -> None:
-        """Create empty mappings for AI-invented placeholders so they appear in Statistics."""
+    def strip_invented_placeholders(cls, text: str, known_placeholders: set) -> str:
+        """Replace AI-invented placeholders with generic French terms.
+
+        When Mistral invents a new placeholder (e.g. [ENTREPRISE_2]) that does
+        not exist in our mappings, replace it with a generic term instead of
+        creating an orphan mapping with empty original_value.
+        """
         unknown = cls.find_unknown_placeholders(text, known_placeholders)
         if not unknown:
-            return
+            return text
 
         for token in unknown:
             inner = token.strip("[]")
             prefix = inner.rsplit("_", 1)[0]
-            entity_type = PREFIX_TO_ENTITY_TYPE.get(prefix, EntityType.OTHER)
-
-            existing = await db.execute(
-                select(AnonymizationMapping)
-                .where(AnonymizationMapping.project_id == project_id)
-                .where(AnonymizationMapping.anonymized_value == token)
+            generic = cls._GENERIC_TERMS.get(prefix, "l'entité concernée")
+            text = text.replace(token, generic)
+            logger.info(
+                "[deanonymize] Stripped AI-invented placeholder %s → '%s'", token, generic,
             )
-            if existing.scalars().first() is not None:
-                continue
 
-            new_mapping = AnonymizationMapping(
-                project_id=project_id,
-                entity_type=entity_type,
-                original_value="",
-                anonymized_value=token,
-                is_active=True,
-            )
-            db.add(new_mapping)
-
-        await db.flush()
+        return text
 
     @classmethod
     async def deanonymize_text(
@@ -851,11 +898,14 @@ class AnonymizationService:
         mappings = await cls.get_mappings_by_placeholder(db, project_id)
         result = anonymized_text
 
-        await cls.register_unknown_placeholders(result, project_id, db, set(mappings.keys()))
-
+        # Replace known placeholders with their real values
         for placeholder, original in mappings.items():
             if original:
                 result = result.replace(placeholder, original)
+
+        # Strip any AI-invented placeholders that we don't know about —
+        # replace them with generic terms instead of creating orphan mappings.
+        result = cls.strip_invented_placeholders(result, set(mappings.keys()))
 
         return result
 
