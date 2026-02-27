@@ -18,15 +18,19 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
 
   redis:
     image: redis:7-alpine
     container_name: rfp-assistant-redis
     restart: unless-stopped
-    # Enable AOF persistence so task queue survives Redis restarts.
-    # appendonly yes: every write is logged to disk
-    # appendfsync everysec: fsync once per second (good balance of safety vs perf)
-    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 512mb --maxmemory-policy noeviction
+    # AOF persistence: task queue survives Redis restarts
+    # maxmemory 256mb: bounded memory usage for progress/exports
+    # noeviction: never silently drop task messages
+    command: redis-server --appendonly yes --appendfsync everysec --maxmemory 256mb --maxmemory-policy noeviction
     ports:
       - "6379:6379"
     volumes:
@@ -38,6 +42,10 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 300M
 
   backend:
     build:
@@ -77,7 +85,6 @@ services:
         condition: service_healthy
     networks:
       - rfp-network
-    # Allow containers to reach the Docker host (for Ollama on Mac)
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
@@ -85,17 +92,30 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2G
 
-  # Worker for document processing (heavy tasks: NER, embedding, indexing)
-  celery-worker-documents:
+  # Single worker handling both queues (documents + default).
+  # concurrency=2: allows 2 tasks in parallel (e.g. 1 document + 1 AI generation)
+  # max-memory-per-child=500000: auto-restarts child workers that grow beyond ~500MB
+  #   (prevents memory leaks from accumulating across many tasks)
+  # max-tasks-per-child=20: periodically recycles workers for a clean state
+  celery-worker:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: rfp-assistant-celery-documents
+    container_name: rfp-assistant-celery-worker
     restart: unless-stopped
-    # Listen on the 'documents' queue with 2 concurrent workers.
-    # This allows processing 2 documents in parallel.
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=documents --hostname=documents@%h
+    command: >
+      celery -A app.celery_app worker
+      --loglevel=info
+      --concurrency=2
+      --queues=documents,default
+      --max-memory-per-child=500000
+      --max-tasks-per-child=20
+      --without-heartbeat
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql+asyncpg://rfp_user:rfp_secret_password@db:5432/rfp_assistant
@@ -124,45 +144,10 @@ services:
       - rfp-network
     extra_hosts:
       - "host.docker.internal:host-gateway"
-
-  # Worker for default tasks (AI generation, exports, analysis)
-  celery-worker-default:
-    build:
-      context: ./backend
-      dockerfile: Dockerfile
-    container_name: rfp-assistant-celery-default
-    restart: unless-stopped
-    # Listen on the 'default' queue with 2 concurrent workers.
-    # These tasks are mostly I/O-bound (API calls to Mistral).
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2 --queues=default --hostname=default@%h
-    environment:
-      - PYTHONUNBUFFERED=1
-      - DATABASE_URL=postgresql+asyncpg://rfp_user:rfp_secret_password@db:5432/rfp_assistant
-      - SECRET_KEY=change-this-to-a-very-long-random-secret-key-in-production
-      - UPLOAD_DIR=/app/data/uploads
-      - EXPORT_DIR=/app/data/exports
-      - IMAGES_DIR=/app/data/images
-      - CHROMA_PERSIST_DIR=/app/data/chroma
-      - HF_TOKEN=${HF_TOKEN:-}
-      - HF_HOME=/app/data/huggingface
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/0
-      - CELERY_RESULT_BACKEND=redis://redis:6379/0
-      - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - OLLAMA_NER_MODEL=${OLLAMA_NER_MODEL:-gemma3:4b}
-      - OLLAMA_NER_TIMEOUT=60
-      - OLLAMA_NER_CONCURRENCY=3
-    volumes:
-      - backend_data:/app/data
-    depends_on:
-      db:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    networks:
-      - rfp-network
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    deploy:
+      resources:
+        limits:
+          memory: 3G
 
   frontend:
     build:
@@ -176,6 +161,10 @@ services:
       - backend
     networks:
       - rfp-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
 
 volumes:
   postgres_data:
