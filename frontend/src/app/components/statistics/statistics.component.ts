@@ -481,7 +481,8 @@ export class StatisticsComponent implements OnInit {
     this.api.reAnonymizeProject(this.projectId).subscribe({
       next: (res: any) => {
         const newMsg = res.new_entities ? `, ${res.new_entities} nouvelle(s) entite(s) detectee(s)` : '';
-        this.snackBar.open(`Re-anonymisation terminee : ${res.updated_chunks} chunks et ${res.updated_chapters} chapitres mis a jour${newMsg}`, 'OK', { duration: 6000 });
+        const nerWarn = res.ner_available === false ? ' ⚠ Modele NER non disponible (seuls les emails sont detectes par regex). Verifiez que GLiNER est installe.' : '';
+        this.snackBar.open(`Re-anonymisation terminee : ${res.updated_chunks} chunks, ${res.updated_chapters} chapitres${newMsg}${nerWarn}`, 'OK', { duration: nerWarn ? 10000 : 6000 });
         this.reAnonymizing = false;
         this.loadAnonReport();
       },
