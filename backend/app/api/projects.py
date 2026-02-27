@@ -5,8 +5,7 @@ import re
 import uuid
 import asyncio
 import logging
-from typing import Dict
-from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
@@ -31,19 +30,21 @@ from ..schemas.response_document import ResponseDocumentOut, ResponseDocumentUpd
 from ..services.ai_service import MistralAIService
 from ..services.vector_service import VectorService
 from ..services.anonymization_service import AnonymizationService
+from ..services.progress_service import set_progress, get_or_idle
 from .deps import get_current_user
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 logger = logging.getLogger(__name__)
 
-# In-memory progress tracking for long-running generation tasks
-_generation_progress: Dict[str, dict] = {}
-_prefill_progress: Dict[str, dict] = {}
-_gap_analysis_progress: Dict[str, dict] = {}
-_compliance_progress: Dict[str, dict] = {}
-_rec_gen_progress: Dict[str, dict] = {}
-_rec_gen_semaphore = asyncio.Semaphore(3)
-_reanon_progress: Dict[str, dict] = {}
+# Redis progress namespaces (replace in-memory dicts)
+_NS_GEN = "structure_gen"
+_NS_PREFILL = "prefill"
+_NS_GAP = "gap_analysis"
+_NS_COMPLIANCE = "compliance"
+_NS_REC = "rec_gen"
+_NS_DETECT = "detect_deliverables"
+_NS_FILL = "fill_deliverables"
+_NS_REANON = "reanon"
 
 
 async def _get_ai_service(workspace_id: uuid.UUID, db: AsyncSession) -> MistralAIService:
@@ -268,14 +269,14 @@ async def get_gap_analysis(
 @router.post("/{project_id}/gap-analysis")
 async def analyze_gap(
     project_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
+
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Launch gap analysis as a background task (returns immediately)."""
     pid = str(project_id)
 
-    existing = _gap_analysis_progress.get(pid)
+    existing = get_or_idle(_NS_GAP, pid)
     if existing and existing.get("status") == "running":
         raise HTTPException(status_code=409, detail="Analyse des ecarts deja en cours")
 
@@ -284,12 +285,13 @@ async def analyze_gap(
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    _gap_analysis_progress[pid] = {
+    set_progress(_NS_GAP, pid, {
         "status": "running", "step": "starting", "progress": 0,
         "message": "Demarrage de l'analyse des ecarts...",
-    }
+    })
 
-    background_tasks.add_task(_run_gap_analysis, project_id, project.workspace_id)
+    from ..tasks.project_tasks import gap_analysis_task
+    gap_analysis_task.delay(str(project_id), str(project.workspace_id))
 
     return {"success": True, "message": "Analyse des ecarts lancee en arriere-plan"}
 
@@ -301,9 +303,7 @@ async def get_gap_analysis_status(
 ):
     """Poll the progress of gap analysis."""
     pid = str(project_id)
-    return _gap_analysis_progress.get(pid, {
-        "status": "idle", "step": "idle", "progress": 0, "message": "",
-    })
+    return get_or_idle(_NS_GAP, pid)
 
 
 @router.get("/{project_id}/gap-analysis/export-pdf")
@@ -561,10 +561,10 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
-        _gap_analysis_progress[pid] = {
+        set_progress(_NS_GAP, pid, {
             "status": "running", "step": step,
             "progress": progress, "message": message,
-        }
+        })
 
     try:
         # ── Phase 1: Load config + anonymize (short DB session) ──
@@ -582,10 +582,10 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
             )
 
             if not anon_old.strip() or not anon_new.strip():
-                _gap_analysis_progress[pid] = {
+                set_progress(_NS_GAP, pid, {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "Documents d'ancien et/ou de nouvel appel d'offres manquants",
-                }
+                })
                 return
 
             _update("anonymizing", 20, "Preparation de l'analyse...")
@@ -619,17 +619,17 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
             db.add(gr)
             await db.commit()
 
-        _gap_analysis_progress[pid] = {
+        set_progress(_NS_GAP, pid, {
             "status": "completed", "step": "done", "progress": 100,
             "message": "Analyse des ecarts terminee",
-        }
+        })
 
     except Exception as e:
         logger.exception("Gap analysis failed for project %s", project_id)
-        _gap_analysis_progress[pid] = {
+        set_progress(_NS_GAP, pid, {
             "status": "error", "step": "error", "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
-        }
+        })
 
 
 async def _get_all_chunks_by_category(
@@ -734,7 +734,7 @@ async def _get_full_text_anonymized_by_category(
 @router.post("/{project_id}/generate-structure")
 async def generate_structure(
     project_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
+
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -756,19 +756,20 @@ async def generate_structure(
     pid = str(project_id)
 
     # Check if already running
-    existing = _generation_progress.get(pid)
+    existing = get_or_idle(_NS_GEN, pid)
     if existing and existing.get("status") == "running":
         raise HTTPException(status_code=409, detail="Generation deja en cours")
 
     workspace_id = project.workspace_id
-    _generation_progress[pid] = {
+    set_progress(_NS_GEN, pid, {
         "status": "running",
         "step": "starting",
         "progress": 0,
         "message": "Demarrage de la generation...",
-    }
+    })
 
-    background_tasks.add_task(_run_structure_generation, project_id, workspace_id)
+    from ..tasks.project_tasks import generate_structure_task
+    generate_structure_task.delay(str(project_id), str(workspace_id))
 
     return {"success": True, "message": "Generation lancee en arriere-plan"}
 
@@ -780,12 +781,7 @@ async def get_generation_status(
 ):
     """Poll the progress of the structure generation task."""
     pid = str(project_id)
-    return _generation_progress.get(pid, {
-        "status": "idle",
-        "step": "idle",
-        "progress": 0,
-        "message": "",
-    })
+    return get_or_idle(_NS_GEN, pid)
 
 
 def _make_stream_progress_callback(pid: str, step: str, start_pct: int, end_pct: int, label: str, max_tokens: int):
@@ -802,12 +798,12 @@ def _make_stream_progress_callback(pid: str, step: str, start_pct: int, end_pct:
         # Real progress based on actual tokens received vs expected max
         ratio = min(token_count / max_tokens, 0.95)
         pct = start_pct + int((end_pct - start_pct) * ratio)
-        _generation_progress[pid] = {
+        set_progress(_NS_GEN, pid, {
             "status": "running",
             "step": step,
             "progress": pct,
             "message": f"{label} — {token_count} tokens recus ({char_count:,} car.) — {elapsed}s",
-        }
+        })
 
     return _on_progress
 
@@ -818,12 +814,12 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
-        _generation_progress[pid] = {
+        set_progress(_NS_GEN, pid, {
             "status": "running",
             "step": step,
             "progress": progress,
             "message": message,
-        }
+        })
 
     try:
         # ── Phase 1: Load data from DB (short-lived session) ──
@@ -843,10 +839,10 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
             )
             if not anon_new_rfp:
-                _generation_progress[pid] = {
+                set_progress(_NS_GEN, pid, {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "Aucun document de nouvel appel d'offres indexe",
-                }
+                })
                 return
 
         # DB session released — all data is now in memory
@@ -931,7 +927,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         # If deliverables were detected but all are completion-type, no chapters to generate
         has_deliverables = (len(resp_docs) + completion_docs_count) > 0
         if has_deliverables and not resp_docs:
-            _generation_progress[pid] = {
+            set_progress(_NS_GEN, pid, {
                 "status": "completed",
                 "step": "done",
                 "progress": 100,
@@ -941,7 +937,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 "completion_docs_count": completion_docs_count,
                 "message": f"Aucun document a rediger detecte — {completion_docs_count} document(s) "
                            f"a completer (Excel/PDF) a traiter dans l'onglet Livrables",
-            }
+            })
             return
 
         if resp_docs:
@@ -977,11 +973,11 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                     # Progress between 50-88% for parallel generation
                     base = 50 if rfp_summary else 40
                     pct = base + int(38 * (_doc_done_count + ratio) / total_docs)
-                    _generation_progress[pid] = {
+                    set_progress(_NS_GEN, pid, {
                         "status": "running", "step": "generating", "progress": pct,
                         "message": f"Documents en parallele ({_doc_done_count + 1}/{total_docs}): "
                                    f"{_title} — {token_count} tokens — {elapsed}s",
-                    }
+                    })
 
                 async with sem:
                     structure = await ai_service.generate_response_structure_for_document(
@@ -1008,10 +1004,10 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             all_doc_structures = [(did, struct) for did, struct in results if struct]
 
             if not all_doc_structures:
-                _generation_progress[pid] = {
+                set_progress(_NS_GEN, pid, {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "L'IA n'a genere aucune structure pour les documents selectionnes.",
-                }
+                })
                 return
 
             # ── Phase 3c: Batch insert chapters (single commit) ──
@@ -1069,11 +1065,11 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             )
 
             if not structure:
-                _generation_progress[pid] = {
+                set_progress(_NS_GEN, pid, {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "L'IA n'a pas retourne de JSON valide apres 2 tentatives. "
                                "Verifiez les logs serveur pour le diagnostic. Reessayez.",
-                }
+                })
                 return
 
             _update("saving", 88, "Enregistrement des chapitres en base...")
@@ -1124,7 +1120,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         if completion_docs_count > 0:
             completion_msg = f" — {completion_docs_count} document(s) a completer (Excel/PDF) a traiter dans l'onglet Livrables"
 
-        _generation_progress[pid] = {
+        set_progress(_NS_GEN, pid, {
             "status": "completed",
             "step": "done",
             "progress": 100,
@@ -1136,23 +1132,23 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                        + (f" pour {len(resp_docs)} document(s) redactionnels" if resp_docs else
                           f" ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifies, {delta_stats['unchanged']} inchanges)")
                        + completion_msg,
-        }
+        })
 
     except Exception as e:
         logger.exception("Structure generation failed for project %s", project_id)
-        _generation_progress[pid] = {
+        set_progress(_NS_GEN, pid, {
             "status": "error",
             "step": "error",
             "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
-        }
+        })
 
 
 @router.post("/{project_id}/prefill")
 async def prefill_chapters(
     project_id: uuid.UUID,
     request: PrefillRequest,
-    background_tasks: BackgroundTasks,
+
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1165,7 +1161,7 @@ async def prefill_chapters(
     pid = str(project_id)
 
     # Check if already running
-    existing = _prefill_progress.get(pid)
+    existing = get_or_idle(_NS_PREFILL, pid)
     if existing and existing.get("status") == "running":
         raise HTTPException(status_code=409, detail="Pre-remplissage deja en cours")
 
@@ -1181,14 +1177,15 @@ async def prefill_chapters(
     workspace_id = project.workspace_id
     chapter_ids = request.chapter_ids or []
 
-    _prefill_progress[pid] = {
+    set_progress(_NS_PREFILL, pid, {
         "status": "running",
         "step": "starting",
         "progress": 0,
         "message": "Demarrage du pre-remplissage...",
-    }
+    })
 
-    background_tasks.add_task(_run_prefill, project_id, workspace_id, chapter_ids)
+    from ..tasks.project_tasks import prefill_chapters_task
+    prefill_chapters_task.delay(str(project_id), str(workspace_id), chapter_ids)
 
     return {"success": True, "message": "Pre-remplissage lance en arriere-plan"}
 
@@ -1200,12 +1197,7 @@ async def get_prefill_status(
 ):
     """Poll the progress of the chapter pre-filling task."""
     pid = str(project_id)
-    return _prefill_progress.get(pid, {
-        "status": "idle",
-        "step": "idle",
-        "progress": 0,
-        "message": "",
-    })
+    return get_or_idle(_NS_PREFILL, pid)
 
 
 async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_ids: list[str]):
@@ -1219,13 +1211,13 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str, prefilled_count: int = 0):
-        _prefill_progress[pid] = {
+        set_progress(_NS_PREFILL, pid, {
             "status": "running",
             "step": step,
             "progress": progress,
             "message": message,
             "prefilled_count": prefilled_count,
-        }
+        })
 
     try:
         # Short DB session to load config + chapter list
@@ -1263,13 +1255,13 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
         total = len(to_prefill)
 
         if total == 0:
-            _prefill_progress[pid] = {
+            set_progress(_NS_PREFILL, pid, {
                 "status": "completed",
                 "step": "done",
                 "progress": 100,
                 "prefilled_count": 0,
                 "message": "Aucun chapitre vide a pre-remplir",
-            }
+            })
             return
 
         _update("loading", 10,
@@ -1283,11 +1275,11 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                     db, project_id, DocumentCategory.OLD_RESPONSE
                 )
             if not full_old_response.strip():
-                _prefill_progress[pid] = {
+                set_progress(_NS_PREFILL, pid, {
                     "status": "completed", "step": "done", "progress": 100,
                     "prefilled_count": 0,
                     "message": "Aucun contenu d'ancienne reponse trouve",
-                }
+                })
                 return
 
         prefilled = 0
@@ -1351,34 +1343,32 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                 skipped += 1
                 continue
 
-        _prefill_progress[pid] = {
+        set_progress(_NS_PREFILL, pid, {
             "status": "completed",
             "step": "done",
             "progress": 100,
             "prefilled_count": prefilled,
             "message": f"{prefilled} chapitre(s) pre-rempli(s)"
                        + (f" ({skipped} sans contenu pertinent)" if skipped else ""),
-        }
+        })
 
     except Exception as e:
         logger.exception("Prefill failed for project %s", project_id)
-        _prefill_progress[pid] = {
+        set_progress(_NS_PREFILL, pid, {
             "status": "error",
             "step": "error",
             "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
-        }
+        })
 
 
 # ── Response Documents (Deliverables) ──
-
-_detect_progress: Dict[str, dict] = {}
 
 
 @router.post("/{project_id}/detect-deliverables")
 async def detect_deliverables(
     project_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
+
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1397,16 +1387,17 @@ async def detect_deliverables(
         raise HTTPException(status_code=400, detail="Aucun document de nouvel AO indexe")
 
     pid = str(project_id)
-    existing = _detect_progress.get(pid)
+    existing = get_or_idle(_NS_DETECT, pid)
     if existing and existing.get("status") == "running":
         raise HTTPException(status_code=409, detail="Detection deja en cours")
 
-    _detect_progress[pid] = {
+    set_progress(_NS_DETECT, pid, {
         "status": "running", "step": "starting", "progress": 0,
         "message": "Demarrage de la detection des livrables...",
-    }
+    })
 
-    background_tasks.add_task(_run_detect_deliverables, project_id, project.workspace_id)
+    from ..tasks.project_tasks import detect_deliverables_task
+    detect_deliverables_task.delay(str(project_id), str(project.workspace_id))
     return {"success": True, "message": "Detection lancee en arriere-plan"}
 
 
@@ -1417,9 +1408,7 @@ async def get_detect_status(
 ):
     """Poll the progress of deliverable detection."""
     pid = str(project_id)
-    return _detect_progress.get(pid, {
-        "status": "idle", "step": "idle", "progress": 0, "message": "",
-    })
+    return get_or_idle(_NS_DETECT, pid)
 
 
 async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID):
@@ -1431,10 +1420,10 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
-        _detect_progress[pid] = {
+        set_progress(_NS_DETECT, pid, {
             "status": "running", "step": step,
             "progress": progress, "message": message,
-        }
+        })
 
     try:
         # ── Phase 1: Load anonymized chunks (short DB session) ──
@@ -1446,10 +1435,10 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
                 db, project_id, DocumentCategory.NEW_RFP
             )
             if not anon_new_rfp:
-                _detect_progress[pid] = {
+                set_progress(_NS_DETECT, pid, {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "Aucun document de nouvel AO indexe",
-                }
+                })
                 return
 
             anon_old_response = await _get_all_chunks_anonymized_by_category(
@@ -1466,10 +1455,10 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
             elapsed = int(time.monotonic() - t0)
             ratio = min(token_count / 8000, 0.95)
             pct = 20 + int(60 * ratio)
-            _detect_progress[pid] = {
+            set_progress(_NS_DETECT, pid, {
                 "status": "running", "step": "analyzing", "progress": pct,
                 "message": f"Analyse IA — {token_count} tokens ({char_count:,} car.) — {elapsed}s",
-            }
+            })
 
         deliverables = await ai_service.detect_deliverables(
             new_rfp_content=anon_new_rfp,
@@ -1478,10 +1467,10 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
         )
 
         if not deliverables:
-            _detect_progress[pid] = {
+            set_progress(_NS_DETECT, pid, {
                 "status": "error", "step": "error", "progress": 0,
                 "message": "L'IA n'a pas detecte de livrables. Reessayez.",
-            }
+            })
             return
 
         # ── Phase 3: Save results (short DB session) ──
@@ -1554,18 +1543,18 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
 
             await db.commit()
 
-        _detect_progress[pid] = {
+        set_progress(_NS_DETECT, pid, {
             "status": "completed", "step": "done", "progress": 100,
             "deliverables_count": len(deliverables),
             "message": f"{len(deliverables)} livrable(s) detecte(s) dans l'AO",
-        }
+        })
 
     except Exception as e:
         logger.exception("Deliverable detection failed for project %s", project_id)
-        _detect_progress[pid] = {
+        set_progress(_NS_DETECT, pid, {
             "status": "error", "step": "error", "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
-        }
+        })
 
 
 @router.get("/{project_id}/response-documents", response_model=list[ResponseDocumentOut])
@@ -1732,13 +1721,11 @@ async def confirm_document_selection(
 
 # ── Auto-fill completion documents (Excel/PDF) ──
 
-_fill_progress: Dict[str, dict] = {}
-
 
 @router.post("/{project_id}/fill-deliverables")
 async def fill_deliverables(
     project_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
+
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -1760,16 +1747,17 @@ async def fill_deliverables(
         raise HTTPException(status_code=400, detail="Aucun document à compléter détecté")
 
     pid = str(project_id)
-    existing = _fill_progress.get(pid)
+    existing = get_or_idle(_NS_FILL, pid)
     if existing and existing.get("status") == "running":
         raise HTTPException(status_code=409, detail="Auto-remplissage déjà en cours")
 
-    _fill_progress[pid] = {
+    set_progress(_NS_FILL, pid, {
         "status": "running", "step": "starting", "progress": 0,
         "message": "Démarrage de l'auto-remplissage...",
-    }
+    })
 
-    background_tasks.add_task(_run_fill_deliverables, project_id, project.workspace_id)
+    from ..tasks.project_tasks import fill_deliverables_task
+    fill_deliverables_task.delay(str(project_id), str(project.workspace_id))
     return {"success": True, "message": "Auto-remplissage lancé en arrière-plan"}
 
 
@@ -1780,9 +1768,7 @@ async def get_fill_status(
 ):
     """Poll the progress of auto-fill for completion documents."""
     pid = str(project_id)
-    return _fill_progress.get(pid, {
-        "status": "idle", "step": "idle", "progress": 0, "message": "",
-    })
+    return get_or_idle(_NS_FILL, pid)
 
 
 async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID):
@@ -1794,10 +1780,10 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
-        _fill_progress[pid] = {
+        set_progress(_NS_FILL, pid, {
             "status": "running", "step": step,
             "progress": progress, "message": message,
-        }
+        })
 
     try:
         # ── Phase 1: Load all data (short DB session) ──
@@ -1821,11 +1807,11 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
             total = len(comp_docs)
 
             if total == 0:
-                _fill_progress[pid] = {
+                set_progress(_NS_FILL, pid, {
                     "status": "completed", "step": "done", "progress": 100,
                     "filled_count": 0,
                     "message": "Aucun document à compléter",
-                }
+                })
                 return
 
             # Capture plain data (detach from session)
@@ -1873,11 +1859,11 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 elapsed = int(time.monotonic() - _t0)
                 ratio = min(token_count / 8000, 0.95)
                 pct = 10 + int(85 * (_fill_done + ratio) / total)
-                _fill_progress[pid] = {
+                set_progress(_NS_FILL, pid, {
                     "status": "running", "step": "filling", "progress": pct,
                     "message": f"Documents en parallele ({_fill_done + 1}/{total}): "
                                f"{_title} — {token_count} tokens — {elapsed}s",
-                }
+                })
 
             async with sem:
                 fill_content = await ai_service.generate_fill_content(
@@ -1913,18 +1899,18 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 filled_count += 1
             await db.commit()
 
-        _fill_progress[pid] = {
+        set_progress(_NS_FILL, pid, {
             "status": "completed", "step": "done", "progress": 100,
             "filled_count": filled_count,
             "message": f"{filled_count} document(s) à compléter traité(s)",
-        }
+        })
 
     except Exception as e:
         logger.exception("Fill deliverables failed for project %s", project_id)
-        _fill_progress[pid] = {
+        set_progress(_NS_FILL, pid, {
             "status": "error", "step": "error", "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
-        }
+        })
 
 
 @router.get("/{project_id}/compliance-analysis")
@@ -1960,14 +1946,14 @@ async def get_compliance_analysis(
 @router.post("/{project_id}/compliance-analysis")
 async def analyze_compliance(
     project_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
+
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Launch compliance analysis as a background task (returns immediately)."""
     pid = str(project_id)
 
-    existing = _compliance_progress.get(pid)
+    existing = get_or_idle(_NS_COMPLIANCE, pid)
     if existing and existing.get("status") == "running":
         raise HTTPException(status_code=409, detail="Analyse de conformite deja en cours")
 
@@ -2002,12 +1988,13 @@ async def analyze_compliance(
             detail="Aucun contenu à analyser. Rédigez les chapitres du mémoire technique ou chargez des documents 'Notre réponse'.",
         )
 
-    _compliance_progress[pid] = {
+    set_progress(_NS_COMPLIANCE, pid, {
         "status": "running", "step": "starting", "progress": 0,
         "message": "Demarrage de l'analyse de conformite...",
-    }
+    })
 
-    background_tasks.add_task(_run_compliance_analysis, project_id, project.workspace_id)
+    from ..tasks.project_tasks import compliance_analysis_task
+    compliance_analysis_task.delay(str(project_id), str(project.workspace_id))
 
     return {"success": True, "message": "Analyse de conformite lancee en arriere-plan"}
 
@@ -2019,9 +2006,7 @@ async def get_compliance_analysis_status(
 ):
     """Poll the progress of compliance analysis."""
     pid = str(project_id)
-    return _compliance_progress.get(pid, {
-        "status": "idle", "step": "idle", "progress": 0, "message": "",
-    })
+    return get_or_idle(_NS_COMPLIANCE, pid)
 
 
 async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
@@ -2033,10 +2018,10 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
-        _compliance_progress[pid] = {
+        set_progress(_NS_COMPLIANCE, pid, {
             "status": "running", "step": step,
             "progress": progress, "message": message,
-        }
+        })
 
     try:
         # ── Phase 1: Load data + anonymize (short DB session) ──
@@ -2076,10 +2061,10 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
             anon_response = "\n\n".join(response_parts)
 
             if not anon_response.strip():
-                _compliance_progress[pid] = {
+                set_progress(_NS_COMPLIANCE, pid, {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "Aucun contenu a analyser. Redigez les chapitres du memoire technique ou chargez des documents 'Notre reponse'.",
-                }
+                })
                 return
 
             # ── 1c. Load ALL RFP content (CCAP, CCTP, RC, etc.) ──
@@ -2089,10 +2074,10 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
             )
 
             if not anon_rfp.strip():
-                _compliance_progress[pid] = {
+                set_progress(_NS_COMPLIANCE, pid, {
                     "status": "error", "step": "error", "progress": 0,
                     "message": "Aucun document d'appel d'offres indexe",
-                }
+                })
                 return
 
             _update("anonymizing", 25, "Preparation de l'analyse...")
@@ -2139,17 +2124,17 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
             db.add(cr)
             await db.commit()
 
-        _compliance_progress[pid] = {
+        set_progress(_NS_COMPLIANCE, pid, {
             "status": "completed", "step": "done", "progress": 100,
             "message": "Analyse de conformite terminee",
-        }
+        })
 
     except Exception as e:
         logger.exception("Compliance analysis failed for project %s", project_id)
-        _compliance_progress[pid] = {
+        set_progress(_NS_COMPLIANCE, pid, {
             "status": "error", "step": "error", "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
-        }
+        })
 
 
 async def _find_best_chapter(
@@ -2212,7 +2197,7 @@ async def _find_best_chapter(
 async def generate_recommendation_content(
     project_id: uuid.UUID,
     request: dict,
-    background_tasks: BackgroundTasks,
+
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -2238,7 +2223,7 @@ async def generate_recommendation_content(
         raise HTTPException(status_code=400, detail="Recommendation manquante")
 
     # Don't relaunch if already running
-    existing = _rec_gen_progress.get(task_id)
+    existing = get_or_idle(_NS_REC, task_id)
     if existing and existing.get("status") in ("running", "queued"):
         return {"task_id": task_id}
 
@@ -2250,15 +2235,15 @@ async def generate_recommendation_content(
     # Quick config check
     await _get_ai_service(project.workspace_id, db)
 
-    _rec_gen_progress[task_id] = {
+    set_progress(_NS_REC, task_id, {
         "status": "queued", "step": "queued", "progress": 0,
         "message": "En file d'attente...",
         "chapter_id": None, "chapter_title": None, "content": None,
-    }
+    })
 
-    background_tasks.add_task(
-        _run_rec_generation,
-        task_id, project_id, project.workspace_id,
+    from ..tasks.project_tasks import generate_recommendation_task
+    generate_recommendation_task.delay(
+        task_id, str(project_id), str(project.workspace_id),
         recommendation, missing_description, chapter_id, inject,
     )
 
@@ -2272,10 +2257,12 @@ async def get_rec_gen_status(
     current_user: User = Depends(get_current_user),
 ):
     """Poll the progress of a recommendation content generation task."""
-    return _rec_gen_progress.get(task_id, {
-        "status": "idle", "step": "idle", "progress": 0, "message": "",
-        "chapter_id": None, "chapter_title": None, "content": None,
-    })
+    result = get_or_idle(_NS_REC, task_id)
+    # Ensure frontend-expected keys are always present
+    result.setdefault("chapter_id", None)
+    result.setdefault("chapter_title", None)
+    result.setdefault("content", None)
+    return result
 
 
 async def _run_rec_generation(
@@ -2285,86 +2272,85 @@ async def _run_rec_generation(
 ):
     """Background task for recommendation/missing-element content generation.
 
-    Uses a semaphore to limit concurrent generations (max 3).
+    Concurrency is controlled by Celery worker --concurrency setting.
     DB connections are released during the slow AI call.
     """
     from ..database import async_session
 
     def _update(step: str, progress: int, message: str, **extra):
-        _rec_gen_progress[task_id] = {
+        set_progress(_NS_REC, task_id, {
             "status": "running", "step": step,
             "progress": progress, "message": message,
             "chapter_id": extra.get("chapter_id"),
             "chapter_title": extra.get("chapter_title"),
             "content": extra.get("content"),
-        }
+        })
 
     try:
-        async with _rec_gen_semaphore:
-            _update("starting", 5, "Demarrage...")
+        _update("starting", 5, "Demarrage...")
 
-            # ── Phase 1: Load data + anonymize (short DB session) ──
-            async with async_session() as db:
-                ai_service = await _get_ai_service(workspace_id, db)
+        # ── Phase 1: Load data + anonymize (short DB session) ──
+        async with async_session() as db:
+            ai_service = await _get_ai_service(workspace_id, db)
 
-                project_result = await db.execute(
-                    select(RFPProject).where(RFPProject.id == project_id)
+            project_result = await db.execute(
+                select(RFPProject).where(RFPProject.id == project_id)
+            )
+            project = project_result.scalar_one()
+            ai_context = project.ai_context or ""
+
+            _update("searching", 10, "Recherche de contexte...")
+
+            # Get RFP context via vector search
+            rfp_chunks = VectorService.search(
+                str(project_id), recommendation, top_k=5, category_filter="new_rfp"
+            )
+            rfp_context = "\n\n".join([c["content"] for c in rfp_chunks]) if rfp_chunks else ""
+
+            # Search old response documents for relevant content
+            old_response_chunks = VectorService.search(
+                str(project_id), recommendation, top_k=5, category_filter="old_response"
+            )
+            old_response_context = "\n\n".join([c["content"] for c in old_response_chunks]) if old_response_chunks else ""
+
+            # Auto-detect or load target chapter
+            _update("matching", 20, "Identification du meilleur chapitre...")
+            target_chapter = None
+            if chapter_id_override:
+                ch_result = await db.execute(
+                    select(Chapter)
+                    .where(Chapter.id == uuid.UUID(chapter_id_override))
+                    .where(Chapter.project_id == project_id)
                 )
-                project = project_result.scalar_one()
-                ai_context = project.ai_context or ""
+                target_chapter = ch_result.scalar_one_or_none()
+            elif inject:
+                search_text = f"{recommendation} {missing_description}"
+                target_chapter, _score = await _find_best_chapter(db, project_id, search_text)
 
-                _update("searching", 10, "Recherche de contexte...")
+            existing_chapter_content = ""
+            chapter_title = ""
+            resolved_chapter_id = None
+            if target_chapter:
+                existing_chapter_content = target_chapter.content or ""
+                chapter_title = target_chapter.title or ""
+                resolved_chapter_id = str(target_chapter.id)
 
-                # Get RFP context via vector search
-                rfp_chunks = VectorService.search(
-                    str(project_id), recommendation, top_k=5, category_filter="new_rfp"
-                )
-                rfp_context = "\n\n".join([c["content"] for c in rfp_chunks]) if rfp_chunks else ""
-
-                # Search old response documents for relevant content
-                old_response_chunks = VectorService.search(
-                    str(project_id), recommendation, top_k=5, category_filter="old_response"
-                )
-                old_response_context = "\n\n".join([c["content"] for c in old_response_chunks]) if old_response_chunks else ""
-
-                # Auto-detect or load target chapter
-                _update("matching", 20, "Identification du meilleur chapitre...")
-                target_chapter = None
-                if chapter_id_override:
-                    ch_result = await db.execute(
-                        select(Chapter)
-                        .where(Chapter.id == uuid.UUID(chapter_id_override))
-                        .where(Chapter.project_id == project_id)
-                    )
-                    target_chapter = ch_result.scalar_one_or_none()
-                elif inject:
-                    search_text = f"{recommendation} {missing_description}"
-                    target_chapter, _score = await _find_best_chapter(db, project_id, search_text)
-
-                existing_chapter_content = ""
-                chapter_title = ""
-                resolved_chapter_id = None
-                if target_chapter:
-                    existing_chapter_content = target_chapter.content or ""
-                    chapter_title = target_chapter.title or ""
-                    resolved_chapter_id = str(target_chapter.id)
-
-                _update("anonymizing", 30, f"Preparation (chapitre: {chapter_title or 'auto'})...",
-                        chapter_id=resolved_chapter_id, chapter_title=chapter_title)
-
-                # Anonymize all texts
-                anon_rec = await AnonymizationService.anonymize_text(recommendation, project_id, db)
-                anon_rfp = await AnonymizationService.anonymize_text(rfp_context, project_id, db) if rfp_context else ""
-                anon_old_response = await AnonymizationService.anonymize_text(old_response_context, project_id, db) if old_response_context else ""
-                anon_existing = await AnonymizationService.anonymize_text(existing_chapter_content, project_id, db) if existing_chapter_content else ""
-                anon_missing = await AnonymizationService.anonymize_text(missing_description, project_id, db) if missing_description else ""
-            # DB released
-
-            # ── Phase 2: AI generation (NO DB connection held) ──
-            _update("generating", 40, "Generation IA en cours...",
+            _update("anonymizing", 30, f"Preparation (chapitre: {chapter_title or 'auto'})...",
                     chapter_id=resolved_chapter_id, chapter_title=chapter_title)
 
-            system_prompt = """Tu es un expert senior en réponse aux appels d'offres.
+            # Anonymize all texts
+            anon_rec = await AnonymizationService.anonymize_text(recommendation, project_id, db)
+            anon_rfp = await AnonymizationService.anonymize_text(rfp_context, project_id, db) if rfp_context else ""
+            anon_old_response = await AnonymizationService.anonymize_text(old_response_context, project_id, db) if old_response_context else ""
+            anon_existing = await AnonymizationService.anonymize_text(existing_chapter_content, project_id, db) if existing_chapter_content else ""
+            anon_missing = await AnonymizationService.anonymize_text(missing_description, project_id, db) if missing_description else ""
+        # DB released
+
+        # ── Phase 2: AI generation (NO DB connection held) ──
+        _update("generating", 40, "Generation IA en cours...",
+                chapter_id=resolved_chapter_id, chapter_title=chapter_title)
+
+        system_prompt = """Tu es un expert senior en réponse aux appels d'offres.
 À partir d'une lacune ou recommandation identifiée lors d'une analyse de conformité,
 tu dois générer un contenu structuré qui comble cette lacune.
 
@@ -2382,67 +2368,67 @@ Anonymisation:
 - Le texte peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], etc.
 - Réutilise EXACTEMENT les mêmes marqueurs. N'en invente JAMAIS de nouveaux."""
 
-            if ai_context:
-                system_prompt += f"""
+        if ai_context:
+            system_prompt += f"""
 
 Contexte de rédaction (informations sur notre société et notre approche):
 {ai_context}"""
 
-            user_parts = []
-            if missing_description:
-                user_parts.append(f"ÉLÉMENT MANQUANT IDENTIFIÉ:\nExigence: {anon_rec}\nCe qui manque: {anon_missing}")
-            else:
-                user_parts.append(f"RECOMMANDATION À TRAITER:\n{anon_rec}")
+        user_parts = []
+        if missing_description:
+            user_parts.append(f"ÉLÉMENT MANQUANT IDENTIFIÉ:\nExigence: {anon_rec}\nCe qui manque: {anon_missing}")
+        else:
+            user_parts.append(f"RECOMMANDATION À TRAITER:\n{anon_rec}")
 
-            if anon_rfp:
-                user_parts.append(f"CONTEXTE DU CAHIER DES CHARGES (extraits pertinents):\n{anon_rfp[:5000]}")
-            if anon_old_response:
-                user_parts.append(f"ÉLÉMENTS DE L'ANCIENNE RÉPONSE (à exploiter et adapter):\n{anon_old_response[:5000]}")
-            if anon_existing and chapter_title:
-                user_parts.append(
-                    f"CONTENU ACTUEL DU CHAPITRE \"{chapter_title}\" (ne pas répéter, compléter):\n{anon_existing[:3000]}"
-                )
+        if anon_rfp:
+            user_parts.append(f"CONTEXTE DU CAHIER DES CHARGES (extraits pertinents):\n{anon_rfp[:5000]}")
+        if anon_old_response:
+            user_parts.append(f"ÉLÉMENTS DE L'ANCIENNE RÉPONSE (à exploiter et adapter):\n{anon_old_response[:5000]}")
+        if anon_existing and chapter_title:
             user_parts.append(
-                "Génère un contenu structuré (1-2 pages) qui comble cette lacune. "
-                "Le contenu doit s'intégrer naturellement dans le mémoire technique."
+                f"CONTENU ACTUEL DU CHAPITRE \"{chapter_title}\" (ne pas répéter, compléter):\n{anon_existing[:3000]}"
             )
+        user_parts.append(
+            "Génère un contenu structuré (1-2 pages) qui comble cette lacune. "
+            "Le contenu doit s'intégrer naturellement dans le mémoire technique."
+        )
 
-            content = await ai_service.generate(system_prompt, "\n\n".join(user_parts), max_tokens=4096)
+        content = await ai_service.generate(system_prompt, "\n\n".join(user_parts), max_tokens=4096)
 
-            # ── Phase 3: Deanonymize + save (short DB session) ──
-            _update("deanonymizing", 80, "Deanonymisation...",
-                    chapter_id=resolved_chapter_id, chapter_title=chapter_title)
+        # ── Phase 3: Deanonymize + save (short DB session) ──
+        _update("deanonymizing", 80, "Deanonymisation...",
+                chapter_id=resolved_chapter_id, chapter_title=chapter_title)
 
-            async with async_session() as db:
-                content = await AnonymizationService.deanonymize_text(content, project_id, db)
+        async with async_session() as db:
+            content = await AnonymizationService.deanonymize_text(content, project_id, db)
 
-                if inject and resolved_chapter_id:
-                    _update("saving", 90, f"Injection dans '{chapter_title}'...",
-                            chapter_id=resolved_chapter_id, chapter_title=chapter_title)
-                    ch_result = await db.execute(
-                        select(Chapter).where(Chapter.id == uuid.UUID(resolved_chapter_id))
-                    )
-                    chapter = ch_result.scalar_one_or_none()
-                    if chapter:
-                        separator = "\n\n---\n\n" if chapter.content else ""
-                        chapter.content = (chapter.content or "") + separator + content
-                        await db.commit()
+            if inject and resolved_chapter_id:
+                _update("saving", 90, f"Injection dans '{chapter_title}'...",
+                        chapter_id=resolved_chapter_id, chapter_title=chapter_title)
+                ch_result = await db.execute(
+                    select(Chapter).where(Chapter.id == uuid.UUID(resolved_chapter_id))
+                )
+                chapter = ch_result.scalar_one_or_none()
+                if chapter:
+                    separator = "\n\n---\n\n" if chapter.content else ""
+                    chapter.content = (chapter.content or "") + separator + content
+                    await db.commit()
 
-        _rec_gen_progress[task_id] = {
+        set_progress(_NS_REC, task_id, {
             "status": "completed", "step": "done", "progress": 100,
             "message": f"Contenu integre dans '{chapter_title}'" if inject and chapter_title else "Contenu genere",
             "chapter_id": resolved_chapter_id,
             "chapter_title": chapter_title,
             "content": content,
-        }
+        })
 
     except Exception as e:
         logger.exception("Recommendation generation failed for task %s", task_id)
-        _rec_gen_progress[task_id] = {
+        set_progress(_NS_REC, task_id, {
             "status": "error", "step": "error", "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
             "chapter_id": None, "chapter_title": None, "content": None,
-        }
+        })
 
 
 @router.get("/{project_id}/compliance-analysis/export-pdf")
@@ -2956,7 +2942,7 @@ async def delete_anonymization_mapping(
 @router.post("/{project_id}/re-anonymize")
 async def re_anonymize_project(
     project_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
+
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -2967,18 +2953,18 @@ async def re_anonymize_project(
     pid = str(project_id)
 
     # Prevent double-launch
-    existing = _reanon_progress.get(pid)
+    existing = get_or_idle(_NS_REANON, pid)
     if existing and existing.get("status") == "running":
         return {"task_id": pid, "already_running": True}
 
-    _reanon_progress[pid] = {
+    set_progress(_NS_REANON, pid, {
         "status": "running",
         "progress": 0,
         "current": 0,
         "total": 0,
         "phase": "init",
         "message": "Demarrage de la re-anonymisation...",
-    }
+    })
 
     # Read workspace_id while we still have the request DB session
     project_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
@@ -2986,7 +2972,8 @@ async def re_anonymize_project(
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouve")
 
-    background_tasks.add_task(_run_reanonymize, project_id)
+    from ..tasks.project_tasks import reanonymize_task
+    reanonymize_task.delay(str(project_id))
     return {"task_id": pid}
 
 
@@ -2997,7 +2984,7 @@ async def get_reanonymize_status(
 ):
     """Poll re-anonymization progress."""
     pid = str(project_id)
-    return _reanon_progress.get(pid, {"status": "idle"})
+    return get_or_idle(_NS_REANON, pid)
 
 
 async def _run_reanonymize(project_id: uuid.UUID):
@@ -3008,14 +2995,14 @@ async def _run_reanonymize(project_id: uuid.UUID):
     pid = str(project_id)
 
     def _update(phase: str, progress: int, message: str, current: int = 0, total: int = 0):
-        _reanon_progress[pid] = {
+        set_progress(_NS_REANON, pid, {
             "status": "running",
             "progress": progress,
             "current": current,
             "total": total,
             "phase": phase,
             "message": message,
-        }
+        })
 
     try:
         # ── Phase 1: NER detection on document chunks ──
@@ -3115,7 +3102,7 @@ async def _run_reanonymize(project_id: uuid.UUID):
 
         ner_available = AnonymizationService.is_ner_available()
 
-        _reanon_progress[pid] = {
+        set_progress(_NS_REANON, pid, {
             "status": "done",
             "progress": 100,
             "current": total_chunks,
@@ -3126,16 +3113,16 @@ async def _run_reanonymize(project_id: uuid.UUID):
             "updated_chapters": updated_chapters,
             "new_entities": new_entities,
             "ner_available": ner_available,
-        }
+        })
 
     except Exception as e:
         logger.error("Re-anonymize background task failed: %s", e, exc_info=True)
-        _reanon_progress[pid] = {
+        set_progress(_NS_REANON, pid, {
             "status": "error",
             "progress": 0,
             "phase": "error",
             "message": f"Erreur: {str(e)}",
-        }
+        })
 
 
 @router.get("/{project_id}/chapters/{chapter_id}/anonymized-content")

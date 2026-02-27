@@ -2,44 +2,44 @@
 import asyncio
 import uuid
 import logging
-from typing import Dict, Callable, Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from ..database import get_db
 from ..models.user import User
-from ..models.project import RFPProject, AIConfig
+from ..models.project import RFPProject
 from ..models.chapter import Chapter
 from ..models.document import Document, DocumentImage
 from ..services.word_service import RFPWordService
 from ..services.export_service import ExportService
 from ..services.anonymization_service import AnonymizationService
+from ..services.progress_service import (
+    set_progress, get_or_idle, delete_progress,
+    store_export_result, get_export_result, delete_export_result,
+)
 from .deps import get_current_user
 
 router = APIRouter(prefix="/export", tags=["Export/Import"])
 logger = logging.getLogger(__name__)
 
-# In-memory progress tracking for exports
-_backup_progress: Dict[str, dict] = {}
-_backup_results: Dict[str, dict] = {}  # Stores {bytes, filename} when done
-_word_progress: Dict[str, dict] = {}
-_word_results: Dict[str, dict] = {}  # Stores {bytes, filename} when done
+# Redis progress namespaces
+_NS_WORD = "word_export"
+_NS_BACKUP = "backup_export"
 
 
 @router.post("/{project_id}/word")
 async def export_word(
     project_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Launch Word export as a background task (returns immediately)."""
+    """Launch Word export as a Celery background task."""
     pid = str(project_id)
 
-    existing = _word_progress.get(pid)
-    if existing and existing.get("status") == "running":
+    existing = get_or_idle(_NS_WORD, pid)
+    if existing.get("status") == "running":
         raise HTTPException(status_code=409, detail="Export Word deja en cours")
 
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
@@ -50,13 +50,14 @@ async def export_word(
     filename = f"reponse_ao_{project.rfp_reference or project.name}.docx"
     filename = filename.replace(" ", "_").replace("/", "_")
 
-    _word_progress[pid] = {
+    set_progress(_NS_WORD, pid, {
         "status": "running", "step": "starting", "progress": 0,
         "message": "Demarrage de l'export Word...",
-    }
-    _word_results.pop(pid, None)
+    })
+    delete_export_result("word", pid)
 
-    background_tasks.add_task(_run_word_export, project_id, filename)
+    from ..tasks.export_tasks import export_word_task
+    export_word_task.delay(pid, filename)
 
     return {"success": True, "message": "Export Word lance en arriere-plan"}
 
@@ -67,10 +68,7 @@ async def get_word_status(
     current_user: User = Depends(get_current_user),
 ):
     """Poll the progress of Word export."""
-    pid = str(project_id)
-    return _word_progress.get(pid, {
-        "status": "idle", "step": "idle", "progress": 0, "message": "",
-    })
+    return get_or_idle(_NS_WORD, str(project_id))
 
 
 @router.get("/{project_id}/word-download")
@@ -78,9 +76,9 @@ async def download_word(
     project_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
 ):
-    """Download the completed Word document (once export is done)."""
+    """Download the completed Word document."""
     pid = str(project_id)
-    result = _word_results.get(pid)
+    result = get_export_result("word", pid)
     if not result:
         raise HTTPException(status_code=404, detail="Aucun export Word disponible. Lancez d'abord l'export.")
 
@@ -89,7 +87,7 @@ async def download_word(
     file_buffer.seek(0)
     filename = result["filename"]
 
-    _word_results.pop(pid, None)
+    delete_export_result("word", pid)
 
     return StreamingResponse(
         file_buffer,
@@ -99,19 +97,18 @@ async def download_word(
 
 
 async def _run_word_export(project_id: uuid.UUID, filename: str):
-    """Background task for Word export."""
+    """Background task for Word export (called by Celery worker)."""
     from ..database import async_session
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
-        _word_progress[pid] = {
+        set_progress(_NS_WORD, pid, {
             "status": "running", "step": step,
             "progress": progress, "message": message,
-        }
+        })
 
     try:
         _update("loading", 10, "Chargement des chapitres...")
-        await asyncio.sleep(0)
 
         async with async_session() as db:
             result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
@@ -125,7 +122,6 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
             all_chapters = chapters_result.scalars().all()
 
             _update("building", 25, "Construction du document...")
-            await asyncio.sleep(0)
 
             children_map = {}
             root_chapters = []
@@ -153,7 +149,6 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
                         "tags": img.tags or [],
                     })
 
-            # Pre-load deanonymization mappings so export shows real values
             deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
 
             def _deanon(text: str) -> str:
@@ -179,9 +174,7 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
             chapters_data = [build_chapter_data(c) for c in root_chapters]
 
         _update("generating", 40, "Generation du document Word...")
-        await asyncio.sleep(0)
 
-        # Run CPU-bound Word generation in thread pool
         def _generate_word():
             import asyncio as _asyncio
             loop = _asyncio.new_event_loop()
@@ -198,37 +191,34 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
         file_stream = await asyncio.to_thread(_generate_word)
 
         _update("finalizing", 90, "Finalisation...")
-        await asyncio.sleep(0)
 
         word_bytes = file_stream.getvalue()
-        _word_results[pid] = {"bytes": word_bytes, "filename": filename}
+        store_export_result("word", pid, word_bytes, filename)
 
-        _word_progress[pid] = {
+        set_progress(_NS_WORD, pid, {
             "status": "completed", "step": "done", "progress": 100,
             "message": f"Export Word termine ({len(word_bytes) // 1024} KB)",
-        }
+        })
 
     except Exception as e:
         logger.exception("Word export failed for project %s", project_id)
-        _word_progress[pid] = {
+        set_progress(_NS_WORD, pid, {
             "status": "error", "step": "error", "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
-        }
+        })
 
 
 @router.post("/{project_id}/backup")
 async def export_project_backup(
     project_id: uuid.UUID,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Launch backup export as a background task (returns immediately)."""
+    """Launch backup export as a Celery background task."""
     pid = str(project_id)
 
-    # Check if already running
-    existing = _backup_progress.get(pid)
-    if existing and existing.get("status") == "running":
+    existing = get_or_idle(_NS_BACKUP, pid)
+    if existing.get("status") == "running":
         raise HTTPException(status_code=409, detail="Export deja en cours")
 
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
@@ -239,16 +229,14 @@ async def export_project_backup(
     filename = f"backup_{project.name}_{project.rfp_reference or 'export'}.zip"
     filename = filename.replace(" ", "_").replace("/", "_")
 
-    _backup_progress[pid] = {
-        "status": "running",
-        "step": "starting",
-        "progress": 0,
+    set_progress(_NS_BACKUP, pid, {
+        "status": "running", "step": "starting", "progress": 0,
         "message": "Demarrage de l'export...",
-    }
-    # Clear any previous result
-    _backup_results.pop(pid, None)
+    })
+    delete_export_result("backup", pid)
 
-    background_tasks.add_task(_run_backup_export, project_id, filename)
+    from ..tasks.export_tasks import export_backup_task
+    export_backup_task.delay(pid, filename)
 
     return {"success": True, "message": "Export lance en arriere-plan"}
 
@@ -259,13 +247,7 @@ async def get_backup_status(
     current_user: User = Depends(get_current_user),
 ):
     """Poll the progress of the backup export."""
-    pid = str(project_id)
-    return _backup_progress.get(pid, {
-        "status": "idle",
-        "step": "idle",
-        "progress": 0,
-        "message": "",
-    })
+    return get_or_idle(_NS_BACKUP, str(project_id))
 
 
 @router.get("/{project_id}/backup-download")
@@ -273,9 +255,9 @@ async def download_backup(
     project_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
 ):
-    """Download the completed backup ZIP (once export is done)."""
+    """Download the completed backup ZIP."""
     pid = str(project_id)
-    result = _backup_results.get(pid)
+    result = get_export_result("backup", pid)
     if not result:
         raise HTTPException(status_code=404, detail="Aucun backup disponible. Lancez d'abord l'export.")
 
@@ -284,8 +266,7 @@ async def download_backup(
     zip_buffer.seek(0)
     filename = result["filename"]
 
-    # Clean up results after serving (progress cleaned up separately)
-    _backup_results.pop(pid, None)
+    delete_export_result("backup", pid)
 
     return StreamingResponse(
         zip_buffer,
@@ -295,55 +276,43 @@ async def download_backup(
 
 
 async def _run_backup_export(project_id: uuid.UUID, filename: str):
-    """Background task for backup export."""
+    """Background task for backup export (called by Celery worker)."""
     from ..database import async_session
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
-        _backup_progress[pid] = {
-            "status": "running",
-            "step": step,
-            "progress": progress,
-            "message": message,
-        }
+        set_progress(_NS_BACKUP, pid, {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+        })
 
     try:
         _update("loading", 5, "Chargement des donnees du projet...")
-        await asyncio.sleep(0)  # Yield to event loop
 
         async with async_session() as db:
             export_data, documents, images = await ExportService.collect_project_data(db, project_id)
 
         _update("packaging", 30, "Preparation des fichiers...")
-        await asyncio.sleep(0)
 
-        # Run CPU-bound ZIP creation in thread pool to avoid blocking event loop
         def _create_zip():
             return ExportService.create_zip_archive(export_data, documents, images, _update)
 
         zip_buffer = await asyncio.to_thread(_create_zip)
 
         zip_bytes = zip_buffer.getvalue()
-        _backup_results[pid] = {
-            "bytes": zip_bytes,
-            "filename": filename,
-        }
+        store_export_result("backup", pid, zip_bytes, filename)
 
-        _backup_progress[pid] = {
-            "status": "completed",
-            "step": "done",
-            "progress": 100,
+        set_progress(_NS_BACKUP, pid, {
+            "status": "completed", "step": "done", "progress": 100,
             "message": f"Export termine ({len(zip_bytes) // 1024} KB)",
-        }
+        })
 
     except Exception as e:
         logger.exception("Backup export failed for project %s", project_id)
-        _backup_progress[pid] = {
-            "status": "error",
-            "step": "error",
-            "progress": 0,
+        set_progress(_NS_BACKUP, pid, {
+            "status": "error", "step": "error", "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
-        }
+        })
 
 
 @router.delete("/{project_id}/backup-progress")
@@ -353,8 +322,8 @@ async def clear_backup_progress(
 ):
     """Clear backup progress state after download is complete."""
     pid = str(project_id)
-    _backup_progress.pop(pid, None)
-    _backup_results.pop(pid, None)
+    delete_progress(_NS_BACKUP, pid)
+    delete_export_result("backup", pid)
     return {"cleared": True}
 
 
@@ -365,8 +334,8 @@ async def clear_word_progress(
 ):
     """Clear word export progress state after download is complete."""
     pid = str(project_id)
-    _word_progress.pop(pid, None)
-    _word_results.pop(pid, None)
+    delete_progress(_NS_WORD, pid)
+    delete_export_result("word", pid)
     return {"cleared": True}
 
 
@@ -417,7 +386,6 @@ async def preview_document(
     )
     all_chapters = chapters_result.scalars().all()
 
-    # Pre-load deanonymization mappings (placeholder → original)
     deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
 
     def deanonymize(text: str) -> str:
@@ -427,7 +395,6 @@ async def preview_document(
             text = text.replace(placeholder, original)
         return text
 
-    # Build tree
     children_map = {}
     root_chapters = []
     for c in all_chapters:
