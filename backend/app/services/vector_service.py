@@ -59,6 +59,10 @@ class VectorService:
             embedding_function=cls.get_embedding_function(),
         )
 
+    # Maximum chunks to embed + insert in a single ChromaDB call.
+    # Keeps peak memory bounded so large documents don't OOM the worker.
+    _INDEX_BATCH_SIZE = 64
+
     @classmethod
     def index_chunks(
         cls,
@@ -93,11 +97,13 @@ class VectorService:
                 "chunk_index": chunk.get("chunk_index", 0),
             })
 
-        if ids:
+        # Process in batches to avoid OOM on large documents.
+        for start in range(0, len(ids), cls._INDEX_BATCH_SIZE):
+            end = start + cls._INDEX_BATCH_SIZE
             collection.add(
-                ids=ids,
-                documents=documents,
-                metadatas=metadatas,
+                ids=ids[start:end],
+                documents=documents[start:end],
+                metadatas=metadatas[start:end],
             )
 
         return ids

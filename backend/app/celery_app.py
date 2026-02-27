@@ -31,6 +31,9 @@ celery.conf.update(
     # Reliability: acknowledge tasks only AFTER they complete.
     # If a worker dies mid-task, the message returns to the queue.
     task_acks_late=True,
+    # Prevent infinite redelivery when a worker is killed (OOM, SIGKILL).
+    # Without this, task_acks_late causes the message to loop forever.
+    task_reject_on_worker_lost=True,
     worker_prefetch_multiplier=1,
 
     # Result expiry (24h)
