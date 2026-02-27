@@ -38,11 +38,16 @@ def process_document_task(self, document_id: str, project_id: str):
 async def _process_document_async(document_id: str, project_id: str):
     """Full document processing pipeline (async).
 
-    Extracted from documents.py — logic is identical, just runs inside a
-    Celery worker process instead of a FastAPI BackgroundTask.
+    Uses a **task-scoped** engine so that each ``asyncio.run()`` gets its own
+    clean connection pool — the module-level engine retains asyncpg connections
+    bound to previous (dead) event loops, causing "unexpected EOF" errors.
+
+    The heavy Phase 3 is split into small, focused transactions so that no
+    single DB connection is held open for the entire anonymisation + indexing
+    duration (which can exceed ``pool_recycle``).
     """
     from sqlalchemy import select
-    from ..database import async_session
+    from ..database import create_task_engine
     from ..models.document import (
         Document, DocumentChunk, DocumentImage,
         FileType, ProcessingStatus,
@@ -52,9 +57,11 @@ async def _process_document_async(document_id: str, project_id: str):
     from ..services.anonymization_service import AnonymizationService
     from ..services.progress_service import ProgressTracker
 
+    task_engine, TaskSession = create_task_engine()
+
     try:
         # ── Phase 1: Load document metadata + mark processing ──
-        async with async_session() as db:
+        async with TaskSession() as db:
             result = await db.execute(
                 select(Document).where(Document.id == uuid.UUID(document_id))
             )
@@ -136,7 +143,7 @@ async def _process_document_async(document_id: str, project_id: str):
 
         if text is None:
             ProgressTracker.fail(document_id, "Aucun texte extrait du document")
-            async with async_session() as db:
+            async with TaskSession() as db:
                 result = await db.execute(
                     select(Document).where(Document.id == uuid.UUID(document_id))
                 )
@@ -145,13 +152,17 @@ async def _process_document_async(document_id: str, project_id: str):
                 await db.commit()
             return
 
-        # ── Phase 3: Anonymize + save everything ──
+        # ── Phase 3a: Anonymize chunks (reads/writes anonymization mappings) ──
         ProgressTracker.update(document_id, "anonymizing")
-        async with async_session() as db:
+        async with TaskSession() as db:
             chunk_texts = [c["content"] for c in chunks]
             anonymized_texts = await AnonymizationService.anonymize_chunks_batch(
                 chunk_texts, uuid.UUID(project_id), db
             )
+            await db.commit()  # persist new anonymization mappings
+
+        # ── Phase 3b: Save chunks to DB ──
+        async with TaskSession() as db:
             for chunk_data, anonymized in zip(chunks, anonymized_texts):
                 db_chunk = DocumentChunk(
                     document_id=uuid.UUID(document_id),
@@ -166,23 +177,27 @@ async def _process_document_async(document_id: str, project_id: str):
                     section_title=chunk_data.get("section_title", ""),
                 )
                 db.add(db_chunk)
+            await db.commit()
 
-            ProgressTracker.update(document_id, "indexing")
-            vector_chunks = [
-                {
-                    "id": chunk_data["id"],
-                    "content": chunk_data["content"],
-                    "document_id": document_id,
-                    "document_name": chunk_data["document_name"],
-                    "category": chunk_data["category"],
-                    "page_number": chunk_data.get("page_number", 0),
-                    "section_title": chunk_data.get("section_title", ""),
-                    "chunk_index": chunk_data["chunk_index"],
-                }
-                for chunk_data in chunks
-            ]
-            await asyncio.to_thread(VectorService.index_chunks, project_id, vector_chunks)
+        # ── Phase 3c: Index in ChromaDB (no DB connection needed) ──
+        ProgressTracker.update(document_id, "indexing")
+        vector_chunks = [
+            {
+                "id": chunk_data["id"],
+                "content": chunk_data["content"],
+                "document_id": document_id,
+                "document_name": chunk_data["document_name"],
+                "category": chunk_data["category"],
+                "page_number": chunk_data.get("page_number", 0),
+                "section_title": chunk_data.get("section_title", ""),
+                "chunk_index": chunk_data["chunk_index"],
+            }
+            for chunk_data in chunks
+        ]
+        await asyncio.to_thread(VectorService.index_chunks, project_id, vector_chunks)
 
+        # ── Phase 3d: Save images + finalize document ──
+        async with TaskSession() as db:
             for img_data in images_data:
                 db_image = DocumentImage(
                     document_id=uuid.UUID(document_id),
@@ -227,7 +242,7 @@ async def _process_document_async(document_id: str, project_id: str):
         # DB issues that could otherwise leave the document stuck forever.
         for _attempt in range(3):
             try:
-                async with async_session() as db:
+                async with TaskSession() as db:
                     result = await db.execute(
                         select(Document).where(Document.id == uuid.UUID(document_id))
                     )
@@ -239,18 +254,21 @@ async def _process_document_async(document_id: str, project_id: str):
             except Exception as db_err:
                 print(f"Failed to mark document {document_id} as FAILED (attempt {_attempt + 1}): {db_err}")
                 await asyncio.sleep(1)
+    finally:
+        await task_engine.dispose()
 
 
 async def _mark_document_failed(document_id: str, reason: str):
     """Mark a document as FAILED (used by the redelivery guard)."""
     from sqlalchemy import select
-    from ..database import async_session
+    from ..database import create_task_engine
     from ..models.document import Document, ProcessingStatus
     from ..services.progress_service import ProgressTracker
 
     ProgressTracker.fail(document_id, reason)
+    task_engine, TaskSession = create_task_engine()
     try:
-        async with async_session() as db:
+        async with TaskSession() as db:
             result = await db.execute(
                 select(Document).where(Document.id == uuid.UUID(document_id))
             )
@@ -260,3 +278,5 @@ async def _mark_document_failed(document_id: str, reason: str):
                 await db.commit()
     except Exception as e:
         print(f"[document_tasks] Could not mark document {document_id} as FAILED: {e}")
+    finally:
+        await task_engine.dispose()

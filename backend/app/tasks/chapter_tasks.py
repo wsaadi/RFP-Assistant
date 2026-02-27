@@ -47,10 +47,11 @@ async def _run_chapter_generation(
 ):
     """Background task for chapter content generation.
 
-    Migrated from chapters.py — identical logic, runs in Celery worker.
+    Uses a task-scoped engine to avoid stale asyncpg connections across
+    ``asyncio.run()`` invocations in Celery workers.
     """
     from sqlalchemy import select
-    from ..database import async_session
+    from ..database import create_task_engine
     from ..models.project import RFPProject, AIConfig
     from ..models.chapter import Chapter, ChapterStatus
     from ..models.document import Document, DocumentChunk, DocumentCategory, ProcessingStatus
@@ -63,11 +64,13 @@ async def _run_chapter_generation(
     def _update(step: str, progress: int, message: str):
         _update_chapter(cid, "running", step, progress, message)
 
+    task_engine, TaskSession = create_task_engine()
+
     try:
         _update("starting", 0, "Demarrage de la generation...")
 
         # ── Phase 1: Read data + anonymize (short DB session) ──
-        async with async_session() as db:
+        async with TaskSession() as db:
             config_result = await db.execute(
                 select(AIConfig).where(AIConfig.workspace_id == workspace_id)
             )
@@ -164,7 +167,7 @@ async def _run_chapter_generation(
 
         # ── Phase 3: Deanonymize + save ──
         _update("deanonymizing", 80, "Deanonymisation...")
-        async with async_session() as db:
+        async with TaskSession() as db:
             final_content = await AnonymizationService.deanonymize_text(result_text, project_id, db)
 
             _update("saving", 90, "Enregistrement...")
@@ -185,6 +188,8 @@ async def _run_chapter_generation(
             "status": "error", "step": "error", "progress": 0,
             "message": f"Erreur: {str(e)[:200]}",
         })
+    finally:
+        await task_engine.dispose()
 
 
 async def _get_full_text_anon(db, project_id, category):

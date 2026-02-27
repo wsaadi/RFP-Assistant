@@ -31,6 +31,44 @@ class Base(DeclarativeBase):
     pass
 
 
+def create_task_engine():
+    """Create a short-lived engine for Celery task execution.
+
+    Each ``asyncio.run()`` in a Celery worker creates a **new** event loop.
+    The module-level ``engine`` retains asyncpg connections that were bound to
+    the previous (now closed) event loop, causing
+    ``unexpected EOF on client connection with an open transaction`` and
+    ``Connection reset by peer`` errors on subsequent tasks.
+
+    This function returns an independent engine + session factory that the
+    caller **must** dispose of when done::
+
+        task_engine, TaskSession = create_task_engine()
+        try:
+            async with TaskSession() as db:
+                ...
+        finally:
+            await task_engine.dispose()
+    """
+    task_engine = create_async_engine(
+        settings.database_url,
+        echo=settings.debug,
+        pool_size=2,
+        max_overflow=3,
+        pool_pre_ping=True,
+        pool_recycle=300,
+        pool_timeout=30,
+    )
+
+    task_session_factory = async_sessionmaker(
+        task_engine,
+        class_=AsyncSession,
+        expire_on_commit=False,
+    )
+
+    return task_engine, task_session_factory
+
+
 async def get_db():
     """Dependency to get database session."""
     async with async_session() as session:
