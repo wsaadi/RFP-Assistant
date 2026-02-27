@@ -43,6 +43,7 @@ _gap_analysis_progress: Dict[str, dict] = {}
 _compliance_progress: Dict[str, dict] = {}
 _rec_gen_progress: Dict[str, dict] = {}
 _rec_gen_semaphore = asyncio.Semaphore(3)
+_reanon_progress: Dict[str, dict] = {}
 
 
 async def _get_ai_service(workspace_id: uuid.UUID, db: AsyncSession) -> MistralAIService:
@@ -2955,114 +2956,186 @@ async def delete_anonymization_mapping(
 @router.post("/{project_id}/re-anonymize")
 async def re_anonymize_project(
     project_id: uuid.UUID,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Re-anonymize all document chunks and chapter content.
+    """Launch re-anonymization as a background task (NER is slow on many chunks).
 
-    Two-phase approach:
-    1. Run NER detection on document chunk content to discover new entities
-       and create mappings (this is the same detection done at upload time).
-    2. Apply all active mappings to document chunks and chapter content.
-
-    This works even after a full purge: NER re-discovers entities from scratch.
+    Returns a task_id to poll progress via GET /{project_id}/re-anonymize-status.
     """
+    pid = str(project_id)
+
+    # Prevent double-launch
+    existing = _reanon_progress.get(pid)
+    if existing and existing.get("status") == "running":
+        return {"task_id": pid, "already_running": True}
+
+    _reanon_progress[pid] = {
+        "status": "running",
+        "progress": 0,
+        "current": 0,
+        "total": 0,
+        "phase": "init",
+        "message": "Demarrage de la re-anonymisation...",
+    }
+
+    # Read workspace_id while we still have the request DB session
+    project_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = project_result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouve")
+
+    background_tasks.add_task(_run_reanonymize, project_id)
+    return {"task_id": pid}
+
+
+@router.get("/{project_id}/re-anonymize-status")
+async def get_reanonymize_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll re-anonymization progress."""
+    pid = str(project_id)
+    return _reanon_progress.get(pid, {"status": "idle"})
+
+
+async def _run_reanonymize(project_id: uuid.UUID):
+    """Background task: re-anonymize all document chunks and chapter content."""
+    from ..database import async_session
     from ..services.anonymization_service import AnonymizationService
 
-    # ── Phase 1: NER detection on document chunks (creates new mappings) ──
-    chunks_result = await db.execute(
-        select(DocumentChunk)
-        .join(Document, Document.id == DocumentChunk.document_id)
-        .where(Document.project_id == project_id)
-    )
-    chunks = chunks_result.scalars().all()
+    pid = str(project_id)
 
-    chunk_texts = [chunk.content for chunk in chunks if chunk.content]
-    new_entities = 0
-    total_chars = sum(len(t) for t in chunk_texts)
-    logger.warning("[re-anonymize] Found %d chunks (%d chars total) for project %s", len(chunk_texts), total_chars, project_id)
+    def _update(phase: str, progress: int, message: str, current: int = 0, total: int = 0):
+        _reanon_progress[pid] = {
+            "status": "running",
+            "progress": progress,
+            "current": current,
+            "total": total,
+            "phase": phase,
+            "message": message,
+        }
 
-    if chunk_texts:
-        # Count mappings before
-        before_count_result = await db.execute(
-            select(func.count(AnonymizationMapping.id))
-            .where(AnonymizationMapping.project_id == project_id)
-        )
-        before_count = before_count_result.scalar() or 0
-        logger.warning("[re-anonymize] Existing mappings before NER: %d", before_count)
+    try:
+        # ── Phase 1: NER detection on document chunks ──
+        _update("loading", 5, "Chargement des chunks...")
 
-        # Run batch NER – this creates new mappings for any unseen entities
-        anonymized_texts = await AnonymizationService.anonymize_chunks_batch(
-            chunk_texts, project_id, db,
-        )
-        await db.flush()
+        async with async_session() as db:
+            chunks_result = await db.execute(
+                select(DocumentChunk)
+                .join(Document, Document.id == DocumentChunk.document_id)
+                .where(Document.project_id == project_id)
+            )
+            chunks = chunks_result.scalars().all()
+            chunk_texts = [chunk.content for chunk in chunks if chunk.content]
+            chunk_ids = [chunk.id for chunk in chunks if chunk.content]
 
-        # Count mappings after to report new discoveries
-        after_count_result = await db.execute(
-            select(func.count(AnonymizationMapping.id))
-            .where(AnonymizationMapping.project_id == project_id)
-        )
-        after_count = after_count_result.scalar() or 0
-        new_entities = after_count - before_count
-        logger.warning("[re-anonymize] NER done: %d new entities found (total mappings: %d)", new_entities, after_count)
+        total_chunks = len(chunk_texts)
+        new_entities = 0
 
-        # Count how many chunks actually got anonymized content different from original
-        changed_chunks = 0
-        text_idx = 0
-        for chunk in chunks:
-            if chunk.content:
-                if anonymized_texts[text_idx] != chunk.content:
-                    changed_chunks += 1
-                chunk.anonymized_content = anonymized_texts[text_idx]
-                text_idx += 1
-        logger.warning("[re-anonymize] %d/%d chunks had content modified by anonymization", changed_chunks, len(chunk_texts))
+        if total_chunks > 0:
+            _update("ner", 10, f"Detection NER sur {total_chunks} chunks...", 0, total_chunks)
 
-    # ── Phase 2: Apply all active mappings to chapters ──
-    # Re-read mappings (includes any just created by NER)
-    all_mappings_result = await db.execute(
-        select(AnonymizationMapping)
-        .where(AnonymizationMapping.project_id == project_id)
-        .where(AnonymizationMapping.is_active == True)
-    )
-    all_mappings = all_mappings_result.scalars().all()
-    active_with_value = sorted(
-        [m for m in all_mappings if m.original_value],
-        key=lambda m: len(m.original_value),
-        reverse=True,
-    )
+            def on_ner_progress(current: int, total: int):
+                pct = 10 + int(70 * current / total)
+                _update("ner", pct, f"Detection NER : {current}/{total} chunks analyses", current, total)
 
-    def apply_mappings(text: str) -> str:
-        """Apply all mappings to a text, longest match first, case-insensitive."""
-        result_text = text
-        for m in active_with_value:
-            pattern = re.compile(re.escape(m.original_value), re.IGNORECASE)
-            result_text = pattern.sub(m.anonymized_value, result_text)
-        return result_text
+            async with async_session() as db:
+                # Count mappings before
+                before_count_result = await db.execute(
+                    select(func.count(AnonymizationMapping.id))
+                    .where(AnonymizationMapping.project_id == project_id)
+                )
+                before_count = before_count_result.scalar() or 0
 
-    chapters_result = await db.execute(
-        select(Chapter).where(Chapter.project_id == project_id)
-    )
-    chapters = chapters_result.scalars().all()
-    updated_chapters = 0
-    for ch in chapters:
-        if ch.content:
-            new_anon = apply_mappings(ch.content)
-            if new_anon != ch.anonymized_content:
-                ch.anonymized_content = new_anon
-                updated_chapters += 1
+                # Run NER (this is the slow part)
+                anonymized_texts = await AnonymizationService.anonymize_chunks_batch(
+                    chunk_texts, project_id, db,
+                    progress_callback=on_ner_progress,
+                )
+                await db.flush()
 
-    await db.commit()
+                # Count new entities
+                after_count_result = await db.execute(
+                    select(func.count(AnonymizationMapping.id))
+                    .where(AnonymizationMapping.project_id == project_id)
+                )
+                after_count = after_count_result.scalar() or 0
+                new_entities = after_count - before_count
 
-    ner_available = AnonymizationService.is_ner_available()
-    if not ner_available:
-        logger.warning("GLiNER NER model is NOT available – only regex patterns (email) were used for re-anonymization")
+                # Save anonymized content to chunks
+                _update("saving_chunks", 82, "Enregistrement des chunks anonymises...")
+                for i, anon_text in enumerate(anonymized_texts):
+                    chunk_result = await db.execute(
+                        select(DocumentChunk).where(DocumentChunk.id == chunk_ids[i])
+                    )
+                    chunk = chunk_result.scalar_one_or_none()
+                    if chunk:
+                        chunk.anonymized_content = anon_text
 
-    return {
-        "updated_chunks": len(chunk_texts),
-        "updated_chapters": updated_chapters,
-        "new_entities": new_entities,
-        "ner_available": ner_available,
-    }
+                await db.commit()
+
+        # ── Phase 2: Apply all active mappings to chapters ──
+        _update("chapters", 85, "Application des mappings aux chapitres...")
+
+        async with async_session() as db:
+            all_mappings_result = await db.execute(
+                select(AnonymizationMapping)
+                .where(AnonymizationMapping.project_id == project_id)
+                .where(AnonymizationMapping.is_active == True)
+            )
+            all_mappings = all_mappings_result.scalars().all()
+            active_with_value = sorted(
+                [m for m in all_mappings if m.original_value],
+                key=lambda m: len(m.original_value),
+                reverse=True,
+            )
+
+            def apply_mappings(text: str) -> str:
+                result_text = text
+                for m in active_with_value:
+                    pattern = re.compile(re.escape(m.original_value), re.IGNORECASE)
+                    result_text = pattern.sub(m.anonymized_value, result_text)
+                return result_text
+
+            chapters_result = await db.execute(
+                select(Chapter).where(Chapter.project_id == project_id)
+            )
+            chapters = chapters_result.scalars().all()
+            updated_chapters = 0
+            for ch in chapters:
+                if ch.content:
+                    new_anon = apply_mappings(ch.content)
+                    if new_anon != ch.anonymized_content:
+                        ch.anonymized_content = new_anon
+                        updated_chapters += 1
+
+            await db.commit()
+
+        ner_available = AnonymizationService.is_ner_available()
+
+        _reanon_progress[pid] = {
+            "status": "done",
+            "progress": 100,
+            "current": total_chunks,
+            "total": total_chunks,
+            "phase": "done",
+            "message": "Re-anonymisation terminee",
+            "updated_chunks": total_chunks,
+            "updated_chapters": updated_chapters,
+            "new_entities": new_entities,
+            "ner_available": ner_available,
+        }
+
+    except Exception as e:
+        logger.error("Re-anonymize background task failed: %s", e, exc_info=True)
+        _reanon_progress[pid] = {
+            "status": "error",
+            "progress": 0,
+            "phase": "error",
+            "message": f"Erreur: {str(e)}",
+        }
 
 
 @router.get("/{project_id}/chapters/{chapter_id}/anonymized-content")
