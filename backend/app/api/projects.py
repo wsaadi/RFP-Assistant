@@ -2979,6 +2979,9 @@ async def re_anonymize_project(
 
     chunk_texts = [chunk.content for chunk in chunks if chunk.content]
     new_entities = 0
+    total_chars = sum(len(t) for t in chunk_texts)
+    logger.warning("[re-anonymize] Found %d chunks (%d chars total) for project %s", len(chunk_texts), total_chars, project_id)
+
     if chunk_texts:
         # Count mappings before
         before_count_result = await db.execute(
@@ -2986,6 +2989,7 @@ async def re_anonymize_project(
             .where(AnonymizationMapping.project_id == project_id)
         )
         before_count = before_count_result.scalar() or 0
+        logger.warning("[re-anonymize] Existing mappings before NER: %d", before_count)
 
         # Run batch NER – this creates new mappings for any unseen entities
         anonymized_texts = await AnonymizationService.anonymize_chunks_batch(
@@ -3000,13 +3004,18 @@ async def re_anonymize_project(
         )
         after_count = after_count_result.scalar() or 0
         new_entities = after_count - before_count
+        logger.warning("[re-anonymize] NER done: %d new entities found (total mappings: %d)", new_entities, after_count)
 
-        # Save anonymized content on chunks
+        # Count how many chunks actually got anonymized content different from original
+        changed_chunks = 0
         text_idx = 0
         for chunk in chunks:
             if chunk.content:
+                if anonymized_texts[text_idx] != chunk.content:
+                    changed_chunks += 1
                 chunk.anonymized_content = anonymized_texts[text_idx]
                 text_idx += 1
+        logger.warning("[re-anonymize] %d/%d chunks had content modified by anonymization", changed_chunks, len(chunk_texts))
 
     # ── Phase 2: Apply all active mappings to chapters ──
     # Re-read mappings (includes any just created by NER)
