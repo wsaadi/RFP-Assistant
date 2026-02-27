@@ -13,7 +13,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements first for better caching
 COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && rm -rf /root/.cache/pip
 
 # Create data directories
 RUN mkdir -p /app/data/uploads /app/data/exports /app/data/images /app/data/chroma

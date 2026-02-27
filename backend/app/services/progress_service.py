@@ -5,12 +5,21 @@ Replaces the old in-memory dictionaries with Redis hashes so that:
 - Multiple workers can update progress concurrently
 - The API process reads progress from the same Redis instance
 - Progress entries auto-expire after 1 hour to avoid stale data
+
+Resilience:
+- Connection pool with retry on timeout
+- Graceful degradation: if Redis is down, operations log and return defaults
+- Health check endpoint for monitoring
 """
 import json
+import logging
 import os
 from typing import Dict, List, Optional
 
 import redis
+from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutError as RedisTimeoutError
+
+logger = logging.getLogger(__name__)
 
 _REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
 _redis: Optional[redis.Redis] = None
@@ -20,11 +29,42 @@ _TTL_SECONDS = 3600
 
 
 def _get_redis() -> redis.Redis:
-    """Lazy-connect to Redis (singleton)."""
+    """Lazy-connect to Redis with connection pooling and retry."""
     global _redis
     if _redis is None:
-        _redis = redis.from_url(_REDIS_URL, decode_responses=True)
+        _redis = redis.from_url(
+            _REDIS_URL,
+            decode_responses=True,
+            socket_connect_timeout=5,
+            socket_timeout=5,
+            retry_on_timeout=True,
+            health_check_interval=30,
+        )
     return _redis
+
+
+def _safe_redis_op(operation, default=None):
+    """Execute a Redis operation with graceful error handling.
+
+    If Redis is temporarily unavailable, log the error and return default
+    instead of crashing the caller.
+    """
+    try:
+        return operation()
+    except (RedisConnectionError, RedisTimeoutError, OSError) as e:
+        logger.warning("Redis operation failed (returning default): %s", e)
+        return default
+    except Exception as e:
+        logger.error("Unexpected Redis error: %s", e, exc_info=True)
+        return default
+
+
+def redis_health_check() -> bool:
+    """Check if Redis is reachable. Returns True/False."""
+    try:
+        return _get_redis().ping()
+    except Exception:
+        return False
 
 
 def _key(namespace: str, task_id: str) -> str:
@@ -36,36 +76,45 @@ def _key(namespace: str, task_id: str) -> str:
 
 def set_progress(namespace: str, task_id: str, data: dict) -> None:
     """Store progress data for a task."""
-    r = _get_redis()
-    key = _key(namespace, task_id)
-    r.set(key, json.dumps(data, default=str), ex=_TTL_SECONDS)
+    def _op():
+        r = _get_redis()
+        key = _key(namespace, task_id)
+        r.set(key, json.dumps(data, default=str), ex=_TTL_SECONDS)
+    _safe_redis_op(_op)
 
 
 def get_progress(namespace: str, task_id: str) -> Optional[dict]:
     """Read progress data for a task. Returns None if not found."""
-    r = _get_redis()
-    raw = r.get(_key(namespace, task_id))
-    if raw:
-        return json.loads(raw)
-    return None
+    def _op():
+        r = _get_redis()
+        raw = r.get(_key(namespace, task_id))
+        if raw:
+            return json.loads(raw)
+        return None
+    return _safe_redis_op(_op, default=None)
 
 
 def delete_progress(namespace: str, task_id: str) -> None:
     """Remove progress data for a task."""
-    r = _get_redis()
-    r.delete(_key(namespace, task_id))
+    def _op():
+        _get_redis().delete(_key(namespace, task_id))
+    _safe_redis_op(_op)
 
 
 def get_many(namespace: str, task_ids: List[str]) -> List[dict]:
     """Read progress for multiple tasks at once (pipeline)."""
     if not task_ids:
         return []
-    r = _get_redis()
-    pipe = r.pipeline()
-    for tid in task_ids:
-        pipe.get(_key(namespace, tid))
-    results = pipe.execute()
-    return [json.loads(raw) for raw in results if raw]
+
+    def _op():
+        r = _get_redis()
+        pipe = r.pipeline()
+        for tid in task_ids:
+            pipe.get(_key(namespace, tid))
+        results = pipe.execute()
+        return [json.loads(raw) for raw in results if raw]
+
+    return _safe_redis_op(_op, default=[])
 
 
 # ── Convenience wrappers with default idle state ──
@@ -157,33 +206,37 @@ _EXPORT_TTL = 1800  # 30 minutes
 
 def store_export_result(export_type: str, task_id: str, file_bytes: bytes, filename: str) -> None:
     """Store export file bytes in Redis for later download."""
-    r = _get_redis()
-    key = f"export_result:{export_type}:{task_id}"
-    # Store as a Redis hash: {bytes: <base64>, filename: <str>}
-    import base64
-    data = {
-        "bytes_b64": base64.b64encode(file_bytes).decode("ascii"),
-        "filename": filename,
-    }
-    r.set(key, json.dumps(data), ex=_EXPORT_TTL)
+    def _op():
+        r = _get_redis()
+        key = f"export_result:{export_type}:{task_id}"
+        import base64
+        data = {
+            "bytes_b64": base64.b64encode(file_bytes).decode("ascii"),
+            "filename": filename,
+        }
+        r.set(key, json.dumps(data), ex=_EXPORT_TTL)
+    _safe_redis_op(_op)
 
 
 def get_export_result(export_type: str, task_id: str) -> Optional[dict]:
     """Retrieve export file bytes. Returns {"bytes": bytes, "filename": str} or None."""
-    r = _get_redis()
-    key = f"export_result:{export_type}:{task_id}"
-    raw = r.get(key)
-    if not raw:
-        return None
-    import base64
-    data = json.loads(raw)
-    return {
-        "bytes": base64.b64decode(data["bytes_b64"]),
-        "filename": data["filename"],
-    }
+    def _op():
+        r = _get_redis()
+        key = f"export_result:{export_type}:{task_id}"
+        raw = r.get(key)
+        if not raw:
+            return None
+        import base64
+        data = json.loads(raw)
+        return {
+            "bytes": base64.b64decode(data["bytes_b64"]),
+            "filename": data["filename"],
+        }
+    return _safe_redis_op(_op, default=None)
 
 
 def delete_export_result(export_type: str, task_id: str) -> None:
     """Remove export result from Redis."""
-    r = _get_redis()
-    r.delete(f"export_result:{export_type}:{task_id}")
+    def _op():
+        _get_redis().delete(f"export_result:{export_type}:{task_id}")
+    _safe_redis_op(_op)

@@ -653,7 +653,7 @@ async def _get_all_chunks_anonymized_by_category(
 ) -> str:
     """Get ALL pre-anonymized document chunks for a category.
     Uses anonymized_content already computed at upload time, avoiding
-    redundant GLiNER inference."""
+    redundant NER inference."""
     result = await db.execute(
         select(DocumentChunk, Document.original_filename)
         .join(Document, Document.id == DocumentChunk.document_id)
