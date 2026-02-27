@@ -1,8 +1,6 @@
 """Main FastAPI application for RFP Response Assistant."""
-import asyncio
 import os
 import warnings
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 
 # Suppress noisy third-party warnings
@@ -125,13 +123,6 @@ async def lifespan(app: FastAPI):
             EXCEPTION WHEN duplicate_column THEN NULL;
             END $$
         """))
-
-    # Increase the default thread pool so background tasks (document parsing,
-    # NER inference, vector indexing) don't starve the event loop.
-    # With the default pool (5 threads), a single large PDF extraction could
-    # exhaust available threads and block other users' requests.
-    loop = asyncio.get_running_loop()
-    loop.set_default_executor(ThreadPoolExecutor(max_workers=8))
 
     # Create data directories
     for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir]:

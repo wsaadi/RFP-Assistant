@@ -1,36 +1,28 @@
 """Chapter API routes for content editing and AI generation."""
-import asyncio
 import uuid
 import logging
-from typing import Dict
 from datetime import datetime, timezone
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, delete as sa_delete
+from sqlalchemy import select
 
 from ..database import get_db
 from ..models.user import User
 from ..models.project import RFPProject, AIConfig
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
-from ..models.document import Document, DocumentChunk, DocumentCategory, ProcessingStatus
 from ..schemas.chapter import (
     ChapterCreate, ChapterUpdate, ChapterOut,
     ChapterContentRequest, AddNoteRequest, ReorderChaptersRequest,
     BulkDeleteChaptersRequest,
 )
-from ..services.ai_service import MistralAIService
-from ..services.vector_service import VectorService
-from ..services.anonymization_service import AnonymizationService
+from ..services.progress_service import get_or_idle, set_progress
 from .deps import get_current_user
 
 router = APIRouter(prefix="/chapters", tags=["Chapters"])
 logger = logging.getLogger(__name__)
 
-# In-memory progress tracking for chapter generation
-_chapter_gen_progress: Dict[str, dict] = {}
-
-# Semaphore to limit concurrent chapter generations (avoids DB pool exhaustion)
-_gen_semaphore = asyncio.Semaphore(3)
+# Redis namespace for chapter generation progress
+_NS = "chapter_gen"
 
 
 def _chapter_to_out(chapter: Chapter, children: list = None) -> ChapterOut:
@@ -74,7 +66,6 @@ async def list_chapters(
     all_chapters = result.scalars().all()
 
     # Build tree
-    chapter_map = {c.id: c for c in all_chapters}
     children_map = {}
     root_chapters = []
 
@@ -199,11 +190,7 @@ async def bulk_delete_chapters(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete multiple chapters and their children.
-
-    Accepts a list of chapter IDs. Children are cascade-deleted automatically
-    by the DB foreign key constraint, so only root-level IDs need to be passed.
-    """
+    """Delete multiple chapters and their children."""
     uuids = [uuid.UUID(cid) for cid in request.chapter_ids]
     result = await db.execute(
         select(Chapter).where(Chapter.id.in_(uuids))
@@ -246,15 +233,14 @@ async def add_note(
 async def generate_chapter_content(
     chapter_id: uuid.UUID,
     request: ChapterContentRequest,
-    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Launch chapter content generation as a background task (returns immediately)."""
+    """Launch chapter content generation as a Celery background task."""
     cid = str(chapter_id)
 
-    existing = _chapter_gen_progress.get(cid)
-    if existing and existing.get("status") in ("running", "queued"):
+    existing = get_or_idle(_NS, cid)
+    if existing.get("status") in ("running", "queued"):
         raise HTTPException(status_code=409, detail="Generation deja en cours pour ce chapitre")
 
     result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
@@ -272,14 +258,16 @@ async def generate_chapter_content(
     if not config or not config.mistral_api_key_encrypted:
         raise HTTPException(status_code=400, detail="Configuration IA non définie")
 
-    _chapter_gen_progress[cid] = {
+    set_progress(_NS, cid, {
         "status": "queued", "step": "queued", "progress": 0,
         "message": "En file d'attente...",
-    }
+    })
 
-    background_tasks.add_task(
-        _run_chapter_generation, chapter_id, chapter.project_id,
-        project.workspace_id, request.action, request.custom_prompt or "",
+    # Dispatch to Celery worker
+    from ..tasks.chapter_tasks import generate_chapter_content_task
+    generate_chapter_content_task.delay(
+        cid, str(chapter.project_id), str(project.workspace_id),
+        request.action, request.custom_prompt or "",
         request.use_old_response, request.include_improvement_axes,
     )
 
@@ -292,207 +280,7 @@ async def get_chapter_gen_status(
     current_user: User = Depends(get_current_user),
 ):
     """Poll the progress of chapter content generation."""
-    cid = str(chapter_id)
-    return _chapter_gen_progress.get(cid, {
-        "status": "idle", "step": "idle", "progress": 0, "message": "",
-    })
-
-
-async def _get_full_text_anon(
-    db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory,
-) -> str:
-    """Get full anonymized text for all documents of a category (full context mode).
-
-    Uses Document.anonymized_full_text stored at upload time — the raw extracted
-    text anonymized as a single block, exactly like pasting into a chat.
-    Falls back to reassembled chunks for documents uploaded before this feature.
-    """
-    result = await db.execute(
-        select(Document)
-        .where(Document.project_id == project_id)
-        .where(Document.category == category)
-        .where(Document.processing_status == ProcessingStatus.COMPLETED)
-        .order_by(Document.original_filename)
-    )
-    docs = result.scalars().all()
-    parts = []
-    fallback_doc_ids = []
-    for doc in docs:
-        anon = (doc.anonymized_full_text or "").strip()
-        if anon:
-            parts.append(f"\n\n=== DOCUMENT: {doc.original_filename} ===\n")
-            parts.append(anon)
-        else:
-            fallback_doc_ids.append(doc.id)
-
-    # Fallback: reassemble from chunks for older documents without full_text
-    if fallback_doc_ids:
-        chunk_result = await db.execute(
-            select(DocumentChunk, Document.original_filename)
-            .join(Document, Document.id == DocumentChunk.document_id)
-            .where(DocumentChunk.document_id.in_(fallback_doc_ids))
-            .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
-        )
-        current_doc = None
-        for chunk, doc_name in chunk_result.all():
-            text = (chunk.anonymized_content or chunk.content or "").strip()
-            if not text:
-                continue
-            if doc_name != current_doc:
-                current_doc = doc_name
-                parts.append(f"\n\n=== DOCUMENT: {doc_name} ===\n")
-            parts.append(text)
-
-    return "\n\n".join(parts)
-
-
-async def _run_chapter_generation(
-    chapter_id: uuid.UUID, project_id: uuid.UUID, workspace_id: uuid.UUID,
-    action: str, custom_prompt: str, use_old_response: bool, include_improvement_axes: bool,
-):
-    """Background task for chapter content generation.
-
-    Uses a semaphore to limit concurrent generations and avoid DB pool exhaustion.
-    DB connections are acquired only for short reads/writes and released during
-    slow AI calls to minimize pool pressure.
-    """
-    from ..database import async_session
-    cid = str(chapter_id)
-
-    def _update(step: str, progress: int, message: str):
-        _chapter_gen_progress[cid] = {
-            "status": "running", "step": step,
-            "progress": progress, "message": message,
-        }
-
-    try:
-        # Wait for a slot in the concurrency pool
-        async with _gen_semaphore:
-            _update("starting", 0, "Demarrage de la generation...")
-
-            # ── Phase 1: Read data + anonymize (short DB session) ──
-            async with async_session() as db:
-                config_result = await db.execute(
-                    select(AIConfig).where(AIConfig.workspace_id == workspace_id)
-                )
-                config = config_result.scalar_one_or_none()
-                ai_service = MistralAIService.from_config(config, config.mistral_api_key_encrypted)
-
-                result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
-                chapter = result.scalar_one()
-                project_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
-                project = project_result.scalar_one()
-
-                # Capture plain data we need for AI calls
-                ch_title = chapter.title
-                ch_description = chapter.description
-                ch_rfp_requirement = chapter.rfp_requirement
-                ch_content = chapter.content or ""
-                ch_notes = chapter.notes or []
-                proj_improvement = project.improvement_axes if include_improvement_axes else ""
-                proj_ai_context = project.ai_context or ""
-                proj_context_mode = project.context_mode or "rag"
-
-                if action == "custom" and custom_prompt:
-                    _update("anonymizing", 15, "Anonymisation du contenu...")
-                    anon_content = await AnonymizationService.anonymize_text(ch_content, project_id, db)
-                    anon_prompt = await AnonymizationService.anonymize_text(custom_prompt, project_id, db)
-                    ai_params = {"mode": "custom", "anon_content": anon_content, "anon_prompt": anon_prompt}
-
-                elif action == "enrich" and ch_content:
-                    _update("anonymizing", 15, "Anonymisation du contenu...")
-                    anon_content = await AnonymizationService.anonymize_text(ch_content, project_id, db)
-                    ai_params = {"mode": "enrich", "anon_content": anon_content}
-
-                else:
-                    old_response_content = ""
-                    context_chunks_text = ""
-
-                    if proj_context_mode == "full":
-                        # ── Full context mode: send ALL document content ──
-                        _update("loading", 10, "Chargement du contexte complet...")
-                        old_response_content = await _get_full_text_anon(db, project_id, DocumentCategory.OLD_RESPONSE) if use_old_response else ""
-                        context_chunks_text = await _get_full_text_anon(db, project_id, DocumentCategory.NEW_RFP)
-                    else:
-                        # ── RAG mode: vector search for relevant chunks ──
-                        _update("searching", 10, "Recherche de contenu pertinent...")
-                        search_results = []
-                        if use_old_response:
-                            search_results = VectorService.search(
-                                str(project_id),
-                                f"{ch_title} {ch_description}",
-                                top_k=5, category_filter="old_response",
-                            )
-                        context_results = VectorService.search(
-                            str(project_id),
-                            f"{ch_title} {ch_rfp_requirement}",
-                            top_k=3,
-                        )
-                        context_chunks_text = "\n\n".join([r["content"] for r in context_results]) if context_results else ""
-                        if search_results:
-                            raw_old = "\n\n".join([r["content"] for r in search_results])
-                            old_response_content = await AnonymizationService.anonymize_text(raw_old, project_id, db)
-
-                    _update("anonymizing", 25, "Preparation...")
-                    notes_text = "\n".join([n.get("content", "") for n in ch_notes])
-                    ai_params = {
-                        "mode": "generate",
-                        "old_response_content": old_response_content,
-                        "context_chunks_text": context_chunks_text,
-                        "notes_text": notes_text,
-                    }
-            # DB connection released here
-
-            # ── Phase 2: AI generation (NO DB connection held) ──
-            mode = ai_params["mode"]
-            if mode == "custom":
-                _update("generating", 35, "Generation IA en cours...")
-                result_text = await ai_service.execute_custom_prompt(
-                    ai_params["anon_content"], ai_params["anon_prompt"], ch_title,
-                    ai_context=proj_ai_context,
-                )
-            elif mode == "enrich":
-                _update("generating", 35, "Enrichissement IA en cours...")
-                result_text = await ai_service.enrich_content(
-                    ai_params["anon_content"], ch_title, ch_rfp_requirement, proj_improvement,
-                    ai_context=proj_ai_context,
-                )
-            else:
-                _update("generating", 40, "Generation IA du contenu...")
-                result_text = await ai_service.generate_chapter_content(
-                    chapter_title=ch_title,
-                    chapter_description=ch_description,
-                    rfp_requirement=ch_rfp_requirement,
-                    old_response_content=ai_params["old_response_content"],
-                    context_chunks=ai_params["context_chunks_text"],
-                    improvement_axes=proj_improvement,
-                    notes=ai_params["notes_text"],
-                    ai_context=proj_ai_context,
-                )
-
-            # ── Phase 3: Deanonymize + save (short DB session) ──
-            _update("deanonymizing", 80, "Deanonymisation...")
-            async with async_session() as db:
-                final_content = await AnonymizationService.deanonymize_text(result_text, project_id, db)
-
-                _update("saving", 90, "Enregistrement...")
-                chap_result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
-                chap = chap_result.scalar_one()
-                chap.content = final_content
-                chap.status = ChapterStatus.IN_PROGRESS
-                await db.commit()
-
-        _chapter_gen_progress[cid] = {
-            "status": "completed", "step": "done", "progress": 100,
-            "message": "Contenu genere avec succes",
-        }
-
-    except Exception as e:
-        logger.exception("Chapter generation failed for chapter %s", chapter_id)
-        _chapter_gen_progress[cid] = {
-            "status": "error", "step": "error", "progress": 0,
-            "message": f"Erreur: {str(e)[:200]}",
-        }
+    return get_or_idle(_NS, str(chapter_id))
 
 
 @router.post("/reorder")

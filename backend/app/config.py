@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     admin_email: str = "admin@rfp-assistant.fr"
     admin_password: str = "admin123"
 
+    # Redis / Celery
+    redis_url: str = "redis://redis:6379/0"
+    celery_broker_url: str = "redis://redis:6379/0"
+    celery_result_backend: str = "redis://redis:6379/0"
+
     # CORS
     cors_origins: str = "http://localhost,http://localhost:80,http://localhost:4200"
 
