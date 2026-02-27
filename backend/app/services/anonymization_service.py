@@ -324,13 +324,18 @@ class AnonymizationService:
 
     @classmethod
     async def _check_ollama(cls) -> bool:
-        """Check if Ollama is reachable and the model is available."""
-        if cls._ollama_available is not None:
-            return cls._ollama_available
+        """Check if Ollama is reachable and the model is available.
+
+        Only caches *success* permanently.  Failures are retried each time
+        so that a temporary network issue doesn't permanently disable LLM NER
+        for the lifetime of the process.
+        """
+        if cls._ollama_available is True:
+            return True
 
         try:
             client = await cls._get_http_client()
-            resp = await client.get("/api/tags", timeout=5.0)
+            resp = await client.get("/api/tags", timeout=10.0)
             if resp.status_code == 200:
                 models = resp.json().get("models", [])
                 model_names = [m.get("name", "") for m in models]
@@ -346,21 +351,18 @@ class AnonymizationService:
                         "Run 'ollama pull %s' on the host to download it.",
                         _OLLAMA_MODEL, model_names, _OLLAMA_MODEL,
                     )
-                    cls._ollama_available = False
+                    # Don't cache — model might be pulled later
             else:
                 logger.warning("Ollama returned status %d", resp.status_code)
-                cls._ollama_available = False
         except Exception as e:
             logger.warning(
                 "Ollama not reachable at %s: %s. "
-                "Falling back to regex-only anonymization. "
-                "To enable LLM-based NER, install Ollama on your host and run: "
-                "ollama pull %s",
-                _OLLAMA_BASE_URL, e, _OLLAMA_MODEL,
+                "Falling back to regex-only anonymization for this batch. "
+                "Will retry on next request.",
+                _OLLAMA_BASE_URL, e,
             )
-            cls._ollama_available = False
 
-        return cls._ollama_available
+        return cls._ollama_available is True
 
     @classmethod
     def is_ner_available(cls) -> bool:
