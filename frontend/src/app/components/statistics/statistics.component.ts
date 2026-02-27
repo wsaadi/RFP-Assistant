@@ -476,12 +476,12 @@ export class StatisticsComponent implements OnInit {
   }
 
   reAnonymize(): void {
-    if (!confirm('Re-anonymiser tous les documents et chapitres avec les mappings actuels ? Cette operation peut prendre quelques secondes.')) return;
+    if (!confirm('Re-anonymiser tous les documents et chapitres ? La detection NER sera relancee sur les documents pour decouvrir de nouvelles entites.')) return;
     this.reAnonymizing = true;
     this.api.reAnonymizeProject(this.projectId).subscribe({
-      next: (res) => {
-        const orphanMsg = res.registered_orphans ? `, ${res.registered_orphans} secret(s) detecte(s) a completer` : '';
-        this.snackBar.open(`Re-anonymisation terminee : ${res.updated_chunks} chunks et ${res.updated_chapters} chapitres mis a jour${orphanMsg}`, 'OK', { duration: 6000 });
+      next: (res: any) => {
+        const newMsg = res.new_entities ? `, ${res.new_entities} nouvelle(s) entite(s) detectee(s)` : '';
+        this.snackBar.open(`Re-anonymisation terminee : ${res.updated_chunks} chunks et ${res.updated_chapters} chapitres mis a jour${newMsg}`, 'OK', { duration: 6000 });
         this.reAnonymizing = false;
         this.loadAnonReport();
       },
