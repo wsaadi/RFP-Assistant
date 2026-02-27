@@ -3044,10 +3044,15 @@ async def re_anonymize_project(
 
     await db.commit()
 
+    ner_available = AnonymizationService.is_ner_available()
+    if not ner_available:
+        logger.warning("GLiNER NER model is NOT available – only regex patterns (email) were used for re-anonymization")
+
     return {
         "updated_chunks": len(chunk_texts),
         "updated_chapters": updated_chapters,
         "new_entities": new_entities,
+        "ner_available": ner_available,
     }
 
 

@@ -1,4 +1,5 @@
 """Anonymization service using GLiNER for NER-based pseudonymization."""
+import logging
 import re
 import uuid
 from typing import Dict, List, Tuple, Optional
@@ -8,6 +9,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from ..models.project import AnonymizationMapping, EntityType
+
+logger = logging.getLogger(__name__)
 
 
 # Entity labels GLiNER will search for
@@ -55,56 +58,36 @@ REGEX_PATTERNS = {
     EntityType.EMAIL: r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
 }
 
-# Regex to catch uppercase acronyms (3-6 chars) that GLiNER often misses for
-# short company/organization names (EDF, SNCF, RATP, ENGIE, …).
-# Applied as a second-pass after GLiNER + REGEX_PATTERNS.
-_ACRONYM_RE = re.compile(r'\b[A-Z][A-Z0-9]{2,5}\b')
-
-# Stoplist of uppercase acronyms that are NOT sensitive entities.
-# These are common French/English abbreviations found in RFP documents.
-_ACRONYM_STOPLIST: set = {
-    # RFP / procurement terms
-    "AOR", "BPU", "CCTP", "CCP", "DCE", "DQE", "DPGF", "ATTRI", "NOTI",
-    # Administrative forms
-    "DC1", "DC2", "DC3", "DC4",
-    # Legal forms (not sensitive — generic terms)
-    "SAS", "SARL", "SCI", "EURL", "PME", "TPE", "ETI",
-    # Tax / finance
-    "TVA", "HT0", "TTC", "EUR",
-    # Tech / IT common
-    "API", "URL", "SQL", "CSS", "HTML", "HTTP", "HTTPS", "JSON", "XML",
-    "CSV", "USB", "RAM", "CPU", "GPU", "SSD", "LAN", "WAN", "VPN",
-    "PDF", "DOCX", "XLSX",
-    # French admin / regulation
-    "RGPD", "CNIL", "DREAL", "DIRECCTE",
-    "CDI", "CDD", "RTT", "CSE",
-    # Generic abbreviations
-    "RSE", "QSE", "HSE", "SST", "EPI",
-    "FAQ", "QCM", "REX",
-    "NFC", "IOT", "ERP", "CRM", "PLM", "BIM",
-    # Chapter / document markers the AI uses
-    "ENTREPRISE", "PERSONNE", "EMAIL", "TELEPHONE", "ADRESSE",
-    "CODE", "PROJET", "SOLUTION", "DATE", "MONTANT", "ENTITE",
-}
-
 
 class AnonymizationService:
     """Service for anonymizing/pseudonymizing sensitive content."""
 
     _model = None
+    _model_load_failed = False  # sentinel to avoid retrying a broken model
 
     @classmethod
     def _get_model(cls):
-        """Lazy-load the GLiNER model."""
-        if cls._model is None:
-            try:
-                from gliner import GLiNER
-                from ..config import settings
-                cls._model = GLiNER.from_pretrained(settings.gliner_model)
-            except Exception as e:
-                print(f"Warning: Could not load GLiNER model: {e}")
-                cls._model = None
+        """Lazy-load the GLiNER model. Returns None if unavailable."""
+        if cls._model is not None:
+            return cls._model
+        if cls._model_load_failed:
+            return None
+        try:
+            from gliner import GLiNER
+            from ..config import settings
+            logger.info("Loading GLiNER model: %s ...", settings.gliner_model)
+            cls._model = GLiNER.from_pretrained(settings.gliner_model)
+            logger.info("GLiNER model loaded successfully")
+        except Exception as e:
+            logger.error("Could not load GLiNER model: %s", e, exc_info=True)
+            cls._model = None
+            cls._model_load_failed = True
         return cls._model
+
+    @classmethod
+    def is_ner_available(cls) -> bool:
+        """Check if the NER model is loaded and available."""
+        return cls._get_model() is not None
 
     @staticmethod
     async def get_mappings(
@@ -221,7 +204,7 @@ class AnonymizationService:
                                     (pred["text"], pred["label"], abs_start, abs_end)
                                 )
                 except Exception as e:
-                    print(f"GLiNER batch prediction error: {e}")
+                    logger.error("GLiNER batch prediction error: %s", e, exc_info=True)
 
         # Apply regex patterns per text
         for text_idx, text in enumerate(texts):
@@ -251,7 +234,7 @@ class AnonymizationService:
             try:
                 entities.extend(cls._predict_on_segments(model, text))
             except Exception as e:
-                print(f"GLiNER prediction error: {e}")
+                logger.error("GLiNER prediction error: %s", e, exc_info=True)
 
         # Also apply regex patterns for common entity types
         for entity_type, pattern in REGEX_PATTERNS.items():
