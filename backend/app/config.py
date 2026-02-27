@@ -28,8 +28,13 @@ class Settings(BaseSettings):
     # Embedding model
     embedding_model: str = "intfloat/multilingual-e5-base"
 
-    # GLiNER model
-    gliner_model: str = "urchade/gliner_multi-v2.1"
+    # Ollama (local LLM for anonymization NER)
+    # On Docker Desktop for Mac: host.docker.internal points to the Mac host
+    # where Ollama runs natively with Metal GPU acceleration.
+    ollama_base_url: str = "http://host.docker.internal:11434"
+    ollama_ner_model: str = "gemma3:4b"
+    ollama_ner_timeout: int = 60
+    ollama_ner_concurrency: int = 3
 
     # HuggingFace
     hf_token: Optional[str] = None

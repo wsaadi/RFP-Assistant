@@ -6,9 +6,6 @@ from contextlib import asynccontextmanager
 # Suppress noisy third-party warnings
 warnings.filterwarnings("ignore", message=".*resume_download.*is deprecated.*", category=FutureWarning)
 warnings.filterwarnings("ignore", message=".*resume_download.*is deprecated.*", category=UserWarning)
-warnings.filterwarnings("ignore", message=".*has been truncated to.*", module="gliner")
-warnings.filterwarnings("ignore", message=".*UNEXPECTED.*", module="gliner")
-os.environ.setdefault("ORT_LOG_LEVEL", "ERROR")  # Suppress ONNX Runtime CPU vendor warnings
 
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -212,5 +209,25 @@ async def root():
 
 @app.get("/api/health")
 async def health_check():
-    """Health check endpoint."""
-    return {"status": "healthy", "service": settings.app_name}
+    """Health check endpoint with component status."""
+    from .services.progress_service import redis_health_check
+
+    redis_ok = redis_health_check()
+    # Check Ollama availability (non-blocking, uses cached status)
+    ollama_status = "unknown"
+    try:
+        from .services.anonymization_service import AnonymizationService
+        ollama_ok = await AnonymizationService._check_ollama()
+        ollama_status = "connected" if ollama_ok else "unavailable"
+    except Exception:
+        ollama_status = "error"
+
+    overall = "healthy" if redis_ok else "degraded"
+    return {
+        "status": overall,
+        "service": settings.app_name,
+        "components": {
+            "redis": "connected" if redis_ok else "disconnected",
+            "ollama_ner": ollama_status,
+        },
+    }

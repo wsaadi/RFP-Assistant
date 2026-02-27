@@ -1,13 +1,26 @@
-"""Anonymization service using GLiNER for NER-based pseudonymization."""
+"""Anonymization service using a local LLM (Gemma 2B via Ollama) for NER-based pseudonymization.
+
+Replaces GLiNER with a small LLM that understands context, drastically reducing
+false positives (e.g., "Business Développement Manager" detected as a person name).
+
+Architecture:
+- Primary: Ollama running on the host machine (GPU-accelerated via Metal on Mac)
+- Fallback: Regex-only detection if Ollama is unavailable
+
+The LLM receives a focused prompt asking it to extract ONLY real sensitive entities
+from French RFP documents, with explicit instructions to ignore job titles, roles,
+legal terms, etc.
+"""
 import asyncio
+import json
 import logging
 import os
 import re
 import uuid
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
+from typing import Dict, List, Optional, Tuple
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -15,27 +28,64 @@ from ..models.project import AnonymizationMapping, EntityType
 
 logger = logging.getLogger(__name__)
 
+# ── Ollama configuration ──
+# On Docker Desktop for Mac: host.docker.internal points to the Mac host
+# where Ollama runs natively with Metal GPU acceleration.
+_OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
+_OLLAMA_MODEL = os.environ.get("OLLAMA_NER_MODEL", "gemma3:4b")
+_OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_NER_TIMEOUT", "60"))
+# Maximum concurrent requests to Ollama (avoid overloading)
+_OLLAMA_CONCURRENCY = int(os.environ.get("OLLAMA_NER_CONCURRENCY", "3"))
 
-# Entity labels GLiNER will search for
-# Keep detection focused on truly sensitive data to avoid over-anonymization:
-# names, companies, emails, addresses, project/RFP codes.
-GLINER_LABELS = [
-    "person",
-    "organization",
-    "company",
-    "email address",
-    "address",
-    "project code",
-]
+# ── NER Prompt ──
+# This prompt is the core of the anonymization quality. It tells the LLM
+# exactly what to extract and what to ignore, leveraging its contextual
+# understanding to avoid false positives.
+_NER_SYSTEM_PROMPT = """\
+Tu es un système d'extraction d'entités nommées spécialisé dans les documents d'appels d'offres français.
 
-# Mapping from GLiNER labels to our entity types
+Ta mission : extraire UNIQUEMENT les vraies données sensibles qui doivent être anonymisées.
+
+EXTRAIRE (entités sensibles réelles) :
+- "person" : Vrais noms et prénoms de personnes physiques (ex: "Jean Dupont", "Marie-Claire Martin"). Un nom de personne contient TOUJOURS au minimum un prénom ET un nom de famille, tous deux avec une majuscule.
+- "company" : Vrais noms d'entreprises et organisations privées (ex: "Capgemini", "Sopra Steria", "Orange Business Services"). PAS les institutions publiques connues.
+- "email" : Adresses email complètes
+- "address" : Adresses postales physiques complètes (avec numéro, rue, ville)
+- "project_code" : Codes de référence de projet ou d'appel d'offres spécifiques (ex: "AO-2024-0847", "PRJ-FR-2025")
+
+NE PAS EXTRAIRE (liste non exhaustive) :
+- Titres et fonctions : directeur, chef de projet, responsable, DPO, DSI, RSSI, Business Development Manager, consultant, architecte, ingénieur, pilote, référent, coordinateur...
+- Rôles contractuels : titulaire, prestataire, candidat, sous-traitant, bénéficiaire, attributaire, mandataire, acheteur, maître d'ouvrage, cotraitant...
+- Termes génériques : personne, client, fournisseur, partenaire, membre, tiers, autorité, entité, structure, service, direction, utilisateur...
+- Institutions publiques : CNIL, ANSSI, DINUM, ARCEP, Légifrance, État, République française, Union européenne...
+- Termes juridiques : CCAG, CCAP, CCTP, RGPD, RGAA, code du travail, code de la commande publique, article X...
+- Standards et normes : ISO 27001, NF EN, AFNOR, W3C, RGS, RGI...
+- Technologies : IaaS, PaaS, SaaS, TMA, AMOA, cloud, datacenter...
+- Termes civilités seuls : Monsieur, Madame, M., Mme (sauf si suivis d'un vrai nom)
+- Noms de pays/villes courants : France, Paris, Europe...
+- Mots en minuscules : un vrai nom propre commence TOUJOURS par une majuscule
+
+IMPORTANT :
+- En cas de doute, NE PAS extraire. Mieux vaut rater une entité que créer un faux positif.
+- "Responsable de la sécurité" → NE PAS extraire (c'est un rôle)
+- "Pierre Durand, responsable de la sécurité" → extraire UNIQUEMENT "Pierre Durand"
+- "le prestataire" → NE PAS extraire
+- "la société Atos" → extraire "Atos"
+
+Réponds UNIQUEMENT avec un tableau JSON (sans markdown, sans explication) :
+[{"text": "texte exact trouvé", "type": "person|company|email|address|project_code"}]
+
+Si aucune entité sensible n'est trouvée, réponds : []"""
+
+# Mapping from LLM entity types to our internal EntityType
 LABEL_TO_ENTITY_TYPE = {
     "person": EntityType.PERSON,
     "organization": EntityType.COMPANY,
     "company": EntityType.COMPANY,
+    "email": EntityType.EMAIL,
     "email address": EntityType.EMAIL,
     "address": EntityType.ADDRESS,
-    "project code": EntityType.PROJECT_CODE,
+    "project_code": EntityType.PROJECT_CODE,
 }
 
 # Prefixes for anonymized placeholders
@@ -56,17 +106,15 @@ ENTITY_PREFIXES = {
 # Reverse mapping: prefix string → EntityType
 PREFIX_TO_ENTITY_TYPE = {v: k for k, v in ENTITY_PREFIXES.items()}
 
-# Regex patterns for entities GLiNER might miss
+# Regex patterns for entities the LLM might miss (deterministic fallback)
 REGEX_PATTERNS = {
     EntityType.EMAIL: r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b',
 }
 
 # ---------------------------------------------------------------------------
-# Post-detection filtering to reduce false positives
+# Post-detection filtering (safety net on top of LLM output)
 # ---------------------------------------------------------------------------
 
-# Common French words, roles, generic terms that should NEVER be anonymized.
-# Matched case-insensitively against the detected entity text (stripped).
 _STOPLIST_LOWER: set = {
     # Generic role nouns often misdetected as person names
     "personne", "personnes", "personne physique", "personnes physiques",
@@ -130,6 +178,9 @@ _STOPLIST_LOWER: set = {
     "pilote", "pilotes",
     "référent", "référents",
     "rapporteur", "rapporteurs",
+    "business development manager", "business développement manager",
+    "account manager", "project manager", "delivery manager",
+    "product owner", "scrum master", "tech lead",
     # Generic IT / business terms
     "infrastructure as a service", "iaas",
     "platform as a service", "paas",
@@ -162,50 +213,43 @@ _STOPLIST_LOWER: set = {
     "helios", "chorus", "chorus pro",
 }
 
-# Regex patterns that should cause an entity to be REJECTED.
 _REJECT_PATTERNS: list = [
-    re.compile(r"^ISO\s*\d", re.IGNORECASE),          # ISO 27001, ISO 9001 …
-    re.compile(r"^NF\s", re.IGNORECASE),               # NF EN, NF Z42-013 …
-    re.compile(r"^J\s*[+-]\s*\d+$", re.IGNORECASE),   # J+1, J+2, J-1 …
-    re.compile(r"^\d{4,5}$"),                           # Postal codes: 50110, 75001
-    re.compile(r"^\d+$"),                               # Pure numbers
-    re.compile(r"^(article|articles)\s+\d", re.IGNORECASE),  # Article 35, Articles 6 …
-    re.compile(r"^(annexe|annexes)\s+\d", re.IGNORECASE),    # Annexe 1, Annexes 2 …
+    re.compile(r"^ISO\s*\d", re.IGNORECASE),
+    re.compile(r"^NF\s", re.IGNORECASE),
+    re.compile(r"^J\s*[+-]\s*\d+$", re.IGNORECASE),
+    re.compile(r"^\d{4,5}$"),
+    re.compile(r"^\d+$"),
+    re.compile(r"^(article|articles)\s+\d", re.IGNORECASE),
+    re.compile(r"^(annexe|annexes)\s+\d", re.IGNORECASE),
     re.compile(r"^(chapitre|chapitres)\s+\d", re.IGNORECASE),
     re.compile(r"^(alinéa|alinéas)\s+\d", re.IGNORECASE),
-    re.compile(r"^n°\s*\d", re.IGNORECASE),            # n° 2024-xxx …
-    re.compile(r"^v\d+(\.\d+)*$", re.IGNORECASE),      # V1, V2.0, v3.1.2 …
+    re.compile(r"^n°\s*\d", re.IGNORECASE),
+    re.compile(r"^v\d+(\.\d+)*$", re.IGNORECASE),
 ]
 
-# Minimum character length for an entity to be kept (after stripping)
 _MIN_ENTITY_LENGTH = 3
 
 
 def _should_keep_entity(entity_text: str, label: str) -> bool:
     """Return True if the detected entity is likely a real sensitive entity.
 
-    Applies stoplist, regex rejection patterns, and length checks.
+    This is a safety net on top of the LLM output — the LLM should already
+    filter most false positives, but we keep the stoplist for defense in depth.
     """
     cleaned = entity_text.strip()
 
-    # Too short
     if len(cleaned) < _MIN_ENTITY_LENGTH:
         return False
 
-    # Stoplist (case-insensitive)
     if cleaned.lower() in _STOPLIST_LOWER:
         return False
 
-    # Regex rejection patterns
     for pattern in _REJECT_PATTERNS:
         if pattern.search(cleaned):
             return False
 
-    # For "person" label: reject if it looks like a generic noun (no uppercase
-    # start or contains only lowercase common words).  Real person names in
-    # French almost always start with an uppercase letter.
+    # For "person" label: reject if all words start lowercase
     if label in ("person",):
-        # If every word starts with lowercase → probably a common noun
         words = cleaned.split()
         if all(w[0].islower() for w in words if w):
             return False
@@ -214,56 +258,240 @@ def _should_keep_entity(entity_text: str, label: str) -> bool:
 
 
 class AnonymizationService:
-    """Service for anonymizing/pseudonymizing sensitive content."""
+    """Service for anonymizing/pseudonymizing sensitive content.
 
-    _model = None
-    _model_load_failed = False  # sentinel to avoid retrying a broken model
-    _device = "cpu"  # "cpu", "mps" (Apple Silicon), or "cuda"
+    Uses a local LLM (Gemma via Ollama) for context-aware NER detection,
+    with regex fallback for deterministic patterns (emails).
+    """
 
-    @classmethod
-    def _detect_device(cls) -> str:
-        """Pick the best available device for inference."""
-        try:
-            import torch
-            if torch.cuda.is_available():
-                return "cuda"
-            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                return "mps"
-        except ImportError:
-            pass
-        return "cpu"
+    _ollama_available: Optional[bool] = None
+    _http_client: Optional[httpx.AsyncClient] = None
 
     @classmethod
-    def _get_model(cls):
-        """Lazy-load the GLiNER model. Returns None if unavailable."""
-        if cls._model is not None:
-            return cls._model
-        if cls._model_load_failed:
-            return None
+    async def _get_http_client(cls) -> httpx.AsyncClient:
+        """Get or create a reusable async HTTP client for Ollama."""
+        if cls._http_client is None or cls._http_client.is_closed:
+            cls._http_client = httpx.AsyncClient(
+                base_url=_OLLAMA_BASE_URL,
+                timeout=httpx.Timeout(_OLLAMA_TIMEOUT, connect=10.0),
+            )
+        return cls._http_client
+
+    @classmethod
+    async def _check_ollama(cls) -> bool:
+        """Check if Ollama is reachable and the model is available."""
+        if cls._ollama_available is not None:
+            return cls._ollama_available
+
         try:
-            from gliner import GLiNER
-            from ..config import settings
-
-            cls._device = cls._detect_device()
-
-            # Always load PyTorch model first (guaranteed to work)
-            logger.warning("Loading GLiNER model: %s on device: %s ...", settings.gliner_model, cls._device)
-            cls._model = GLiNER.from_pretrained(settings.gliner_model)
-
-            if cls._device != "cpu":
-                cls._model = cls._model.to(cls._device)
-
-            logger.warning("GLiNER model loaded successfully on %s", cls._device)
+            client = await cls._get_http_client()
+            resp = await client.get("/api/tags", timeout=5.0)
+            if resp.status_code == 200:
+                models = resp.json().get("models", [])
+                model_names = [m.get("name", "") for m in models]
+                # Check if our model (or a variant) is available
+                base_model = _OLLAMA_MODEL.split(":")[0]
+                available = any(base_model in name for name in model_names)
+                if available:
+                    logger.info("Ollama available at %s with model %s", _OLLAMA_BASE_URL, _OLLAMA_MODEL)
+                    cls._ollama_available = True
+                else:
+                    logger.warning(
+                        "Ollama reachable but model '%s' not found. Available: %s. "
+                        "Run 'ollama pull %s' on the host to download it.",
+                        _OLLAMA_MODEL, model_names, _OLLAMA_MODEL,
+                    )
+                    cls._ollama_available = False
+            else:
+                logger.warning("Ollama returned status %d", resp.status_code)
+                cls._ollama_available = False
         except Exception as e:
-            logger.error("Could not load GLiNER model: %s", e, exc_info=True)
-            cls._model = None
-            cls._model_load_failed = True
-        return cls._model
+            logger.warning(
+                "Ollama not reachable at %s: %s. "
+                "Falling back to regex-only anonymization. "
+                "To enable LLM-based NER, install Ollama on your host and run: "
+                "ollama pull %s",
+                _OLLAMA_BASE_URL, e, _OLLAMA_MODEL,
+            )
+            cls._ollama_available = False
+
+        return cls._ollama_available
 
     @classmethod
     def is_ner_available(cls) -> bool:
-        """Check if the NER model is loaded and available."""
-        return cls._get_model() is not None
+        """Check if NER is available (sync wrapper for backward compatibility)."""
+        # Optimistic: if we haven't checked yet, assume it might be available
+        if cls._ollama_available is None:
+            return True
+        return cls._ollama_available
+
+    @classmethod
+    async def _detect_entities_llm(cls, text: str) -> List[Tuple[str, str, int, int]]:
+        """Detect entities using the local LLM via Ollama.
+
+        Returns list of (entity_text, label, start_char, end_char).
+        """
+        if not text.strip():
+            return []
+
+        client = await cls._get_http_client()
+
+        try:
+            resp = await client.post(
+                "/api/chat",
+                json={
+                    "model": _OLLAMA_MODEL,
+                    "messages": [
+                        {"role": "system", "content": _NER_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"Texte à analyser :\n\n{text}"},
+                    ],
+                    "stream": False,
+                    "options": {
+                        "temperature": 0.0,
+                        "num_predict": 2048,
+                    },
+                    "format": "json",
+                },
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            raw_content = result.get("message", {}).get("content", "[]")
+
+            # Parse the JSON response
+            entities_data = _parse_llm_json(raw_content)
+            if not entities_data:
+                return []
+
+            # Map LLM output to (text, label, start, end) tuples
+            entities = []
+            for item in entities_data:
+                entity_text = item.get("text", "").strip()
+                entity_type = item.get("type", "").lower().strip()
+
+                if not entity_text or not entity_type:
+                    continue
+
+                if entity_type not in LABEL_TO_ENTITY_TYPE:
+                    continue
+
+                if not _should_keep_entity(entity_text, entity_type):
+                    continue
+
+                # Find all occurrences in the original text
+                start = 0
+                while True:
+                    idx = text.find(entity_text, start)
+                    if idx == -1:
+                        break
+                    entities.append((entity_text, entity_type, idx, idx + len(entity_text)))
+                    start = idx + len(entity_text)
+
+            # Deduplicate by (text, start)
+            seen = set()
+            unique_entities = []
+            for e in entities:
+                key = (e[0], e[2])
+                if key not in seen:
+                    seen.add(key)
+                    unique_entities.append(e)
+
+            unique_entities.sort(key=lambda x: x[2])
+            return unique_entities
+
+        except httpx.TimeoutException:
+            logger.warning("Ollama request timed out after %ds", _OLLAMA_TIMEOUT)
+            return []
+        except httpx.HTTPStatusError as e:
+            logger.warning("Ollama HTTP error: %s", e)
+            return []
+        except Exception as e:
+            logger.error("LLM entity detection failed: %s", e, exc_info=True)
+            return []
+
+    @classmethod
+    async def _batch_detect_entities(
+        cls,
+        texts: List[str],
+        progress_callback=None,
+    ) -> List[List[Tuple[str, str, int, int]]]:
+        """Detect entities across multiple texts using the LLM.
+
+        Uses a semaphore to limit concurrent Ollama requests.
+        Falls back to regex-only if Ollama is unavailable.
+        """
+        results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
+
+        ollama_ok = await cls._check_ollama()
+
+        if ollama_ok:
+            semaphore = asyncio.Semaphore(_OLLAMA_CONCURRENCY)
+            done_count = 0
+
+            async def _process_one(idx: int, text: str):
+                nonlocal done_count
+                async with semaphore:
+                    entities = await cls._detect_entities_llm(text)
+                    results[idx] = entities
+                    done_count += 1
+                    if progress_callback:
+                        progress_callback(done_count, len(texts))
+
+            # Process all texts concurrently (limited by semaphore)
+            tasks = [_process_one(idx, text) for idx, text in enumerate(texts)]
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+            total_entities = sum(len(r) for r in results)
+            logger.info(
+                "[batch_detect] LLM NER: %d entities across %d texts",
+                total_entities, len(texts),
+            )
+        else:
+            logger.info("[batch_detect] Ollama unavailable, using regex-only fallback")
+            if progress_callback:
+                progress_callback(len(texts), len(texts))
+
+        # Always apply regex patterns (deterministic fallback for emails etc.)
+        for text_idx, text in enumerate(texts):
+            for entity_type, pattern in REGEX_PATTERNS.items():
+                for match in re.finditer(pattern, text):
+                    matched_text = match.group()
+                    if not any(e[0] == matched_text for e in results[text_idx]):
+                        results[text_idx].append(
+                            (matched_text, entity_type.value, match.start(), match.end())
+                        )
+            results[text_idx].sort(key=lambda x: x[2])
+
+        return results
+
+    @classmethod
+    async def detect_entities(cls, text: str) -> List[Tuple[str, str, int, int]]:
+        """Detect named entities in text using LLM and regex.
+
+        Returns list of (entity_text, entity_type_label, start, end).
+        """
+        entities = []
+
+        ollama_ok = await cls._check_ollama()
+        if ollama_ok:
+            try:
+                entities.extend(await cls._detect_entities_llm(text))
+            except Exception as e:
+                logger.error("LLM prediction error: %s", e, exc_info=True)
+
+        # Also apply regex patterns for common entity types
+        for entity_type, pattern in REGEX_PATTERNS.items():
+            for match in re.finditer(pattern, text):
+                matched_text = match.group()
+                if not any(e[0] == matched_text for e in entities):
+                    entities.append((
+                        matched_text,
+                        entity_type.value,
+                        match.start(),
+                        match.end(),
+                    ))
+
+        entities.sort(key=lambda x: x[2])
+        return entities
 
     @staticmethod
     async def get_mappings(
@@ -291,162 +519,6 @@ class AnonymizationService:
         mappings = result.scalars().all()
         return {m.anonymized_value: m.original_value for m in mappings}
 
-    # Max words per segment for GLiNER (DeBERTa tokenizer, max_position=384 tokens)
-    # French/technical text can reach ~2.5 tokens/word, so 150 words ≈ 375 tokens
-    _GLINER_SEGMENT_WORDS = 150
-    _GLINER_OVERLAP_WORDS = 20
-    # Confidence threshold for GLiNER predictions.
-    # 0.55 balances recall vs precision — avoids flooding results with
-    # common nouns and generic terms while still catching real entities.
-    _GLINER_THRESHOLD = 0.55
-
-    @classmethod
-    def _predict_on_segments(cls, model, text: str) -> List[Tuple[str, str, int, int]]:
-        """Run GLiNER prediction on overlapping text segments to avoid truncation.
-
-        Applies post-detection filtering via ``_should_keep_entity`` to discard
-        common nouns, generic terms, legal references, etc.
-        """
-        # Build word boundary list: [(word_start_char, word_end_char), ...]
-        word_spans = [(m.start(), m.end()) for m in re.finditer(r'\S+', text)]
-
-        if len(word_spans) <= cls._GLINER_SEGMENT_WORDS:
-            predictions = model.predict_entities(text, GLINER_LABELS, threshold=cls._GLINER_THRESHOLD)
-            return [
-                (p["text"], p["label"], p["start"], p["end"])
-                for p in predictions
-                if _should_keep_entity(p["text"], p["label"])
-            ]
-
-        entities = []
-        seen = set()
-        step = cls._GLINER_SEGMENT_WORDS - cls._GLINER_OVERLAP_WORDS
-
-        for i in range(0, len(word_spans), step):
-            span_slice = word_spans[i: i + cls._GLINER_SEGMENT_WORDS]
-            seg_char_start = span_slice[0][0]
-            seg_char_end = span_slice[-1][1]
-            segment_text = text[seg_char_start:seg_char_end]
-
-            predictions = model.predict_entities(segment_text, GLINER_LABELS, threshold=cls._GLINER_THRESHOLD)
-            for pred in predictions:
-                if not _should_keep_entity(pred["text"], pred["label"]):
-                    continue
-                abs_start = seg_char_start + pred["start"]
-                abs_end = seg_char_start + pred["end"]
-                key = (pred["text"], abs_start)
-                if key not in seen:
-                    seen.add(key)
-                    entities.append((pred["text"], pred["label"], abs_start, abs_end))
-
-        return entities
-
-    @classmethod
-    def _batch_detect_entities(
-        cls,
-        texts: List[str],
-        progress_callback=None,
-    ) -> List[List[Tuple[str, str, int, int]]]:
-        """Detect entities across multiple texts using GLiNER inference.
-
-        On CPU: uses ThreadPoolExecutor for parallel processing (PyTorch
-        releases the GIL during tensor ops so threads give real speedup).
-        On GPU/MPS: single-threaded (GPU inference is not thread-safe but
-        is fast enough that parallelism isn't needed).
-
-        Args:
-            texts: List of texts to analyze.
-            progress_callback: Optional callable(current_idx, total) called
-                as texts are processed, for progress reporting.
-        """
-        results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
-        seen: List[set] = [set() for _ in texts]
-
-        model = cls._get_model()
-        # GPU is not thread-safe → 1 worker.
-        # CPU PyTorch benefits from thread-level parallelism → multiple workers.
-        n_workers = 1 if cls._device != "cpu" else min(os.cpu_count() or 2, 2)
-        logger.warning("[batch_detect] GLiNER on %s, processing %d texts with %d parallel workers",
-                       cls._device, len(texts), n_workers)
-
-        if model is not None:
-            done_count = 0
-
-            def _process_one(text_idx: int, text: str):
-                """Run prediction for a single text (called from thread)."""
-                return text_idx, cls._predict_on_segments(model, text)
-
-            with ThreadPoolExecutor(max_workers=n_workers) as pool:
-                futures = {
-                    pool.submit(_process_one, idx, text): idx
-                    for idx, text in enumerate(texts)
-                }
-                for future in as_completed(futures):
-                    text_idx = futures[future]
-                    try:
-                        _, text_entities = future.result()
-                        for entity_text, label, start, end in text_entities:
-                            key = (entity_text, start)
-                            if key not in seen[text_idx]:
-                                seen[text_idx].add(key)
-                                results[text_idx].append((entity_text, label, start, end))
-                    except Exception as e:
-                        logger.error("GLiNER prediction error on text %d: %s", text_idx, e)
-
-                    done_count += 1
-                    if progress_callback is not None:
-                        progress_callback(done_count, len(texts))
-
-        total_entities = sum(len(r) for r in results)
-        logger.warning("[batch_detect] Kept %d entities across %d texts (after filtering)", total_entities, len(texts))
-
-        # Apply regex patterns per text
-        for text_idx, text in enumerate(texts):
-            for entity_type, pattern in REGEX_PATTERNS.items():
-                for match in re.finditer(pattern, text):
-                    matched_text = match.group()
-                    if not any(e[0] == matched_text for e in results[text_idx]):
-                        results[text_idx].append(
-                            (matched_text, entity_type.value, match.start(), match.end())
-                        )
-
-            results[text_idx].sort(key=lambda x: x[2])
-
-        return results
-
-    @classmethod
-    def detect_entities(cls, text: str) -> List[Tuple[str, str, int, int]]:
-        """Detect named entities in text using GLiNER and regex.
-
-        Returns list of (entity_text, entity_type_label, start, end).
-        """
-        entities = []
-
-        # Try GLiNER first (split into segments to avoid truncation)
-        model = cls._get_model()
-        if model is not None:
-            try:
-                entities.extend(cls._predict_on_segments(model, text))
-            except Exception as e:
-                logger.error("GLiNER prediction error: %s", e, exc_info=True)
-
-        # Also apply regex patterns for common entity types
-        for entity_type, pattern in REGEX_PATTERNS.items():
-            for match in re.finditer(pattern, text):
-                matched_text = match.group()
-                # Avoid duplicates
-                if not any(e[0] == matched_text for e in entities):
-                    entities.append((
-                        matched_text,
-                        entity_type.value,
-                        match.start(),
-                        match.end(),
-                    ))
-
-        # Sort by position for consistent processing
-        entities.sort(key=lambda x: x[2])
-        return entities
-
     @classmethod
     async def anonymize_text(
         cls,
@@ -461,19 +533,14 @@ class AnonymizationService:
         if not text:
             return text
 
-        # Get existing mappings
         existing_mappings = await cls.get_mappings(db, project_id)
 
-        # Count per entity type for generating new placeholders
         type_counts = defaultdict(int)
         for mapping in existing_mappings.values():
             type_counts[mapping.entity_type] += 1
 
-        # Detect entities (run in thread to avoid blocking the event loop
-        # — GLiNER inference is CPU-bound)
-        entities = await asyncio.to_thread(cls.detect_entities, text)
+        entities = await cls.detect_entities(text)
 
-        # Build replacement list (process from end to start to preserve positions)
         replacements = []
         for entity_text, label, start, end in entities:
             entity_text_clean = entity_text.strip()
@@ -483,13 +550,11 @@ class AnonymizationService:
             if entity_text_clean in existing_mappings:
                 placeholder = existing_mappings[entity_text_clean].anonymized_value
             else:
-                # Determine entity type
                 entity_type = LABEL_TO_ENTITY_TYPE.get(label, EntityType.OTHER)
                 prefix = ENTITY_PREFIXES.get(entity_type, "ENTITE")
                 type_counts[entity_type] += 1
                 placeholder = f"[{prefix}_{type_counts[entity_type]}]"
 
-                # Create new mapping in DB
                 new_mapping = AnonymizationMapping(
                     project_id=project_id,
                     entity_type=entity_type,
@@ -501,7 +566,6 @@ class AnonymizationService:
 
             replacements.append((start, end, placeholder))
 
-        # Apply replacements from end to start
         result = text
         for start, end, placeholder in reversed(replacements):
             result = result[:start] + placeholder + result[end:]
@@ -517,26 +581,18 @@ class AnonymizationService:
         db: AsyncSession,
         progress_callback=None,
     ) -> List[str]:
-        """Anonymize multiple texts in one pass (batch NER + single DB round-trip).
-
-        Args:
-            progress_callback: Optional callable(current_idx, total) for progress.
-        """
+        """Anonymize multiple texts in one pass (batch NER + single DB round-trip)."""
         if not texts:
             return []
 
-        # Single DB read for existing mappings
         existing_mappings = await cls.get_mappings(db, project_id)
         type_counts: Dict[EntityType, int] = defaultdict(int)
         for mapping in existing_mappings.values():
             type_counts[mapping.entity_type] += 1
 
-        # Batch NER across all texts (run in thread to avoid blocking event loop)
-        all_entities = await asyncio.to_thread(
-            cls._batch_detect_entities, texts, progress_callback
-        )
+        # Batch NER across all texts
+        all_entities = await cls._batch_detect_entities(texts, progress_callback)
 
-        # Process each text
         results = []
         for text, entities in zip(texts, all_entities):
             replacements = []
@@ -594,22 +650,16 @@ class AnonymizationService:
         db: AsyncSession,
         known_placeholders: set,
     ) -> None:
-        """Create empty mappings for AI-invented placeholders so they appear in Statistics.
-
-        Any [PREFIX_N] token in *text* not present in *known_placeholders*
-        gets a new AnonymizationMapping with an empty original_value.
-        The user can then fill in the real value from the Statistics page.
-        """
+        """Create empty mappings for AI-invented placeholders so they appear in Statistics."""
         unknown = cls.find_unknown_placeholders(text, known_placeholders)
         if not unknown:
             return
 
         for token in unknown:
-            inner = token.strip("[]")                    # e.g. "ENTREPRISE_3"
-            prefix = inner.rsplit("_", 1)[0]             # e.g. "ENTREPRISE"
+            inner = token.strip("[]")
+            prefix = inner.rsplit("_", 1)[0]
             entity_type = PREFIX_TO_ENTITY_TYPE.get(prefix, EntityType.OTHER)
 
-            # Check it doesn't already exist (race condition guard)
             existing = await db.execute(
                 select(AnonymizationMapping)
                 .where(AnonymizationMapping.project_id == project_id)
@@ -636,25 +686,17 @@ class AnonymizationService:
         project_id: uuid.UUID,
         db: AsyncSession,
     ) -> str:
-        """Replace anonymized placeholders with original values.
-
-        Any AI-invented placeholder without a mapping is registered in the
-        database (with empty original_value) so it appears on the Statistics
-        page for the user to complete. The placeholder is kept as-is in the
-        text until the user provides a real value.
-        """
+        """Replace anonymized placeholders with original values."""
         if not anonymized_text:
             return anonymized_text
 
         mappings = await cls.get_mappings_by_placeholder(db, project_id)
         result = anonymized_text
 
-        # Register any unknown placeholders the AI invented
         await cls.register_unknown_placeholders(result, project_id, db, set(mappings.keys()))
 
-        # Replace known placeholders that have a real original value
         for placeholder, original in mappings.items():
-            if original:  # skip empty mappings (unresolved)
+            if original:
                 result = result.replace(placeholder, original)
 
         return result
@@ -666,16 +708,9 @@ class AnonymizationService:
         db: AsyncSession,
         ai_service,
     ) -> dict:
-        """Use AI to analyze context around orphan placeholders and guess their real values.
-
-        For each orphan mapping (empty original_value), we extract surrounding text
-        and ask the AI to extrapolate the most likely real value.
-
-        Returns: {"resolved": int, "suggestions": [{"mapping_id": str, "placeholder": str, "suggested_value": str, "confidence": str}]}
-        """
+        """Use AI to analyze context around orphan placeholders and guess their real values."""
         from ..models.project import AnonymizationMapping, EntityType
 
-        # Get all orphan mappings (empty original_value)
         result = await db.execute(
             select(AnonymizationMapping)
             .where(AnonymizationMapping.project_id == project_id)
@@ -685,7 +720,6 @@ class AnonymizationService:
         if not orphans:
             return {"resolved": 0, "suggestions": []}
 
-        # Get all chapters content to find context around placeholders
         from ..models.chapter import Chapter
         chapters_result = await db.execute(
             select(Chapter).where(Chapter.project_id == project_id)
@@ -696,7 +730,6 @@ class AnonymizationService:
         if not all_text:
             return {"resolved": 0, "suggestions": []}
 
-        # Also get existing resolved mappings as context for the AI
         all_mappings_result = await db.execute(
             select(AnonymizationMapping)
             .where(AnonymizationMapping.project_id == project_id)
@@ -708,7 +741,6 @@ class AnonymizationService:
             for m in resolved_mappings
         )
 
-        # Extract context around each orphan placeholder
         orphan_contexts = []
         for orphan in orphans:
             placeholder = orphan.anonymized_value
@@ -731,7 +763,6 @@ class AnonymizationService:
         if not orphan_contexts:
             return {"resolved": 0, "suggestions": []}
 
-        # Build the AI prompt
         system_prompt = """Tu es un expert en analyse de documents d'appels d'offres.
 
 On t'a fourni des textes contenant des marqueurs anonymisés ([ENTREPRISE_1], [PERSONNE_2], etc.).
@@ -778,11 +809,9 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
             )
             suggestions_data = _parse_json_array(raw_response) or []
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning("AI orphan resolution failed: %s", e)
+            logger.warning("AI orphan resolution failed: %s", e)
             return {"resolved": 0, "suggestions": []}
 
-        # Map suggestions back to orphan mappings
         orphan_by_placeholder = {o.anonymized_value: o for o in orphans}
         suggestions = []
         resolved = 0
@@ -815,19 +844,11 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
         project_id: uuid.UUID,
         db: AsyncSession,
     ) -> dict:
-        """Find and merge duplicate mappings that refer to the same real entity.
-
-        When the same entity is anonymized under multiple slugs (e.g. [ENTREPRISE_1]
-        and [ENTREPRISE_3] both mapping to "Capgemini"), merge them into one canonical
-        placeholder and update all content.
-
-        Returns: {"merged": int, "groups": [{"canonical": str, "merged_from": [str], "original_value": str}]}
-        """
+        """Find and merge duplicate mappings that refer to the same real entity."""
         from ..models.project import AnonymizationMapping
         from ..models.chapter import Chapter
         from ..models.document import Document, DocumentChunk
 
-        # Get all active mappings with a real value
         result = await db.execute(
             select(AnonymizationMapping)
             .where(AnonymizationMapping.project_id == project_id)
@@ -837,7 +858,6 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
         )
         mappings = result.scalars().all()
 
-        # Group by normalized original_value (lowercase, stripped)
         groups: dict = defaultdict(list)
         for m in mappings:
             key = m.original_value.strip().lower()
@@ -850,18 +870,15 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
             if len(group) < 2:
                 continue
 
-            # First mapping is canonical (oldest)
             canonical = group[0]
             duplicates = group[1:]
 
-            # Build replacement map: duplicate placeholder -> canonical placeholder
             replacements = {}
             merged_from = []
             for dup in duplicates:
                 replacements[dup.anonymized_value] = canonical.anonymized_value
                 merged_from.append(dup.anonymized_value)
 
-            # Update all chapter content
             chapters_result = await db.execute(
                 select(Chapter).where(Chapter.project_id == project_id)
             )
@@ -878,7 +895,6 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
                         ch.content = new_content
                         ch.anonymized_content = new_content
 
-            # Update document chunks
             chunks_result = await db.execute(
                 select(DocumentChunk)
                 .join(Document, Document.id == DocumentChunk.document_id)
@@ -896,7 +912,6 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
                     if changed:
                         chunk.anonymized_content = new_anon
 
-            # Deactivate duplicate mappings
             for dup in duplicates:
                 dup.is_active = False
 
@@ -919,12 +934,7 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
         project_id: uuid.UUID,
         db: AsyncSession,
     ) -> str:
-        """Replace known entities in text using existing DB mappings only (no NER).
-
-        This is much faster than ``anonymize_text`` because it skips GLiNER
-        inference entirely.  Useful for the full-document text after chunks
-        have already been processed through the full NER pipeline.
-        """
+        """Replace known entities in text using existing DB mappings only (no NER)."""
         if not text:
             return text
 
@@ -933,8 +943,6 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
             return text
 
         result = text
-        # Sort by length descending so longer originals are replaced first,
-        # avoiding partial matches (e.g. "Jean Dupont" before "Jean").
         for original, mapping in sorted(
             existing_mappings.items(), key=lambda x: len(x[0]), reverse=True
         ):
@@ -952,3 +960,42 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
     ) -> str:
         """Anonymize a user prompt before sending to AI."""
         return await cls.anonymize_text(prompt, project_id, db)
+
+
+def _parse_llm_json(raw: str) -> Optional[list]:
+    """Parse JSON from LLM response, handling common formatting issues."""
+    if not raw or not raw.strip():
+        return None
+
+    text = raw.strip()
+
+    # Remove markdown code block wrappers if present
+    if text.startswith("```"):
+        lines = text.split("\n")
+        # Remove first and last lines (``` markers)
+        lines = [l for l in lines if not l.strip().startswith("```")]
+        text = "\n".join(lines).strip()
+
+    # Try direct parse first
+    try:
+        data = json.loads(text)
+        if isinstance(data, list):
+            return data
+        # Some models wrap in {"entities": [...]} or {"results": [...]}
+        if isinstance(data, dict):
+            for key in ("entities", "results", "data", "items"):
+                if key in data and isinstance(data[key], list):
+                    return data[key]
+        return None
+    except json.JSONDecodeError:
+        pass
+
+    # Try to extract JSON array from the response
+    match = re.search(r'\[.*\]', text, re.DOTALL)
+    if match:
+        try:
+            return json.loads(match.group())
+        except json.JSONDecodeError:
+            pass
+
+    return None
