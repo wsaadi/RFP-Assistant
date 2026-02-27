@@ -2958,24 +2958,66 @@ async def re_anonymize_project(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Re-anonymize all document chunks and chapter content using current active mappings.
+    """Re-anonymize all document chunks and chapter content.
 
-    Also scans all chapter content for orphan placeholders (e.g. [ENTREPRISE_3])
-    that have no mapping and registers them so the user can fill in the real values.
+    Two-phase approach:
+    1. Run NER detection on document chunk content to discover new entities
+       and create mappings (this is the same detection done at upload time).
+    2. Apply all active mappings to document chunks and chapter content.
+
+    This works even after a full purge: NER re-discovers entities from scratch.
     """
     from ..services.anonymization_service import AnonymizationService
 
-    # Get ALL mappings (including empty ones) for orphan detection
+    # ── Phase 1: NER detection on document chunks (creates new mappings) ──
+    chunks_result = await db.execute(
+        select(DocumentChunk)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.project_id == project_id)
+    )
+    chunks = chunks_result.scalars().all()
+
+    chunk_texts = [chunk.content for chunk in chunks if chunk.content]
+    new_entities = 0
+    if chunk_texts:
+        # Count mappings before
+        before_count_result = await db.execute(
+            select(func.count(AnonymizationMapping.id))
+            .where(AnonymizationMapping.project_id == project_id)
+        )
+        before_count = before_count_result.scalar() or 0
+
+        # Run batch NER – this creates new mappings for any unseen entities
+        anonymized_texts = await AnonymizationService.anonymize_chunks_batch(
+            chunk_texts, project_id, db,
+        )
+        await db.flush()
+
+        # Count mappings after to report new discoveries
+        after_count_result = await db.execute(
+            select(func.count(AnonymizationMapping.id))
+            .where(AnonymizationMapping.project_id == project_id)
+        )
+        after_count = after_count_result.scalar() or 0
+        new_entities = after_count - before_count
+
+        # Save anonymized content on chunks
+        text_idx = 0
+        for chunk in chunks:
+            if chunk.content:
+                chunk.anonymized_content = anonymized_texts[text_idx]
+                text_idx += 1
+
+    # ── Phase 2: Apply all active mappings to chapters ──
+    # Re-read mappings (includes any just created by NER)
     all_mappings_result = await db.execute(
         select(AnonymizationMapping)
         .where(AnonymizationMapping.project_id == project_id)
+        .where(AnonymizationMapping.is_active == True)
     )
     all_mappings = all_mappings_result.scalars().all()
-    known_placeholders = {m.anonymized_value for m in all_mappings}
-
-    # Only use mappings that have a real original_value for replacement
     active_with_value = sorted(
-        [m for m in all_mappings if m.original_value and m.is_active],
+        [m for m in all_mappings if m.original_value],
         key=lambda m: len(m.original_value),
         reverse=True,
     )
@@ -2988,22 +3030,6 @@ async def re_anonymize_project(
             result_text = pattern.sub(m.anonymized_value, result_text)
         return result_text
 
-    # Re-anonymize document chunks
-    chunks_result = await db.execute(
-        select(DocumentChunk)
-        .join(Document, Document.id == DocumentChunk.document_id)
-        .where(Document.project_id == project_id)
-    )
-    chunks = chunks_result.scalars().all()
-    updated_chunks = 0
-    for chunk in chunks:
-        if chunk.content:
-            new_anon = apply_mappings(chunk.content)
-            if new_anon != chunk.anonymized_content:
-                chunk.anonymized_content = new_anon
-                updated_chunks += 1
-
-    # Re-anonymize chapter content (only anonymized_content – never touch ch.content)
     chapters_result = await db.execute(
         select(Chapter).where(Chapter.project_id == project_id)
     )
@@ -3016,42 +3042,12 @@ async def re_anonymize_project(
                 ch.anonymized_content = new_anon
                 updated_chapters += 1
 
-    # ── Scan ALL chapter content for orphan placeholders ──
-    # Collect all text to scan
-    all_chapter_text = "\n".join(ch.content for ch in chapters if ch.content)
-    registered_orphans = 0
-    if all_chapter_text:
-        orphans = AnonymizationService.find_unknown_placeholders(all_chapter_text, known_placeholders)
-        for token in orphans:
-            from ..services.anonymization_service import PREFIX_TO_ENTITY_TYPE
-            inner = token.strip("[]")
-            prefix = inner.rsplit("_", 1)[0]
-            entity_type = PREFIX_TO_ENTITY_TYPE.get(prefix, EntityType.OTHER)
-
-            existing = await db.execute(
-                select(AnonymizationMapping)
-                .where(AnonymizationMapping.project_id == project_id)
-                .where(AnonymizationMapping.anonymized_value == token)
-            )
-            if existing.scalars().first() is not None:
-                continue
-
-            new_mapping = AnonymizationMapping(
-                project_id=project_id,
-                entity_type=entity_type,
-                original_value="",
-                anonymized_value=token,
-                is_active=True,
-            )
-            db.add(new_mapping)
-            registered_orphans += 1
-
     await db.commit()
 
     return {
-        "updated_chunks": updated_chunks,
+        "updated_chunks": len(chunk_texts),
         "updated_chapters": updated_chapters,
-        "registered_orphans": registered_orphans,
+        "new_entities": new_entities,
     }
 
 
