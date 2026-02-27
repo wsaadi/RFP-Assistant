@@ -365,7 +365,7 @@ class AnonymizationService:
         model = cls._get_model()
         # GPU is not thread-safe → 1 worker.
         # CPU PyTorch benefits from thread-level parallelism → multiple workers.
-        n_workers = 1 if cls._device != "cpu" else min(os.cpu_count() or 4, 4)
+        n_workers = 1 if cls._device != "cpu" else min(os.cpu_count() or 2, 2)
         logger.warning("[batch_detect] GLiNER on %s, processing %d texts with %d parallel workers",
                        cls._device, len(texts), n_workers)
 

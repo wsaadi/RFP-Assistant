@@ -80,7 +80,7 @@ services:
       dockerfile: Dockerfile
     container_name: rfp-assistant-celery-worker
     restart: unless-stopped
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=2
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=1
     environment:
       - PYTHONUNBUFFERED=1
       - DATABASE_URL=postgresql+asyncpg://rfp_user:rfp_secret_password@db:5432/rfp_assistant
