@@ -1,4 +1,5 @@
 """Anonymization service using GLiNER for NER-based pseudonymization."""
+import asyncio
 import logging
 import os
 import re
@@ -371,8 +372,10 @@ class AnonymizationService:
         for mapping in existing_mappings.values():
             type_counts[mapping.entity_type] += 1
 
-        # Batch NER across all texts
-        all_entities = cls._batch_detect_entities(texts, progress_callback=progress_callback)
+        # Batch NER across all texts (run in thread to avoid blocking event loop)
+        all_entities = await asyncio.to_thread(
+            cls._batch_detect_entities, texts, progress_callback
+        )
 
         # Process each text
         results = []
