@@ -1,10 +1,11 @@
-"""AI service for Mistral API integration."""
+"""AI service for LLM integration (Mistral API + Ollama)."""
 import asyncio
 import json
 import logging
 import re
 from typing import Awaitable, Callable, List, Optional, Dict
 
+import httpx
 from mistralai import Mistral
 
 from ..models.project import AIConfig
@@ -163,9 +164,10 @@ class MistralAIService:
         self._client = Mistral(api_key=api_key)
 
     @classmethod
-    def from_config(cls, config: AIConfig, decrypted_key: str) -> "MistralAIService":
+    def from_config(cls, config: AIConfig, decrypted_key: str = "") -> "MistralAIService":
+        """Create from DB config. Prefer using create_ai_service() factory instead."""
         return cls(
-            api_key=decrypted_key,
+            api_key=decrypted_key or config.mistral_api_key_encrypted or "",
             model=config.model_name,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
@@ -1231,3 +1233,185 @@ async def run_parallel_ai_tasks(tasks: List[dict], ai_service: MistralAIService)
         for task in tasks
     ]
     return await asyncio.gather(*coroutines)
+
+
+# ── Ollama provider ─────────────────────────────────────────────────
+
+
+class OllamaAIService(MistralAIService):
+    """AI service using a local Ollama instance for generation.
+
+    Inherits all high-level methods (analyze_gap, generate_chapter_content, …)
+    from MistralAIService and overrides only the low-level generate /
+    generate_streaming / test_connection to call Ollama instead of Mistral.
+    """
+
+    def __init__(self, base_url: str = "http://host.docker.internal:11434",
+                 model: str = "mistral:latest",
+                 temperature: float = 0.3, max_tokens: int = 4096):
+        # Don't call super().__init__() — we don't need a Mistral client
+        self.base_url = base_url.rstrip("/")
+        self.model = model
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+
+    async def generate(
+        self, system_prompt: str, user_prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout: float = 300,
+    ) -> str:
+        """Generate text using Ollama HTTP API (non-streaming)."""
+        input_chars = len(system_prompt) + len(user_prompt)
+        effective_max = max_tokens or self.max_tokens
+        logger.info("Ollama call: ~%d input chars (~%d tokens), max_output=%d, model=%s",
+                     input_chars, input_chars // 4, effective_max, self.model)
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": False,
+            "options": {
+                "temperature": temperature or self.temperature,
+                "num_predict": effective_max,
+            },
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=30)) as client:
+                resp = await client.post(f"{self.base_url}/api/chat", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.TimeoutException:
+            logger.error("Ollama call timed out after %.0fs (input ~%d chars)", timeout, input_chars)
+            raise TimeoutError(f"L'appel Ollama a expiré après {timeout:.0f}s. Vérifiez que Ollama est démarré.")
+        except httpx.HTTPStatusError as exc:
+            logger.error("Ollama HTTP error %s: %s", exc.response.status_code, exc.response.text[:500])
+            raise RuntimeError(f"Erreur Ollama HTTP {exc.response.status_code}")
+        except httpx.ConnectError:
+            logger.error("Cannot connect to Ollama at %s", self.base_url)
+            raise RuntimeError(
+                f"Impossible de se connecter à Ollama ({self.base_url}). "
+                "Vérifiez que le serveur Ollama est démarré."
+            )
+
+        result = data.get("message", {}).get("content", "")
+        logger.info("Ollama response: %d chars (~%d tokens)", len(result), len(result) // 4)
+        return result
+
+    async def generate_streaming(
+        self, system_prompt: str, user_prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout: float = 600,
+        on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    ) -> str:
+        """Generate text using Ollama streaming API."""
+        import time
+
+        input_chars = len(system_prompt) + len(user_prompt)
+        effective_max = max_tokens or self.max_tokens
+        logger.info("Ollama STREAM call: ~%d input chars (~%d tokens), max_output=%d, model=%s",
+                     input_chars, input_chars // 4, effective_max, self.model)
+
+        payload = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "stream": True,
+            "options": {
+                "temperature": temperature or self.temperature,
+                "num_predict": effective_max,
+            },
+        }
+
+        t0 = time.monotonic()
+        chunks: list[str] = []
+        token_count = 0
+
+        try:
+            async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=60)) as client:
+                async with client.stream("POST", f"{self.base_url}/api/chat", json=payload) as resp:
+                    resp.raise_for_status()
+                    async for line in resp.aiter_lines():
+                        if time.monotonic() - t0 > timeout:
+                            logger.error("Ollama streaming timed out after %.0fs", timeout)
+                            raise TimeoutError(f"L'appel Ollama a expiré après {timeout:.0f}s.")
+
+                        if not line.strip():
+                            continue
+                        try:
+                            data = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+
+                        content = data.get("message", {}).get("content", "")
+                        if content:
+                            chunks.append(content)
+                            token_count += 1
+
+                            if on_progress and token_count % 50 == 0:
+                                total_chars = sum(len(c) for c in chunks)
+                                await on_progress(token_count, total_chars)
+
+                        if data.get("done", False):
+                            break
+
+        except httpx.TimeoutException:
+            logger.error("Ollama stream timed out after %.0fs", timeout)
+            raise TimeoutError(f"L'appel Ollama a expiré après {timeout:.0f}s.")
+        except httpx.ConnectError:
+            logger.error("Cannot connect to Ollama at %s", self.base_url)
+            raise RuntimeError(
+                f"Impossible de se connecter à Ollama ({self.base_url}). "
+                "Vérifiez que le serveur Ollama est démarré."
+            )
+
+        result = "".join(chunks)
+        elapsed = time.monotonic() - t0
+        logger.info("Ollama stream done: %d tokens, %d chars in %.1fs (%.0f tok/s)",
+                     token_count, len(result), elapsed,
+                     token_count / elapsed if elapsed > 0 else 0)
+        return result
+
+    async def test_connection(self) -> str:
+        """Test the Ollama connection."""
+        return await self.generate(
+            "Tu es un assistant utile.",
+            "Réponds simplement 'Connexion Ollama réussie'.",
+            temperature=0.1,
+            timeout=30,
+        )
+
+
+# ── Provider factory ────────────────────────────────────────────────
+
+
+def create_ai_service(config: AIConfig) -> MistralAIService:
+    """Factory: create the right AI service based on provider config.
+
+    Returns a MistralAIService (Mistral API) or OllamaAIService (local Ollama).
+    Both expose the same interface (OllamaAIService inherits MistralAIService).
+    """
+    provider = getattr(config, "provider", "mistral") or "mistral"
+    if provider == "ollama":
+        base_url = getattr(config, "ollama_base_url", None) or "http://host.docker.internal:11434"
+        model = getattr(config, "ollama_model", None) or "mistral:latest"
+        return OllamaAIService(
+            base_url=base_url,
+            model=model,
+            temperature=config.temperature,
+            max_tokens=config.max_tokens,
+        )
+    # Default: Mistral
+    return MistralAIService(
+        api_key=config.mistral_api_key_encrypted or "",
+        model=config.model_name,
+        temperature=config.temperature,
+        max_tokens=config.max_tokens,
+    )

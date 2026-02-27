@@ -27,7 +27,7 @@ from ..schemas.document import (
     AnonymizationMappingCreate, AnonymizationMappingUpdate,
 )
 from ..schemas.response_document import ResponseDocumentOut, ResponseDocumentUpdate, BulkUpdateSelectionRequest
-from ..services.ai_service import MistralAIService
+from ..services.ai_service import MistralAIService, create_ai_service
 from ..services.vector_service import VectorService
 from ..services.anonymization_service import AnonymizationService
 from ..services.progress_service import set_progress, get_or_idle
@@ -53,12 +53,18 @@ async def _get_ai_service(workspace_id: uuid.UUID, db: AsyncSession) -> MistralA
         select(AIConfig).where(AIConfig.workspace_id == workspace_id)
     )
     config = result.scalar_one_or_none()
-    if not config or not config.mistral_api_key_encrypted:
+    if not config:
         raise HTTPException(
             status_code=400,
-            detail="Configuration IA non définie. Configurez la clé API Mistral dans l'administration.",
+            detail="Configuration IA non définie. Configurez le fournisseur IA dans l'administration.",
         )
-    return MistralAIService.from_config(config, config.mistral_api_key_encrypted)
+    provider = getattr(config, "provider", "mistral") or "mistral"
+    if provider == "mistral" and not config.mistral_api_key_encrypted:
+        raise HTTPException(
+            status_code=400,
+            detail="Clé API Mistral non configurée. Configurez-la dans l'administration.",
+        )
+    return create_ai_service(config)
 
 
 @router.get("/workspace/{workspace_id}", response_model=list[ProjectOut])

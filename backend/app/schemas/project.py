@@ -51,17 +51,23 @@ class ProjectOut(BaseModel):
 
 
 class AIConfigUpdate(BaseModel):
-    mistral_api_key: str = Field(..., min_length=1)
+    provider: str = "mistral"  # "mistral" or "ollama"
+    mistral_api_key: str = ""
     model_name: str = "mistral-large-latest"
     temperature: float = Field(0.3, ge=0.0, le=1.0)
     max_tokens: int = Field(4096, ge=256, le=32000)
+    ollama_base_url: str = "http://host.docker.internal:11434"
+    ollama_model: str = "mistral:latest"
 
 
 class AIConfigOut(BaseModel):
+    provider: str = "mistral"
     model_name: str
     temperature: float
     max_tokens: int
     has_api_key: bool
+    ollama_base_url: str = "http://host.docker.internal:11434"
+    ollama_model: str = "mistral:latest"
 
     model_config = {"from_attributes": True}
 

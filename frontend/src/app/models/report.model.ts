@@ -254,18 +254,24 @@ export interface ProjectStatistics {
 
 // ── AI Config ──
 export interface AIConfig {
+  provider: string;
   mistral_api_key?: string;
   model_name: string;
   temperature: number;
   max_tokens: number;
   has_api_key?: boolean;
+  ollama_base_url: string;
+  ollama_model: string;
 }
 
 export interface AIConfigUpdate {
+  provider: string;
   mistral_api_key: string;
   model_name: string;
   temperature: number;
   max_tokens: number;
+  ollama_base_url: string;
+  ollama_model: string;
 }
 
 // ── Anonymization ──

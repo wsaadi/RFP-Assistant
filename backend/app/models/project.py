@@ -142,10 +142,13 @@ class AIConfig(Base):
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, unique=True
     )
-    mistral_api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=False)
+    provider: Mapped[str] = mapped_column(String(20), default="mistral")  # "mistral" or "ollama"
+    mistral_api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=True, default="")
     model_name: Mapped[str] = mapped_column(String(100), default="mistral-large-latest")
     temperature: Mapped[float] = mapped_column(Float, default=0.3)
     max_tokens: Mapped[int] = mapped_column(Integer, default=4096)
+    ollama_base_url: Mapped[str] = mapped_column(String(500), default="http://host.docker.internal:11434")
+    ollama_model: Mapped[str] = mapped_column(String(100), default="mistral:latest")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

@@ -9,6 +9,9 @@ import { MatInputModule } from '@angular/material/input';
 import { MatSelectModule } from '@angular/material/select';
 import { MatSliderModule } from '@angular/material/slider';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatRadioModule } from '@angular/material/radio';
+import { MatDividerModule } from '@angular/material/divider';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { ApiService } from '../../services/api.service';
 import { AIConfigUpdate } from '../../models/report.model';
 
@@ -19,6 +22,7 @@ import { AIConfigUpdate } from '../../models/report.model';
     CommonModule, FormsModule, RouterLink,
     MatCardModule, MatButtonModule, MatIconModule, MatInputModule,
     MatSelectModule, MatSliderModule, MatSnackBarModule,
+    MatRadioModule, MatDividerModule, MatTooltipModule,
   ],
   template: `
     <div class="page-container">
@@ -27,7 +31,38 @@ import { AIConfigUpdate } from '../../models/report.model';
         <h1>Configuration IA</h1>
       </div>
 
-      <mat-card class="config-card">
+      <!-- Provider Selection -->
+      <mat-card class="config-card provider-card">
+        <h3><mat-icon>hub</mat-icon> Fournisseur IA pour la génération</h3>
+        <p class="provider-hint">Choisissez le fournisseur utilisé pour générer le contenu des réponses.</p>
+
+        <mat-radio-group [(ngModel)]="config.provider" class="provider-radio-group">
+          <div class="provider-option" [class.selected]="config.provider === 'mistral'"
+               (click)="config.provider = 'mistral'">
+            <mat-radio-button value="mistral">
+              <div class="provider-label">
+                <strong>Mistral AI</strong>
+                <span class="provider-tag api-tag">API Cloud</span>
+              </div>
+            </mat-radio-button>
+            <p class="provider-desc">API cloud Mistral — modèles puissants, nécessite une clé API et une connexion internet.</p>
+          </div>
+
+          <div class="provider-option" [class.selected]="config.provider === 'ollama'"
+               (click)="config.provider = 'ollama'">
+            <mat-radio-button value="ollama">
+              <div class="provider-label">
+                <strong>Ollama</strong>
+                <span class="provider-tag local-tag">Local</span>
+              </div>
+            </mat-radio-button>
+            <p class="provider-desc">Serveur Ollama local — modèles open-source, pas de clé API, données 100% en local.</p>
+          </div>
+        </mat-radio-group>
+      </mat-card>
+
+      <!-- Mistral Configuration -->
+      <mat-card class="config-card" *ngIf="config.provider === 'mistral'">
         <h3><mat-icon>smart_toy</mat-icon> Paramètres Mistral AI</h3>
 
         <div class="form-section">
@@ -47,7 +82,45 @@ import { AIConfigUpdate } from '../../models/report.model';
               <mat-option value="codestral-latest">Codestral</mat-option>
             </mat-select>
           </mat-form-field>
+        </div>
+      </mat-card>
 
+      <!-- Ollama Configuration -->
+      <mat-card class="config-card" *ngIf="config.provider === 'ollama'">
+        <h3><mat-icon>dns</mat-icon> Paramètres Ollama</h3>
+
+        <div class="form-section">
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>URL du serveur Ollama</mat-label>
+            <input matInput [(ngModel)]="config.ollama_base_url" placeholder="http://localhost:11434">
+            <mat-icon matSuffix>link</mat-icon>
+            <mat-hint>Adresse du serveur Ollama (ex: http://localhost:11434)</mat-hint>
+          </mat-form-field>
+
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Modèle Ollama</mat-label>
+            <mat-select [(ngModel)]="config.ollama_model">
+              <mat-option value="mistral:latest">Mistral 7B (recommandé)</mat-option>
+              <mat-option value="mistral-nemo:latest">Mistral Nemo 12B</mat-option>
+              <mat-option value="mixtral:latest">Mixtral 8x7B</mat-option>
+              <mat-option value="llama3.1:latest">Llama 3.1 8B</mat-option>
+              <mat-option value="llama3.1:70b">Llama 3.1 70B</mat-option>
+              <mat-option value="qwen2.5:latest">Qwen 2.5 7B</mat-option>
+              <mat-option value="qwen2.5:32b">Qwen 2.5 32B</mat-option>
+              <mat-option value="gemma3:12b">Gemma 3 12B</mat-option>
+              <mat-option value="deepseek-r1:latest">DeepSeek R1</mat-option>
+              <mat-option value="command-r:latest">Command R</mat-option>
+            </mat-select>
+            <mat-hint>Assurez-vous que le modèle est téléchargé: ollama pull {{ config.ollama_model }}</mat-hint>
+          </mat-form-field>
+        </div>
+      </mat-card>
+
+      <!-- Common Parameters -->
+      <mat-card class="config-card">
+        <h3><mat-icon>tune</mat-icon> Paramètres de génération</h3>
+
+        <div class="form-section">
           <div class="slider-field">
             <label>Température: {{ config.temperature }}</label>
             <mat-slider min="0" max="1" step="0.05" discrete>
@@ -75,20 +148,24 @@ import { AIConfigUpdate } from '../../models/report.model';
         <h3><mat-icon>info</mat-icon> Informations</h3>
         <div class="info-grid">
           <div class="info-item">
-            <strong>Fournisseur IA</strong>
-            <span>Mistral AI (exclusivement)</span>
+            <strong>Fournisseur actif</strong>
+            <span>{{ config.provider === 'ollama' ? 'Ollama (local)' : 'Mistral AI (cloud)' }}</span>
           </div>
           <div class="info-item">
             <strong>Anonymisation</strong>
-            <span>GLiNER2 - Reconnaissance d'entités nommées locale</span>
+            <span>Ollama NER — Reconnaissance d'entités nommées locale</span>
           </div>
           <div class="info-item">
             <strong>Base vectorielle</strong>
-            <span>ChromaDB - Indexation et recherche sémantique</span>
+            <span>ChromaDB — Indexation et recherche sémantique</span>
           </div>
-          <div class="info-item">
+          <div class="info-item" *ngIf="config.provider === 'mistral'">
             <strong>Modèle recommandé</strong>
             <span>mistral-large-latest pour la meilleure qualité de rédaction</span>
+          </div>
+          <div class="info-item" *ngIf="config.provider === 'ollama'">
+            <strong>Modèle recommandé</strong>
+            <span>mistral:latest ou mixtral:latest pour un bon compromis qualité/vitesse</span>
           </div>
         </div>
       </mat-card>
@@ -113,15 +190,45 @@ import { AIConfigUpdate } from '../../models/report.model';
     .info-item { display: flex; flex-direction: column; gap: 4px; }
     .info-item strong { color: #1B3A5C; font-size: 13px; }
     .info-item span { color: #666; font-size: 14px; }
+
+    /* Provider selection */
+    .provider-hint { color: #666; font-size: 14px; margin: 0 0 16px; }
+    .provider-radio-group { display: flex; flex-direction: column; gap: 12px; }
+    .provider-option {
+      border: 2px solid #e0e0e0;
+      border-radius: 12px;
+      padding: 16px 20px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .provider-option:hover { border-color: #90caf9; background: #fafafa; }
+    .provider-option.selected { border-color: #1B3A5C; background: #f0f4f8; }
+    .provider-label { display: flex; align-items: center; gap: 10px; }
+    .provider-label strong { font-size: 15px; color: #1B3A5C; }
+    .provider-tag {
+      display: inline-block;
+      padding: 2px 10px;
+      border-radius: 12px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .api-tag { background: #e3f2fd; color: #1565c0; }
+    .local-tag { background: #e8f5e9; color: #2e7d32; }
+    .provider-desc { margin: 8px 0 0 32px; color: #777; font-size: 13px; }
   `],
 })
 export class AdminSettingsComponent implements OnInit {
   workspaceId = '';
   config: AIConfigUpdate = {
+    provider: 'mistral',
     mistral_api_key: '',
     model_name: 'mistral-large-latest',
     temperature: 0.3,
     max_tokens: 4096,
+    ollama_base_url: 'http://host.docker.internal:11434',
+    ollama_model: 'mistral:latest',
   };
 
   constructor(
@@ -141,10 +248,13 @@ export class AdminSettingsComponent implements OnInit {
     this.api.getAIConfig(this.workspaceId).subscribe({
       next: (cfg: any) => {
         this.config = {
+          provider: cfg.provider || 'mistral',
           mistral_api_key: cfg.mistral_api_key || '',
           model_name: cfg.model_name || 'mistral-large-latest',
           temperature: cfg.temperature ?? 0.3,
           max_tokens: cfg.max_tokens || 4096,
+          ollama_base_url: cfg.ollama_base_url || 'http://host.docker.internal:11434',
+          ollama_model: cfg.ollama_model || 'mistral:latest',
         };
       },
       error: () => {

@@ -152,17 +152,23 @@ async def update_ai_config(
     config = result.scalar_one_or_none()
 
     if config:
+        config.provider = request.provider
         config.mistral_api_key_encrypted = request.mistral_api_key  # TODO: encrypt in production
         config.model_name = request.model_name
         config.temperature = request.temperature
         config.max_tokens = request.max_tokens
+        config.ollama_base_url = request.ollama_base_url
+        config.ollama_model = request.ollama_model
     else:
         config = AIConfig(
             workspace_id=workspace_id,
+            provider=request.provider,
             mistral_api_key_encrypted=request.mistral_api_key,
             model_name=request.model_name,
             temperature=request.temperature,
             max_tokens=request.max_tokens,
+            ollama_base_url=request.ollama_base_url,
+            ollama_model=request.ollama_model,
         )
         db.add(config)
 
@@ -170,10 +176,13 @@ async def update_ai_config(
     await db.refresh(config)
 
     return AIConfigOut(
+        provider=config.provider or "mistral",
         model_name=config.model_name,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         has_api_key=bool(config.mistral_api_key_encrypted),
+        ollama_base_url=config.ollama_base_url or "http://host.docker.internal:11434",
+        ollama_model=config.ollama_model or "mistral:latest",
     )
 
 
@@ -191,15 +200,21 @@ async def get_ai_config(
 
     if not config:
         return AIConfigOut(
+            provider="mistral",
             model_name="mistral-large-latest",
             temperature=0.3,
             max_tokens=4096,
             has_api_key=False,
+            ollama_base_url="http://host.docker.internal:11434",
+            ollama_model="mistral:latest",
         )
 
     return AIConfigOut(
+        provider=config.provider or "mistral",
         model_name=config.model_name,
         temperature=config.temperature,
         max_tokens=config.max_tokens,
         has_api_key=bool(config.mistral_api_key_encrypted),
+        ollama_base_url=config.ollama_base_url or "http://host.docker.internal:11434",
+        ollama_model=config.ollama_model or "mistral:latest",
     )
