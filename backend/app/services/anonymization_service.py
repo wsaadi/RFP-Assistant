@@ -97,14 +97,7 @@ class AnonymizationService:
             use_onnx = settings.gliner_use_onnx
 
             if use_onnx:
-                logger.info("Loading GLiNER model (ONNX): %s ...", settings.gliner_model)
-                cls._model = GLiNER.from_pretrained(
-                    settings.gliner_model,
-                    load_onnx_model=True,
-                    load_tokenizer=True,
-                )
-                cls._using_onnx = True
-                logger.info("GLiNER ONNX model loaded successfully")
+                cls._model = cls._load_onnx_model(GLiNER, settings.gliner_model)
             else:
                 logger.info("Loading GLiNER model: %s on device: %s ...", settings.gliner_model, cls._device)
                 cls._model = GLiNER.from_pretrained(settings.gliner_model)
@@ -116,6 +109,62 @@ class AnonymizationService:
             cls._model = None
             cls._model_load_failed = True
         return cls._model
+
+    @classmethod
+    def _load_onnx_model(cls, GLiNER, model_name: str):
+        """Load GLiNER as ONNX, converting from PyTorch on first run."""
+        from huggingface_hub import hf_hub_download, HfFileSystemResolvedPath
+        import pathlib
+
+        # Find the cached model snapshot dir
+        try:
+            # hf_hub_download returns the path to a file; we just need the snapshot dir
+            config_path = hf_hub_download(model_name, "gliner_config.json")
+            snapshot_dir = pathlib.Path(config_path).parent
+        except Exception:
+            # Fallback: load PyTorch model to trigger download, then find dir
+            logger.info("Downloading model %s ...", model_name)
+            tmp_model = GLiNER.from_pretrained(model_name)
+            snapshot_dir = None
+            # Try common HF cache locations
+            import glob
+            hf_home = os.environ.get("HF_HOME", os.path.expanduser("~/.cache/huggingface"))
+            pattern = os.path.join(hf_home, "hub", f"models--{model_name.replace('/', '--')}", "snapshots", "*")
+            dirs = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
+            if dirs:
+                snapshot_dir = pathlib.Path(dirs[0])
+            if not snapshot_dir:
+                logger.warning("Could not find snapshot dir, falling back to PyTorch")
+                return tmp_model
+
+        onnx_path = snapshot_dir / "model.onnx"
+
+        if not onnx_path.exists():
+            logger.info("ONNX model not found at %s, converting from PyTorch (one-time)...", onnx_path)
+            # Load PyTorch model to convert
+            pt_model = GLiNER.from_pretrained(model_name)
+            try:
+                from gliner.model import convert_to_onnx
+                convert_to_onnx(pt_model.model, str(snapshot_dir))
+                logger.info("ONNX conversion complete: %s", onnx_path)
+            except (ImportError, AttributeError):
+                # Fallback: use save_pretrained with onnx flag if available
+                try:
+                    pt_model.save_pretrained(str(snapshot_dir), save_onnx=True)
+                    logger.info("ONNX export via save_pretrained complete")
+                except Exception as e2:
+                    logger.warning("Could not convert to ONNX (%s), falling back to PyTorch", e2)
+                    return pt_model
+
+        logger.info("Loading GLiNER ONNX model from %s ...", snapshot_dir)
+        model = GLiNER.from_pretrained(
+            str(snapshot_dir),
+            load_onnx_model=True,
+            load_tokenizer=True,
+        )
+        cls._using_onnx = True
+        logger.info("GLiNER ONNX model loaded successfully")
+        return model
 
     @classmethod
     def is_ner_available(cls) -> bool:
