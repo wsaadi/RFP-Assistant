@@ -66,6 +66,20 @@ class AnonymizationService:
 
     _model = None
     _model_load_failed = False  # sentinel to avoid retrying a broken model
+    _device = "cpu"  # "cpu", "mps" (Apple Silicon), or "cuda"
+
+    @classmethod
+    def _detect_device(cls) -> str:
+        """Pick the best available device for inference."""
+        try:
+            import torch
+            if torch.cuda.is_available():
+                return "cuda"
+            if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                return "mps"
+        except ImportError:
+            pass
+        return "cpu"
 
     @classmethod
     def _get_model(cls):
@@ -77,9 +91,12 @@ class AnonymizationService:
         try:
             from gliner import GLiNER
             from ..config import settings
-            logger.info("Loading GLiNER model: %s ...", settings.gliner_model)
+            cls._device = cls._detect_device()
+            logger.info("Loading GLiNER model: %s on device: %s ...", settings.gliner_model, cls._device)
             cls._model = GLiNER.from_pretrained(settings.gliner_model)
-            logger.info("GLiNER model loaded successfully")
+            if cls._device != "cpu":
+                cls._model = cls._model.to(cls._device)
+            logger.info("GLiNER model loaded successfully on %s", cls._device)
         except Exception as e:
             logger.error("Could not load GLiNER model: %s", e, exc_info=True)
             cls._model = None
@@ -160,17 +177,18 @@ class AnonymizationService:
 
         return entities
 
-    # Number of parallel workers for NER inference.
-    # PyTorch releases the GIL during tensor ops, so threads give real speedup.
-    _NER_WORKERS = min(os.cpu_count() or 4, 4)
-
     @classmethod
     def _batch_detect_entities(
         cls,
         texts: List[str],
         progress_callback=None,
     ) -> List[List[Tuple[str, str, int, int]]]:
-        """Detect entities across multiple texts using parallel GLiNER inference.
+        """Detect entities across multiple texts using GLiNER inference.
+
+        On CPU: uses ThreadPoolExecutor for parallel processing (PyTorch
+        releases the GIL during tensor ops so threads give real speedup).
+        On GPU/MPS: single-threaded (GPU inference is not thread-safe but
+        is fast enough that parallelism isn't needed).
 
         Args:
             texts: List of texts to analyze.
@@ -181,8 +199,10 @@ class AnonymizationService:
         seen: List[set] = [set() for _ in texts]
 
         model = cls._get_model()
-        logger.debug("[batch_detect] GLiNER model available: %s, processing %d texts with %d workers",
-                     model is not None, len(texts), cls._NER_WORKERS)
+        # GPU is not thread-safe; use 1 worker. CPU benefits from parallelism.
+        n_workers = 1 if cls._device != "cpu" else min(os.cpu_count() or 4, 4)
+        logger.debug("[batch_detect] GLiNER on %s, processing %d texts with %d workers",
+                     cls._device, len(texts), n_workers)
 
         if model is not None:
             done_count = 0
@@ -191,7 +211,7 @@ class AnonymizationService:
                 """Run prediction for a single text (called from thread)."""
                 return text_idx, cls._predict_on_segments(model, text)
 
-            with ThreadPoolExecutor(max_workers=cls._NER_WORKERS) as pool:
+            with ThreadPoolExecutor(max_workers=n_workers) as pool:
                 futures = {
                     pool.submit(_process_one, idx, text): idx
                     for idx, text in enumerate(texts)
