@@ -1,7 +1,9 @@
 """Anonymization service using GLiNER for NER-based pseudonymization."""
 import logging
+import os
 import re
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Dict, List, Tuple, Optional
 from collections import defaultdict
 
@@ -158,40 +160,57 @@ class AnonymizationService:
 
         return entities
 
+    # Number of parallel workers for NER inference.
+    # PyTorch releases the GIL during tensor ops, so threads give real speedup.
+    _NER_WORKERS = min(os.cpu_count() or 4, 4)
+
     @classmethod
     def _batch_detect_entities(
         cls,
         texts: List[str],
         progress_callback=None,
     ) -> List[List[Tuple[str, str, int, int]]]:
-        """Detect entities across multiple texts using GLiNER inference.
+        """Detect entities across multiple texts using parallel GLiNER inference.
 
         Args:
             texts: List of texts to analyze.
             progress_callback: Optional callable(current_idx, total) called
-                after each text is processed, for progress reporting.
+                as texts are processed, for progress reporting.
         """
         results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
         seen: List[set] = [set() for _ in texts]
 
         model = cls._get_model()
-        logger.debug("[batch_detect] GLiNER model available: %s, processing %d texts", model is not None, len(texts))
+        logger.debug("[batch_detect] GLiNER model available: %s, processing %d texts with %d workers",
+                     model is not None, len(texts), cls._NER_WORKERS)
 
         if model is not None:
-            # Process each text individually using single-text predict_entities
-            # (the batch/list API doesn't work reliably with all GLiNER versions)
-            for text_idx, text in enumerate(texts):
-                try:
-                    text_entities = cls._predict_on_segments(model, text)
-                    for entity_text, label, start, end in text_entities:
-                        key = (entity_text, start)
-                        if key not in seen[text_idx]:
-                            seen[text_idx].add(key)
-                            results[text_idx].append((entity_text, label, start, end))
-                except Exception as e:
-                    logger.error("GLiNER prediction error on text %d: %s", text_idx, e)
-                if progress_callback is not None:
-                    progress_callback(text_idx + 1, len(texts))
+            done_count = 0
+
+            def _process_one(text_idx: int, text: str):
+                """Run prediction for a single text (called from thread)."""
+                return text_idx, cls._predict_on_segments(model, text)
+
+            with ThreadPoolExecutor(max_workers=cls._NER_WORKERS) as pool:
+                futures = {
+                    pool.submit(_process_one, idx, text): idx
+                    for idx, text in enumerate(texts)
+                }
+                for future in as_completed(futures):
+                    text_idx = futures[future]
+                    try:
+                        _, text_entities = future.result()
+                        for entity_text, label, start, end in text_entities:
+                            key = (entity_text, start)
+                            if key not in seen[text_idx]:
+                                seen[text_idx].add(key)
+                                results[text_idx].append((entity_text, label, start, end))
+                    except Exception as e:
+                        logger.error("GLiNER prediction error on text %d: %s", text_idx, e)
+
+                    done_count += 1
+                    if progress_callback is not None:
+                        progress_callback(done_count, len(texts))
 
         total_entities = sum(len(r) for r in results)
         logger.debug("[batch_detect] Total entities detected: %d across %d texts", total_entities, len(texts))
