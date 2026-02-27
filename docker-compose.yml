@@ -38,6 +38,7 @@ services:
       - CHROMA_PERSIST_DIR=/app/data/chroma
       - HF_TOKEN=${HF_TOKEN:-}
       - HF_HOME=/app/data/huggingface
+      - GLINER_USE_ONNX=${GLINER_USE_ONNX:-false}
     volumes:
       - backend_data:/app/data
     ports:
