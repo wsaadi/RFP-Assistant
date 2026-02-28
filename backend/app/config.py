@@ -31,9 +31,9 @@ class Settings(BaseSettings):
     # Ollama (local LLM for anonymization NER)
     # Ollama on DGX Spark — routed via host.docker.internal (Mac → socat → DGX)
     ollama_base_url: str = "http://host.docker.internal:11434"
-    ollama_ner_model: str = "gemma3:4b"
-    ollama_ner_timeout: int = 60
-    ollama_ner_concurrency: int = 3
+    ollama_ner_model: str = "qwen2.5:14b"
+    ollama_ner_timeout: int = 120
+    ollama_ner_concurrency: int = 2
 
     # Ollama (generation provider — alternative to Mistral)
     ollama_gen_model: str = "mistral:latest"

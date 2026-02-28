@@ -15,6 +15,7 @@ class DocumentCategory(str, enum.Enum):
     OLD_RESPONSE = "old_response"
     NEW_RFP = "new_rfp"
     NEW_RESPONSE = "new_response"
+    INSPIRATION = "inspiration"
 
 
 class FileType(str, enum.Enum):

@@ -1,10 +1,10 @@
-"""Anonymization service using a local LLM (Gemma 2B via Ollama) for NER-based pseudonymization.
+"""Anonymization service using a local LLM (Qwen2.5 14B via Ollama) for NER-based pseudonymization.
 
-Replaces GLiNER with a small LLM that understands context, drastically reducing
-false positives (e.g., "Business Développement Manager" detected as a person name).
+Uses a capable 14B-parameter model for accurate context-aware entity detection,
+including short company names/acronyms (e.g., "EDF" alone, not just "EDF SA").
 
 Architecture:
-- Primary: Ollama running on the host machine (GPU-accelerated via Metal on Mac)
+- Primary: Ollama running on DGX Spark (GPU-accelerated)
 - Fallback: Regex-only detection if Ollama is unavailable
 
 The LLM receives a focused prompt asking it to extract ONLY real sensitive entities
@@ -32,10 +32,10 @@ logger = logging.getLogger(__name__)
 # Ollama runs on the DGX Spark — Docker containers reach it via
 # host.docker.internal (Mac host forwards port 11434 to DGX via socat).
 _OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
-_OLLAMA_MODEL = os.environ.get("OLLAMA_NER_MODEL", "gemma3:4b")
-_OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_NER_TIMEOUT", "60"))
+_OLLAMA_MODEL = os.environ.get("OLLAMA_NER_MODEL", "qwen2.5:14b")
+_OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_NER_TIMEOUT", "120"))
 # Maximum concurrent requests to Ollama (avoid overloading)
-_OLLAMA_CONCURRENCY = int(os.environ.get("OLLAMA_NER_CONCURRENCY", "3"))
+_OLLAMA_CONCURRENCY = int(os.environ.get("OLLAMA_NER_CONCURRENCY", "2"))
 # Number of chunks grouped into a single LLM call.
 # 4 chunks × ~300 words = ~1200 words ≈ 1600 tokens — well within model capacity.
 # Reduces total LLM calls by ~75% since the system prompt is only sent once per group.
@@ -54,7 +54,14 @@ Ta mission : extraire UNIQUEMENT les vraies données sensibles qui doivent être
 
 EXTRAIRE (entités sensibles réelles) :
 - "person" : Vrais noms et prénoms de personnes physiques (ex: "Jean Dupont", "Marie-Claire Martin"). Un nom de personne contient TOUJOURS au minimum un prénom ET un nom de famille, tous deux avec une majuscule.
-- "company" : Vrais noms d'entreprises et organisations privées (ex: "Capgemini", "Sopra Steria", "Orange Business Services"). PAS les institutions publiques connues.
+- "company" : Vrais noms d'entreprises et organisations privées, Y COMPRIS les noms courts, acronymes et sigles d'entreprises. Exemples :
+  - Noms complets : "Capgemini", "Sopra Steria", "Orange Business Services", "Accenture"
+  - Noms courts / sigles : "EDF", "SFR", "Atos", "Engie", "SNCF", "TotalEnergies", "BNP Paribas"
+  - Avec forme juridique OU sans : "EDF SA" ET "EDF" doivent TOUS DEUX être extraits
+  - Groupements hospitaliers, centrales d'achat : "RESAH", "UniHA", "UGAP" (sauf s'ils sont le client de l'AO en cours)
+  - Media / autres : "MediaTV", "TF1", "Canal+"
+  IMPORTANT : si "EDF SA" apparaît, extrais AUSSI "EDF" quand il apparaît seul. Ne rate pas les formes courtes d'un nom d'entreprise.
+  PAS les institutions publiques connues de l'État (CNIL, ANSSI, DINUM, etc.).
 - "email" : Adresses email complètes
 - "address" : Adresses postales physiques complètes (avec numéro, rue, ville)
 - "project_code" : Codes de référence de projet ou d'appel d'offres spécifiques (ex: "AO-2024-0847", "PRJ-FR-2025")
@@ -63,20 +70,24 @@ NE PAS EXTRAIRE (liste non exhaustive) :
 - Titres et fonctions : directeur, chef de projet, responsable, DPO, DSI, RSSI, Business Development Manager, consultant, architecte, ingénieur, pilote, référent, coordinateur...
 - Rôles contractuels : titulaire, prestataire, candidat, sous-traitant, bénéficiaire, attributaire, mandataire, acheteur, maître d'ouvrage, cotraitant...
 - Termes génériques : personne, client, fournisseur, partenaire, membre, tiers, autorité, entité, structure, service, direction, utilisateur...
-- Institutions publiques : CNIL, ANSSI, DINUM, ARCEP, Légifrance, État, République française, Union européenne...
+- Institutions publiques d'État : CNIL, ANSSI, DINUM, ARCEP, Légifrance, État, République française, Union européenne...
 - Termes juridiques : CCAG, CCAP, CCTP, RGPD, RGAA, code du travail, code de la commande publique, article X...
 - Standards et normes : ISO 27001, NF EN, AFNOR, W3C, RGS, RGI...
-- Technologies : IaaS, PaaS, SaaS, TMA, AMOA, cloud, datacenter...
+- Technologies et acronymes techniques : IaaS, PaaS, SaaS, TMA, AMOA, cloud, datacenter, API, SQL, CRM, ERP...
 - Termes civilités seuls : Monsieur, Madame, M., Mme (sauf si suivis d'un vrai nom)
 - Noms de pays/villes courants : France, Paris, Europe...
 - Mots en minuscules : un vrai nom propre commence TOUJOURS par une majuscule
 
 IMPORTANT :
-- En cas de doute, NE PAS extraire. Mieux vaut rater une entité que créer un faux positif.
+- Pour les entreprises : extrais TOUTES les formes du nom (courte ET longue). "EDF SA" et "EDF" sont deux occurrences à extraire séparément.
+- En cas de doute sur une entreprise connue, EXTRAIRE. Mieux vaut un faux positif entreprise qu'un oubli.
+- En cas de doute sur un rôle/titre, NE PAS extraire.
 - "Responsable de la sécurité" → NE PAS extraire (c'est un rôle)
 - "Pierre Durand, responsable de la sécurité" → extraire UNIQUEMENT "Pierre Durand"
 - "le prestataire" → NE PAS extraire
 - "la société Atos" → extraire "Atos"
+- "un contrat avec EDF" → extraire "EDF"
+- "EDF SA, filiale du groupe EDF" → extraire "EDF SA" ET "EDF"
 
 Le texte peut contenir plusieurs blocs séparés par "--- BLOC N ---".
 Dans ce cas, ajoute le numéro du bloc dans ta réponse.

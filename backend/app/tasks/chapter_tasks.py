@@ -105,11 +105,14 @@ async def _run_chapter_generation(
             else:
                 old_response_content = ""
                 context_chunks_text = ""
+                inspiration_content = ""
 
                 if proj_context_mode == "full":
                     _update("loading", 10, "Chargement du contexte complet...")
                     old_response_content = await _get_full_text_anon(db, project_id, DocumentCategory.OLD_RESPONSE) if use_old_response else ""
                     context_chunks_text = await _get_full_text_anon(db, project_id, DocumentCategory.NEW_RFP)
+                    # Also load inspiration documents (always anonymized)
+                    inspiration_content = await _get_full_text_anon(db, project_id, DocumentCategory.INSPIRATION)
                 else:
                     _update("searching", 10, "Recherche de contenu pertinent...")
                     search_results = []
@@ -124,6 +127,12 @@ async def _run_chapter_generation(
                         f"{ch_title} {ch_rfp_requirement}",
                         top_k=3,
                     )
+                    # Search inspiration documents for relevant content
+                    inspiration_results = VectorService.search(
+                        str(project_id),
+                        f"{ch_title} {ch_description}",
+                        top_k=3, category_filter="inspiration",
+                    )
                     # Anonymize context chunks too — Mistral must never see raw secrets
                     if context_results:
                         raw_context = "\n\n".join([r["content"] for r in context_results])
@@ -133,6 +142,10 @@ async def _run_chapter_generation(
                     if search_results:
                         raw_old = "\n\n".join([r["content"] for r in search_results])
                         old_response_content = await AnonymizationService.anonymize_text(raw_old, project_id, db)
+                    # Inspiration content is ALWAYS anonymized to prevent client name leaks
+                    if inspiration_results:
+                        raw_inspi = "\n\n".join([r["content"] for r in inspiration_results])
+                        inspiration_content = await AnonymizationService.anonymize_text(raw_inspi, project_id, db)
 
                 _update("anonymizing", 25, "Preparation...")
                 notes_text = "\n".join([n.get("content", "") for n in ch_notes])
@@ -140,6 +153,7 @@ async def _run_chapter_generation(
                     "mode": "generate",
                     "old_response_content": old_response_content,
                     "context_chunks_text": context_chunks_text,
+                    "inspiration_content": inspiration_content,
                     "notes_text": notes_text,
                 }
 
@@ -168,6 +182,7 @@ async def _run_chapter_generation(
                 improvement_axes=proj_improvement,
                 notes=ai_params["notes_text"],
                 ai_context=proj_ai_context,
+                inspiration_content=ai_params.get("inspiration_content", ""),
             )
 
         # ── Phase 3: Deanonymize + save ──
