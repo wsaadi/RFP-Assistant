@@ -324,6 +324,23 @@ export class PreviewComponent implements OnInit, OnDestroy {
         this.startChatPolling();
       },
       error: (err) => {
+        if (err.status === 409) {
+          // Stale progress in Redis — cancel then retry once
+          this.api.cancelPreviewChat(this.projectId).subscribe({
+            next: () => {
+              this.api.sendPreviewChat(this.projectId, msg).subscribe({
+                next: () => this.startChatPolling(),
+                error: (err2) => {
+                  this.chatProcessing = false;
+                  this.chatProgress = null;
+                  this.messages.push({ role: 'error', content: err2.error?.detail || 'Erreur', timestamp: new Date() });
+                  this.scrollToBottom();
+                },
+              });
+            },
+          });
+          return;
+        }
         this.chatProcessing = false;
         this.chatProgress = null;
         this.messages.push({
