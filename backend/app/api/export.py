@@ -546,9 +546,16 @@ async def cancel_preview_chat(
 
 
 async def _run_preview_chat(project_id: uuid.UUID, workspace_id: uuid.UUID, user_message: str):
-    """Background task: apply a general AI instruction across all chapters."""
+    """Background task: apply a general AI instruction across all chapters.
+
+    Uses a 2-pass approach to avoid timeout on large documents:
+      Pass 1 (fast): send chapter titles + short excerpts → AI returns IDs of chapters to modify
+      Pass 2 (targeted): for each identified chapter, send its full content → AI returns modified version
+    """
     from ..database import create_task_engine
     from ..services.ai_service import create_ai_service
+    import json as _json
+    import re as _re
 
     pid = str(project_id)
 
@@ -558,10 +565,25 @@ async def _run_preview_chat(project_id: uuid.UUID, workspace_id: uuid.UUID, user
             "progress": progress, "message": message,
         })
 
+    def _parse_json(raw: str):
+        cleaned = raw.strip()
+        cleaned = _re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
+        cleaned = _re.sub(r'\n?```\s*$', '', cleaned)
+        try:
+            return _json.loads(cleaned)
+        except _json.JSONDecodeError:
+            match = _re.search(r'\{[\s\S]*\}', cleaned)
+            if match:
+                return _json.loads(match.group())
+            match_arr = _re.search(r'\[[\s\S]*\]', cleaned)
+            if match_arr:
+                return _json.loads(match_arr.group())
+            raise ValueError("L'IA n'a pas retourne un JSON valide")
+
     task_engine, TaskSession = create_task_engine()
 
     try:
-        _update("loading", 10, "Chargement du document...")
+        _update("loading", 5, "Chargement du document...")
 
         async with TaskSession() as db:
             config_result = await db.execute(
@@ -582,7 +604,6 @@ async def _run_preview_chat(project_id: uuid.UUID, workspace_id: uuid.UUID, user
             )
             all_chapters = chapters_result.scalars().all()
 
-            # Build flat list of chapters with content
             chapters_data = []
             for ch in all_chapters:
                 if ch.content and ch.content.strip():
@@ -601,6 +622,7 @@ async def _run_preview_chat(project_id: uuid.UUID, workspace_id: uuid.UUID, user
             )
 
             deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
+            ai_context = project.ai_context or ""
 
         if not chapters_data:
             set_progress(_NS_PREVIEW_CHAT, pid, {
@@ -610,23 +632,78 @@ async def _run_preview_chat(project_id: uuid.UUID, workspace_id: uuid.UUID, user
             })
             return
 
-        _update("analyzing", 25, "Envoi a l'IA...")
+        # ── PASS 1: Identify which chapters need modification ──
+        _update("analyzing", 15, "Analyse des chapitres concernes...")
 
-        # Build the document snapshot for the AI
-        doc_snapshot = ""
+        toc_lines = []
         for ch in chapters_data:
-            doc_snapshot += f"\n\n===== CHAPITRE [{ch['id']}] : {ch['numbering']} {ch['title']} =====\n"
-            doc_snapshot += ch["content"]
+            excerpt = ch["content"][:200].replace("\n", " ")
+            toc_lines.append(f'- ID: "{ch["id"]}" | {ch["numbering"]} {ch["title"]} | Extrait: {excerpt}...')
+        toc_text = "\n".join(toc_lines)
 
-        system_prompt = """Tu es un assistant expert en redaction de reponses aux appels d'offres.
-L'utilisateur te donne une instruction a appliquer sur l'ensemble du document.
+        identify_system = """Tu es un assistant expert en redaction de reponses aux appels d'offres.
+L'utilisateur donne une instruction a appliquer sur un document.
+Tu recois la liste des chapitres avec un court extrait.
 
-Le document est compose de plusieurs chapitres, chacun identifie par un ID unique entre crochets.
+Ton role: identifier TOUS les chapitres qui doivent etre modifies pour appliquer l'instruction.
 
-Tu dois:
-1. Analyser l'instruction de l'utilisateur
-2. Identifier TOUS les chapitres concernes par la modification
-3. Pour chaque chapitre concerne, produire le contenu COMPLET modifie (pas juste le diff)
+Reponds UNIQUEMENT avec un JSON valide:
+{
+  "chapter_ids": ["uuid-1", "uuid-2"],
+  "summary": "Explication courte de ce qui va etre modifie"
+}
+
+Si aucun chapitre n'est concerne:
+{"chapter_ids": [], "summary": "Aucune modification necessaire."}"""
+
+        identify_user = f"""Liste des chapitres du document:
+
+{toc_text}
+
+--- INSTRUCTION ---
+{anon_message}
+
+Quels chapitres doivent etre modifies? Retourne le JSON."""
+
+        raw_identify = await ai_service.generate(identify_system, identify_user, temperature=0.1)
+        identify_result = _parse_json(raw_identify)
+
+        target_ids = set()
+        if isinstance(identify_result, dict):
+            target_ids = set(identify_result.get("chapter_ids", []))
+            summary_intro = identify_result.get("summary", "")
+        elif isinstance(identify_result, list):
+            target_ids = set(identify_result)
+            summary_intro = ""
+        else:
+            target_ids = set()
+            summary_intro = ""
+
+        if not target_ids:
+            set_progress(_NS_PREVIEW_CHAT, pid, {
+                "status": "completed", "step": "done", "progress": 100,
+                "message": summary_intro or "Aucune modification necessaire.",
+                "changed_chapters": [],
+            })
+            return
+
+        # Filter to only targeted chapters
+        targeted_chapters = [ch for ch in chapters_data if ch["id"] in target_ids]
+        if not targeted_chapters:
+            set_progress(_NS_PREVIEW_CHAT, pid, {
+                "status": "completed", "step": "done", "progress": 100,
+                "message": "Aucun chapitre correspondant trouve.",
+                "changed_chapters": [],
+            })
+            return
+
+        total = len(targeted_chapters)
+        _update("generating", 25, f"Modification de {total} chapitre(s)...")
+
+        # ── PASS 2: Modify each chapter individually ──
+        modify_system = """Tu es un assistant expert en redaction de reponses aux appels d'offres.
+L'utilisateur te donne une instruction et le contenu d'un chapitre.
+Applique l'instruction au chapitre et retourne le contenu COMPLET modifie.
 
 Anonymisation:
 - Le texte peut contenir des marqueurs comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
@@ -637,103 +714,72 @@ Formatage:
 - Utilise **gras** pour les termes importants
 - Utilise des listes a puces avec - pour les enumerations
 
-IMPORTANT: Ta reponse DOIT etre un JSON valide avec cette structure exacte:
-{
-  "summary": "Resume court de ce qui a ete modifie",
-  "changes": [
-    {
-      "chapter_id": "uuid-du-chapitre",
-      "chapter_title": "Titre du chapitre",
-      "new_content": "Contenu COMPLET modifie du chapitre"
-    }
-  ]
-}
+Retourne UNIQUEMENT le contenu modifie du chapitre, sans explication ni JSON."""
 
-Si l'instruction ne necessite aucune modification, retourne:
-{"summary": "Aucune modification necessaire.", "changes": []}"""
-
-        ai_context = project.ai_context or ""
         if ai_context:
-            system_prompt += f"""
+            modify_system += f"""
 
-Contexte de redaction fourni par l'utilisateur:
+Contexte de redaction:
 {ai_context}"""
 
-        user_prompt = f"""Voici le document complet:
+        def _deanon(text: str) -> str:
+            if not text or not deanon_map:
+                return text
+            for placeholder, original in deanon_map.items():
+                text = text.replace(placeholder, original)
+            return text
 
-{doc_snapshot}
+        changed_titles = []
+        changes_to_save = []
 
---- INSTRUCTION DE L'UTILISATEUR ---
+        for i, ch in enumerate(targeted_chapters):
+            pct = 25 + int(60 * (i / total))
+            _update("generating", pct, f"Modification du chapitre {i+1}/{total}: {ch['title'][:40]}...")
+
+            modify_user = f"""Chapitre: {ch['numbering']} {ch['title']}
+
+Contenu actuel:
+{ch['content']}
+
+--- INSTRUCTION ---
 {anon_message}
 
-Applique cette instruction sur tous les chapitres concernes. Retourne le JSON."""
+Applique l'instruction et retourne le contenu COMPLET modifie."""
 
-        _update("generating", 40, "L'IA analyse et modifie le document...")
+            modified_content = await ai_service.generate(
+                modify_system, modify_user, temperature=0.3,
+            )
 
-        raw_response = await ai_service.generate(system_prompt, user_prompt, temperature=0.3)
+            # Basic sanity check: AI should return substantial content
+            if modified_content and len(modified_content.strip()) > 20:
+                changes_to_save.append({
+                    "chapter_id": ch["id"],
+                    "title": ch["title"],
+                    "new_content": _deanon(modified_content.strip()),
+                })
+                changed_titles.append(ch["title"])
 
-        _update("parsing", 75, "Traitement de la reponse...")
-
-        # Parse the AI response as JSON
-        import json as _json
-        import re as _re
-        cleaned = raw_response.strip()
-        cleaned = _re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
-        cleaned = _re.sub(r'\n?```\s*$', '', cleaned)
-
-        try:
-            result = _json.loads(cleaned)
-        except _json.JSONDecodeError:
-            # Try to extract JSON object
-            match = _re.search(r'\{[\s\S]*\}', cleaned)
-            if match:
-                result = _json.loads(match.group())
-            else:
-                raise ValueError("L'IA n'a pas retourne un JSON valide")
-
-        changes = result.get("changes", [])
-        summary = result.get("summary", "Modifications appliquees")
-
-        if changes:
-            _update("saving", 85, f"Enregistrement de {len(changes)} chapitre(s) modifie(s)...")
-
-            def _deanon(text: str) -> str:
-                if not text or not deanon_map:
-                    return text
-                for placeholder, original in deanon_map.items():
-                    text = text.replace(placeholder, original)
-                return text
+        if changes_to_save:
+            _update("saving", 90, f"Enregistrement de {len(changes_to_save)} chapitre(s)...")
 
             async with TaskSession() as db:
-                changed_titles = []
-                for change in changes:
-                    ch_id = change.get("chapter_id")
-                    new_content = change.get("new_content", "")
-                    if not ch_id or not new_content:
-                        continue
+                for change in changes_to_save:
                     try:
                         ch_result = await db.execute(
-                            select(Chapter).where(Chapter.id == uuid.UUID(ch_id))
+                            select(Chapter).where(Chapter.id == uuid.UUID(change["chapter_id"]))
                         )
                         chapter = ch_result.scalar_one_or_none()
                         if chapter:
-                            chapter.content = _deanon(new_content)
-                            changed_titles.append(change.get("chapter_title", chapter.title))
+                            chapter.content = change["new_content"]
                     except Exception as e:
-                        logger.warning("Could not update chapter %s: %s", ch_id, e)
+                        logger.warning("Could not update chapter %s: %s", change["chapter_id"], e)
                 await db.commit()
 
-            set_progress(_NS_PREVIEW_CHAT, pid, {
-                "status": "completed", "step": "done", "progress": 100,
-                "message": summary,
-                "changed_chapters": changed_titles,
-            })
-        else:
-            set_progress(_NS_PREVIEW_CHAT, pid, {
-                "status": "completed", "step": "done", "progress": 100,
-                "message": summary,
-                "changed_chapters": [],
-            })
+        set_progress(_NS_PREVIEW_CHAT, pid, {
+            "status": "completed", "step": "done", "progress": 100,
+            "message": summary_intro or f"{len(changed_titles)} chapitre(s) modifie(s).",
+            "changed_chapters": changed_titles,
+        })
 
     except Exception as e:
         logger.exception("Preview chat failed for project %s", project_id)
