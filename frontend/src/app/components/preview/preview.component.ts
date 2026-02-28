@@ -114,18 +114,9 @@ interface ChatMessage {
 
         <div class="chat-messages" #chatMessages>
           <div *ngIf="messages.length === 0" class="chat-empty">
-            <mat-icon>lightbulb</mat-icon>
-            <p>Demandez a l'IA de modifier le document.</p>
-            <span class="chat-hint">Exemples :</span>
-            <button mat-stroked-button class="chat-suggestion" (click)="sendSuggestion('Remplace toutes les references a la norme ISO 9001 par ISO 9001:2015')">
-              Corriger une reference
-            </button>
-            <button mat-stroked-button class="chat-suggestion" (click)="sendSuggestion('Ajoute une mention de notre certification ISO 27001 dans tous les chapitres securite')">
-              Ajouter une mention
-            </button>
-            <button mat-stroked-button class="chat-suggestion" (click)="sendSuggestion('Reformule les engagements de SLA pour etre plus precis sur les temps de reponse')">
-              Reformuler des passages
-            </button>
+            <mat-icon>auto_awesome</mat-icon>
+            <p>Decrivez ce que vous voulez modifier dans le document.</p>
+            <span class="chat-hint">L'IA identifiera les chapitres concernes et appliquera les changements.</span>
           </div>
 
           <div *ngFor="let msg of messages" class="chat-msg" [class.chat-msg-user]="msg.role === 'user'" [class.chat-msg-ai]="msg.role === 'assistant'" [class.chat-msg-error]="msg.role === 'error'">
@@ -233,7 +224,7 @@ interface ChatMessage {
     .chat-empty mat-icon { font-size: 40px; width: 40px; height: 40px; color: #1B3A5C; opacity: 0.5; }
     .chat-empty p { margin: 0; font-size: 14px; }
     .chat-hint { font-size: 12px; color: #aaa; margin-top: 8px; }
-    .chat-suggestion { font-size: 12px; text-align: left; white-space: normal; line-height: 1.4; }
+
     .chat-msg { display: flex; gap: 8px; }
     .chat-msg-icon { padding-top: 2px; }
     .chat-msg-icon mat-icon { font-size: 18px; width: 18px; height: 18px; }
@@ -316,11 +307,6 @@ export class PreviewComponent implements OnInit, OnDestroy {
 
   toggleChat(): void {
     this.chatOpen = !this.chatOpen;
-  }
-
-  sendSuggestion(text: string): void {
-    this.chatInput = text;
-    this.sendMessage();
   }
 
   sendMessage(): void {
