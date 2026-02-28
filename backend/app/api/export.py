@@ -327,6 +327,30 @@ async def clear_backup_progress(
     return {"cleared": True}
 
 
+@router.post("/{project_id}/word-cancel")
+async def cancel_word_export(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Cancel a running Word export: revoke Celery task and clear Redis state."""
+    pid = str(project_id)
+
+    # Try to revoke the Celery task (terminate if already executing)
+    try:
+        from ..celery_app import celery as celery_app
+        celery_app.control.revoke(
+            f"word-export-{pid}", terminate=True, signal="SIGTERM",
+        )
+    except Exception as e:
+        logger.warning("Could not revoke Celery task for word export %s: %s", pid, e)
+
+    # Clear progress and any partial result in Redis
+    delete_progress(_NS_WORD, pid)
+    delete_export_result("word", pid)
+
+    return {"cancelled": True}
+
+
 @router.delete("/{project_id}/word-progress")
 async def clear_word_progress(
     project_id: uuid.UUID,
