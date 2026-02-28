@@ -665,7 +665,9 @@ Si aucun chapitre n'est concerne:
 
 Quels chapitres doivent etre modifies? Retourne le JSON."""
 
-        raw_identify = await ai_service.generate(identify_system, identify_user, temperature=0.1)
+        raw_identify = await ai_service.generate_streaming(
+            identify_system, identify_user, temperature=0.1, timeout=300,
+        )
         identify_result = _parse_json(raw_identify)
 
         target_ids = set()
@@ -746,8 +748,8 @@ Contenu actuel:
 
 Applique l'instruction et retourne le contenu COMPLET modifie."""
 
-            modified_content = await ai_service.generate(
-                modify_system, modify_user, temperature=0.3,
+            modified_content = await ai_service.generate_streaming(
+                modify_system, modify_user, temperature=0.3, timeout=600,
             )
 
             # Basic sanity check: AI should return substantial content
