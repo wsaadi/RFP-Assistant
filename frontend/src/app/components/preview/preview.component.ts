@@ -161,7 +161,7 @@ interface ChatMessage {
           <textarea
             class="chat-input"
             [(ngModel)]="chatInput"
-            (keydown.enter)="$event.shiftKey || sendMessage(); $event.shiftKey || $event.preventDefault()"
+            (keydown.enter)="onChatKeydown($event)"
             placeholder="Ex: Corrige la reference ISO dans tout le document..."
             [disabled]="chatProcessing"
             rows="2"
@@ -416,6 +416,14 @@ export class PreviewComponent implements OnInit, OnDestroy {
         this.chatMessagesEl.nativeElement.scrollTop = this.chatMessagesEl.nativeElement.scrollHeight;
       }
     }, 100);
+  }
+
+  onChatKeydown(event: Event): void {
+    const ke = event as KeyboardEvent;
+    if (!ke.shiftKey) {
+      ke.preventDefault();
+      this.sendMessage();
+    }
   }
 
   renderMarkdown = renderMarkdown;
