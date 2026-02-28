@@ -94,7 +94,15 @@ async def init_db():
                 "ALTER TYPE document_category ADD VALUE IF NOT EXISTS 'NEW_RESPONSE'"
             ))
         except Exception:
-            logger.debug("document_category enum already has 'new_response' or ALTER TYPE not supported")
+            logger.debug("document_category enum already has 'NEW_RESPONSE' or ALTER TYPE not supported")
+
+    async with autocommit_engine.connect() as conn:
+        try:
+            await conn.execute(text(
+                "ALTER TYPE document_category ADD VALUE IF NOT EXISTS 'INSPIRATION'"
+            ))
+        except Exception:
+            logger.debug("document_category enum already has 'INSPIRATION' or ALTER TYPE not supported")
 
     # Add enabled_categories column (this can run in a normal transaction)
     async with engine.begin() as conn:

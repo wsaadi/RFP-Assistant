@@ -1227,6 +1227,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     { value: 'old_response', label: 'Ancienne Réponse', desc: 'Réponse à l\'ancien AO', icon: 'reply', color: '#388e3c' },
     { value: 'new_rfp', label: 'Nouvel AO', desc: 'Documents du nouvel appel d\'offres', icon: 'fiber_new', color: '#d32f2f' },
     { value: 'new_response', label: 'Notre Réponse', desc: 'Notre réponse à analyser', icon: 'task', color: '#7b1fa2' },
+    { value: 'inspiration', label: 'Inspiration', desc: 'Réponses d\'autres clients pour inspiration (anonymisées automatiquement)', icon: 'lightbulb', color: '#f57c00' },
   ];
   categories = this.allCategories.slice(0, 3);
 

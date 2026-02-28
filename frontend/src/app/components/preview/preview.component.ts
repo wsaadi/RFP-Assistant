@@ -190,26 +190,32 @@ interface ChatMessage {
     .toc-sub { padding-left: 28px; font-size: 14px; color: #555; }
     .chapter-title { color: #1B3A5C; font-size: 20px; border-bottom: 2px solid #2C5F8A; padding-bottom: 8px; margin-bottom: 16px; }
     .sub-title { color: #2C5F8A; font-size: 17px; margin-top: 28px; margin-bottom: 12px; padding-bottom: 4px; border-bottom: 1px solid #e0e0e0; }
-    .chapter-content { line-height: 1.7; font-size: 14px; color: #333; }
-    .chapter-content p { margin: 0 0 12px 0; line-height: 1.7; text-align: justify; }
-    .chapter-content h2, .chapter-content h3 { font-size: 17px; font-weight: 700; color: #1B3A5C; margin: 24px 0 10px 0; padding-bottom: 4px; border-bottom: 1px solid #e0e0e0; }
+    .chapter-content { line-height: 1.8; font-size: 14.5px; color: #2c3e50; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    .chapter-content p { margin: 0 0 16px 0; line-height: 1.8; text-align: justify; }
+    .chapter-content h2 { font-size: 19px; font-weight: 700; color: #1B3A5C; margin: 32px 0 14px 0; padding-bottom: 8px; border-bottom: 2px solid #1976d2; letter-spacing: 0.3px; }
+    .chapter-content h3 { font-size: 16.5px; font-weight: 700; color: #1B3A5C; margin: 28px 0 12px 0; padding-bottom: 6px; border-bottom: 1px solid #bbdefb; padding-left: 12px; border-left: 3px solid #1976d2; }
     .chapter-content h2:first-child, .chapter-content h3:first-child { margin-top: 0; }
-    .chapter-content h4 { font-size: 15px; font-weight: 600; color: #2C5F8A; margin: 18px 0 8px 0; }
-    .chapter-content h5 { font-size: 14px; font-weight: 600; color: #37474f; margin: 14px 0 6px 0; }
-    .chapter-content ul, .chapter-content ol { margin: 6px 0 12px 0; padding-left: 28px; }
-    .chapter-content ul { list-style-type: disc; }
-    .chapter-content ul ul { list-style-type: circle; margin: 2px 0; }
+    .chapter-content h4 { font-size: 15px; font-weight: 600; color: #2C5F8A; margin: 22px 0 10px 0; padding-left: 10px; border-left: 3px solid #90caf9; }
+    .chapter-content h5 { font-size: 14px; font-weight: 600; color: #37474f; margin: 18px 0 8px 0; }
+    .chapter-content ul, .chapter-content ol { margin: 10px 0 18px 0; padding-left: 28px; }
+    .chapter-content ul { list-style-type: none; }
+    .chapter-content ul > li { position: relative; padding-left: 8px; }
+    .chapter-content ul > li::before { content: '\\25B8'; position: absolute; left: -18px; color: #1976d2; font-size: 12px; top: 2px; }
+    .chapter-content ul ul { list-style-type: none; margin: 4px 0; }
+    .chapter-content ul ul > li::before { content: '\\25AB'; color: #64b5f6; }
     .chapter-content ol { list-style-type: decimal; }
-    .chapter-content li { margin-bottom: 4px; line-height: 1.6; }
-    .chapter-content strong { color: #1B3A5C; }
-    .chapter-content em { color: #555; }
-    .chapter-content hr { border: none; border-top: 1px solid #ccc; margin: 20px 0; }
-    .chapter-content code { background: #e8eaf6; padding: 1px 5px; border-radius: 3px; font-size: 13px; }
-    .chapter-content .table-wrap { overflow-x: auto; margin: 16px 0; }
+    .chapter-content li { margin-bottom: 6px; line-height: 1.7; }
+    .chapter-content strong { color: #1B3A5C; font-weight: 600; }
+    .chapter-content em { color: #555; font-style: italic; }
+    .chapter-content hr { border: none; border-top: 1px solid #e0e0e0; margin: 28px 0; }
+    .chapter-content code { background: #e8eaf6; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+    .chapter-content blockquote { margin: 16px 0 20px 0; padding: 14px 20px; background: #e3f2fd; border-left: 4px solid #1976d2; border-radius: 0 8px 8px 0; color: #1565c0; font-style: italic; line-height: 1.7; }
+    .chapter-content .table-wrap { overflow-x: auto; margin: 20px 0; border-radius: 8px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
     .chapter-content table { border-collapse: collapse; width: 100%; font-size: 14px; }
-    .chapter-content th, .chapter-content td { border: 1px solid #ccc; padding: 10px 12px; text-align: left; }
-    .chapter-content th { background: #e3f2fd; color: #1B3A5C; font-weight: 600; }
-    .chapter-content tr:nth-child(even) td { background: #fafafa; }
+    .chapter-content th, .chapter-content td { border: 1px solid #e0e0e0; padding: 12px 16px; text-align: left; }
+    .chapter-content th { background: linear-gradient(135deg, #e3f2fd, #bbdefb); color: #1B3A5C; font-weight: 600; font-size: 13.5px; text-transform: uppercase; letter-spacing: 0.3px; }
+    .chapter-content tr:nth-child(even) td { background: #f8f9fa; }
+    .chapter-content tr:hover td { background: #e8f4fd; }
     .empty-content { color: #999; font-style: italic; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
 

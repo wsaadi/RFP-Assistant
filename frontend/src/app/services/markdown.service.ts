@@ -73,6 +73,27 @@ export function renderMarkdown(text: string): string {
       continue;
     }
 
+    // ── Blockquote ──
+    if (stripped.startsWith('>')) {
+      closeParagraph();
+      closeAllLists();
+      const quoteLines: string[] = [];
+      while (i < lines.length) {
+        const ql = lines[i].trim();
+        if (ql.startsWith('>')) {
+          quoteLines.push(ql.replace(/^>\s?/, ''));
+          i++;
+        } else if (ql === '' && i + 1 < lines.length && lines[i + 1].trim().startsWith('>')) {
+          quoteLines.push('');
+          i++;
+        } else {
+          break;
+        }
+      }
+      out.push('<blockquote>' + quoteLines.map(l => inlineFormat(l)).join('<br>') + '</blockquote>');
+      continue;
+    }
+
     // ── Header ──
     const headerMatch = stripped.match(/^(#{1,5})\s+(.+)$/);
     if (headerMatch) {

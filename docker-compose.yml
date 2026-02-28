@@ -71,9 +71,9 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       # Ollama on DGX Spark — routed via Mac host (Docker bridge can't reach LAN directly)
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - OLLAMA_NER_MODEL=${OLLAMA_NER_MODEL:-gemma3:4b}
-      - OLLAMA_NER_TIMEOUT=60
-      - OLLAMA_NER_CONCURRENCY=3
+      - OLLAMA_NER_MODEL=${OLLAMA_NER_MODEL:-qwen2.5:14b}
+      - OLLAMA_NER_TIMEOUT=120
+      - OLLAMA_NER_CONCURRENCY=2
     volumes:
       - backend_data:/app/data
     ports:
@@ -131,9 +131,9 @@ services:
       - CELERY_BROKER_URL=redis://redis:6379/0
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - OLLAMA_BASE_URL=http://host.docker.internal:11434
-      - OLLAMA_NER_MODEL=${OLLAMA_NER_MODEL:-gemma3:4b}
-      - OLLAMA_NER_TIMEOUT=60
-      - OLLAMA_NER_CONCURRENCY=3
+      - OLLAMA_NER_MODEL=${OLLAMA_NER_MODEL:-qwen2.5:14b}
+      - OLLAMA_NER_TIMEOUT=120
+      - OLLAMA_NER_CONCURRENCY=2
     volumes:
       - backend_data:/app/data
     depends_on:

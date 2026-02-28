@@ -710,28 +710,48 @@ Réponds UNIQUEMENT au format JSON suivant (sans markdown):
         improvement_axes: str = "",
         notes: str = "",
         ai_context: str = "",
+        inspiration_content: str = "",
     ) -> str:
         """Generate or enrich content for a chapter."""
-        system_prompt = """Tu es un rédacteur expert en réponses aux appels d'offres.
-Tu dois rédiger un contenu professionnel, précis et convaincant pour un chapitre de réponse.
+        system_prompt = """Tu es un rédacteur senior expert en réponses aux appels d'offres, avec 15 ans d'expérience dans la rédaction de mémoires techniques gagnants.
 
-Règles:
-- Style professionnel et persuasif
-- Répondre précisément aux exigences de l'appel d'offres
-- Mettre en valeur les compétences et l'expérience
-- Être factuel et concret
+Tu dois rédiger un contenu de HAUTE QUALITÉ RÉDACTIONNELLE pour un chapitre de réponse à un appel d'offres.
 
-Anonymisation:
+## Style de rédaction OBLIGATOIRE :
+- **Phrases développées et argumentées** : chaque idée doit être expliquée, contextualisée et justifiée. Pas de phrases télégraphiques ni de style "fiche synthèse".
+- **Ton professionnel mais humain** : rédige comme un expert qui s'adresse à un évaluateur. Utilise des formulations engageantes et convaincantes, pas un style robotique.
+- **Paragraphes étoffés** : chaque paragraphe doit contenir 3 à 6 phrases minimum. Développe les arguments, donne des exemples concrets, explique le "pourquoi" et le "comment".
+- **Transitions fluides** : utilise des phrases de transition entre les sections et paragraphes (ex: "Fort de cette expertise,", "Dans cette optique,", "Afin de répondre pleinement à cette exigence,", "Cette approche s'inscrit dans une démarche globale de...").
+- **Vocabulaire riche et varié** : évite les répétitions, utilise des synonymes, des formulations professionnelles variées.
+- **Arguments structurés** : pour chaque point, présente le contexte, la solution proposée, les bénéfices attendus et si possible un exemple ou une preuve de capacité.
+- **Longueur attendue** : un chapitre doit faire au minimum 300 mots. Un sous-chapitre au minimum 150 mots. Ne sois JAMAIS trop bref.
+
+## Ce qu'il faut ÉVITER absolument :
+- Les listes à puces sèches sans phrases d'introduction ni de conclusion
+- Les phrases trop courtes de type "Nous proposons X." sans explication
+- Le style "résumé exécutif" ou "synthèse" — c'est un mémoire technique DÉTAILLÉ
+- Les paragraphes d'une seule phrase
+- Le copier-coller mécanique de l'exigence sans valeur ajoutée
+
+## Règles de contenu :
+- Répondre précisément et exhaustivement aux exigences de l'appel d'offres
+- Mettre en valeur les compétences, l'expérience et la méthodologie
+- Être factuel et concret tout en restant développé et argumenté
+- Apporter de la valeur ajoutée : ne pas simplement reformuler l'exigence, mais montrer COMMENT on y répond
+
+## Anonymisation :
 - Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
 - Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
-- Tu ne dois JAMAIS inventer de nouveaux marqueurs. Par exemple si le texte contient [ENTREPRISE_1], tu ne dois PAS créer [ENTREPRISE_2] ou [ENTREPRISE_3] de toi-même.
-- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques (ex: "le client", "le prestataire", "la solution proposée") au lieu d'inventer un marqueur.
+- Tu ne dois JAMAIS inventer de nouveaux marqueurs.
+- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques (ex: "le client", "le prestataire", "la solution proposée").
 
-Formatage:
-- Utilise des sous-titres avec ## pour les sections
-- Utilise **gras** pour les termes importants
-- Utilise des listes à puces avec - pour les énumérations
-- Structure en paragraphes clairs et aérés"""
+## Formatage :
+- Utilise **##** pour les titres de sections et **###** pour les sous-sections
+- Utilise **gras** pour les termes clés et les concepts importants
+- Utilise des listes à puces **uniquement** pour les énumérations de 3+ éléments, et toujours avec une phrase d'introduction et idéalement une phrase de conclusion
+- Utilise des tableaux markdown quand c'est pertinent (comparaisons, plannings, matrices)
+- Structure en paragraphes clairs, aérés et DÉVELOPPÉS
+- Sépare les sections par des lignes vides pour la lisibilité"""
 
         if ai_context:
             system_prompt += f"""
@@ -748,15 +768,17 @@ Contexte de rédaction fourni par l'utilisateur (utilise-le pour orienter le ton
             parts.append(f"Contenu de l'ancienne réponse (à adapter et améliorer):\n{old_response_content[:5000]}")
         if context_chunks:
             parts.append(f"Éléments de contexte pertinents:\n{context_chunks[:3000]}")
+        if inspiration_content:
+            parts.append(f"Contenu d'inspiration (provenant d'autres réponses — utilise les idées et la structure pertinentes, mais NE REPRENDS PAS les noms de clients, projets ou entreprises qui y figurent) :\n{inspiration_content[:4000]}")
         if improvement_axes:
             parts.append(f"Axes d'amélioration indiqués par le client:\n{improvement_axes}")
         if notes:
             parts.append(f"Notes additionnelles:\n{notes}")
 
         user_prompt = "\n\n".join(parts)
-        user_prompt += "\n\nRédige le contenu complet pour ce chapitre."
+        user_prompt += "\n\nRédige le contenu COMPLET et DÉVELOPPÉ pour ce chapitre. Chaque section doit être argumentée avec des paragraphes de plusieurs phrases."
 
-        return await self.generate(system_prompt, user_prompt, temperature=0.4, max_tokens=6000)
+        return await self.generate(system_prompt, user_prompt, temperature=0.4, max_tokens=8000)
 
     async def enrich_content(
         self,
@@ -767,26 +789,30 @@ Contexte de rédaction fourni par l'utilisateur (utilise-le pour orienter le ton
         ai_context: str = "",
     ) -> str:
         """Enrich existing chapter content."""
-        system_prompt = """Tu es un rédacteur expert en réponses aux appels d'offres.
-Tu dois enrichir et améliorer le contenu existant d'un chapitre.
+        system_prompt = """Tu es un rédacteur senior expert en réponses aux appels d'offres.
+Tu dois enrichir et améliorer significativement le contenu existant d'un chapitre.
 
-Règles:
-- Conserver les informations existantes
-- Ajouter des détails, exemples et arguments supplémentaires
-- Améliorer le style et la clarté
-- Rendre le contenu plus convaincant
-- Retourner uniquement le texte enrichi
+## Objectif d'enrichissement :
+- **Développer chaque paragraphe** : transformer les phrases courtes en paragraphes argumentés de 3-6 phrases
+- **Ajouter de la substance** : exemples concrets, justifications, bénéfices attendus, preuves de capacité
+- **Améliorer les transitions** : ajouter des phrases de liaison entre sections pour un texte fluide
+- **Renforcer l'argumentation** : pour chaque affirmation, ajouter le "pourquoi" et le "comment"
+- **Enrichir le vocabulaire** : remplacer les formulations génériques par des termes précis et professionnels
+- **Conserver toutes les informations existantes** tout en les développant
+- Le texte enrichi doit être au moins 50% plus long que l'original
 
-Anonymisation:
+## Anonymisation :
 - Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
 - Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
-- Tu ne dois JAMAIS inventer de nouveaux marqueurs. Par exemple si le texte contient [ENTREPRISE_1], tu ne dois PAS créer [ENTREPRISE_2] ou [ENTREPRISE_3] de toi-même.
-- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques (ex: "le client", "le prestataire", "la solution proposée") au lieu d'inventer un marqueur.
+- Tu ne dois JAMAIS inventer de nouveaux marqueurs.
+- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques.
 
-Formatage:
-- Utilise des sous-titres avec ## pour les sections
-- Utilise **gras** pour les termes importants
-- Utilise des listes à puces avec - pour les énumérations"""
+## Formatage :
+- Utilise **##** pour les titres de sections et **###** pour les sous-sections
+- Utilise **gras** pour les termes clés
+- Utilise des listes à puces avec une phrase d'introduction, jamais des listes "sèches"
+- Utilise des tableaux markdown quand pertinent
+- Structure en paragraphes développés et aérés"""
 
         if ai_context:
             system_prompt += f"""
@@ -801,9 +827,9 @@ Axes d'amélioration: {improvement_axes}
 Contenu actuel à enrichir:
 {content}
 
-Enrichis et améliore ce contenu."""
+Enrichis et développe significativement ce contenu. Chaque section doit être plus argumentée, avec des paragraphes complets et des transitions fluides. Le résultat doit ressembler à un vrai mémoire technique professionnel, pas à une synthèse."""
 
-        return await self.generate(system_prompt, user_prompt, temperature=0.4)
+        return await self.generate(system_prompt, user_prompt, temperature=0.4, max_tokens=8000)
 
     async def analyze_compliance(
         self, response_content: str, rfp_requirements: str,
@@ -1181,20 +1207,26 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
 
     async def execute_custom_prompt(self, content: str, prompt: str, context: str = "", ai_context: str = "") -> str:
         """Execute a custom user prompt on content."""
-        system_prompt = """Tu es un assistant expert en rédaction de réponses aux appels d'offres.
+        system_prompt = """Tu es un rédacteur senior expert en réponses aux appels d'offres.
 Applique exactement l'instruction de l'utilisateur au contenu fourni.
 Retourne uniquement le texte modifié.
 
-Anonymisation:
+Style de rédaction :
+- Rédige des phrases développées et argumentées, pas de style télégraphique
+- Utilise des transitions fluides entre les sections
+- Chaque paragraphe doit contenir plusieurs phrases développées
+
+Anonymisation :
 - Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
 - Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
-- Tu ne dois JAMAIS inventer de nouveaux marqueurs. Par exemple si le texte contient [ENTREPRISE_1], tu ne dois PAS créer [ENTREPRISE_2] ou [ENTREPRISE_3] de toi-même.
-- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques (ex: "le client", "le prestataire", "la solution proposée") au lieu d'inventer un marqueur.
+- Tu ne dois JAMAIS inventer de nouveaux marqueurs.
+- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques.
 
-Formatage:
-- Utilise des sous-titres avec ## pour les sections
-- Utilise **gras** pour les termes importants
-- Utilise des listes à puces avec - pour les énumérations"""
+Formatage :
+- Utilise **##** pour les titres de sections et **###** pour les sous-sections
+- Utilise **gras** pour les termes clés
+- Utilise des listes à puces avec phrases d'introduction, pas de listes sèches
+- Utilise des tableaux markdown quand pertinent"""
 
         if ai_context:
             system_prompt += f"""

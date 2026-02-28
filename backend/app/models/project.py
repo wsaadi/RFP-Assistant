@@ -54,7 +54,7 @@ class RFPProject(Base):
     improvement_axes: Mapped[str] = mapped_column(Text, default="")
     ai_context: Mapped[str] = mapped_column(Text, default="")
     enabled_categories: Mapped[list] = mapped_column(
-        JSON, default=lambda: ["old_rfp", "old_response", "new_rfp"]
+        JSON, default=lambda: ["old_rfp", "old_response", "new_rfp", "inspiration"]
     )
     context_mode: Mapped[str] = mapped_column(String(20), default="rag")  # "rag" or "full"
     created_by: Mapped[uuid.UUID] = mapped_column(
