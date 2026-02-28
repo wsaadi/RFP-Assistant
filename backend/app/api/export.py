@@ -2,6 +2,7 @@
 import asyncio
 import uuid
 import logging
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,7 +10,7 @@ from sqlalchemy import select
 
 from ..database import get_db
 from ..models.user import User
-from ..models.project import RFPProject
+from ..models.project import RFPProject, AIConfig
 from ..models.chapter import Chapter
 from ..models.document import Document, DocumentImage
 from ..services.word_service import RFPWordService
@@ -27,6 +28,11 @@ logger = logging.getLogger(__name__)
 # Redis progress namespaces
 _NS_WORD = "word_export"
 _NS_BACKUP = "backup_export"
+_NS_PREVIEW_CHAT = "preview_chat"
+
+
+class PreviewChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=2000)
 
 
 @router.post("/{project_id}/word")
@@ -477,3 +483,263 @@ async def preview_document(
     }
 
     return preview
+
+
+# ── Preview Chat (general AI instructions on the whole document) ──
+
+
+@router.post("/{project_id}/preview-chat")
+async def preview_chat(
+    project_id: uuid.UUID,
+    request: PreviewChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Send a general instruction to the AI to modify chapters across the document."""
+    pid = str(project_id)
+
+    existing = get_or_idle(_NS_PREVIEW_CHAT, pid)
+    if existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Une instruction est deja en cours de traitement")
+
+    result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouve")
+
+    config_result = await db.execute(
+        select(AIConfig).where(AIConfig.workspace_id == project.workspace_id)
+    )
+    config = config_result.scalar_one_or_none()
+    if not config or not config.mistral_api_key_encrypted:
+        raise HTTPException(status_code=400, detail="Configuration IA non definie")
+
+    set_progress(_NS_PREVIEW_CHAT, pid, {
+        "status": "running", "step": "starting", "progress": 0,
+        "message": "Analyse de l'instruction...",
+    })
+
+    from ..tasks.export_tasks import preview_chat_task
+    preview_chat_task.delay(pid, str(project.workspace_id), request.message)
+
+    return {"success": True, "message": "Instruction envoyee a l'IA"}
+
+
+@router.get("/{project_id}/preview-chat-status")
+async def get_preview_chat_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of preview chat AI processing."""
+    return get_or_idle(_NS_PREVIEW_CHAT, str(project_id))
+
+
+@router.post("/{project_id}/preview-chat-cancel")
+async def cancel_preview_chat(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Cancel a running preview chat task."""
+    pid = str(project_id)
+    delete_progress(_NS_PREVIEW_CHAT, pid)
+    return {"cancelled": True}
+
+
+async def _run_preview_chat(project_id: uuid.UUID, workspace_id: uuid.UUID, user_message: str):
+    """Background task: apply a general AI instruction across all chapters."""
+    from ..database import create_task_engine
+    from ..services.ai_service import create_ai_service
+
+    pid = str(project_id)
+
+    def _update(step: str, progress: int, message: str):
+        set_progress(_NS_PREVIEW_CHAT, pid, {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+        })
+
+    task_engine, TaskSession = create_task_engine()
+
+    try:
+        _update("loading", 10, "Chargement du document...")
+
+        async with TaskSession() as db:
+            config_result = await db.execute(
+                select(AIConfig).where(AIConfig.workspace_id == workspace_id)
+            )
+            config = config_result.scalar_one()
+            ai_service = create_ai_service(config)
+
+            project_result = await db.execute(
+                select(RFPProject).where(RFPProject.id == project_id)
+            )
+            project = project_result.scalar_one()
+
+            chapters_result = await db.execute(
+                select(Chapter)
+                .where(Chapter.project_id == project_id)
+                .order_by(Chapter.order)
+            )
+            all_chapters = chapters_result.scalars().all()
+
+            # Build flat list of chapters with content
+            chapters_data = []
+            for ch in all_chapters:
+                if ch.content and ch.content.strip():
+                    anon_content = await AnonymizationService.anonymize_text(
+                        ch.content, project_id, db,
+                    )
+                    chapters_data.append({
+                        "id": str(ch.id),
+                        "title": ch.title,
+                        "numbering": ch.numbering or "",
+                        "content": anon_content,
+                    })
+
+            anon_message = await AnonymizationService.anonymize_text(
+                user_message, project_id, db,
+            )
+
+            deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
+
+        if not chapters_data:
+            set_progress(_NS_PREVIEW_CHAT, pid, {
+                "status": "completed", "step": "done", "progress": 100,
+                "message": "Aucun chapitre avec du contenu a modifier.",
+                "changed_chapters": [],
+            })
+            return
+
+        _update("analyzing", 25, "Envoi a l'IA...")
+
+        # Build the document snapshot for the AI
+        doc_snapshot = ""
+        for ch in chapters_data:
+            doc_snapshot += f"\n\n===== CHAPITRE [{ch['id']}] : {ch['numbering']} {ch['title']} =====\n"
+            doc_snapshot += ch["content"]
+
+        system_prompt = """Tu es un assistant expert en redaction de reponses aux appels d'offres.
+L'utilisateur te donne une instruction a appliquer sur l'ensemble du document.
+
+Le document est compose de plusieurs chapitres, chacun identifie par un ID unique entre crochets.
+
+Tu dois:
+1. Analyser l'instruction de l'utilisateur
+2. Identifier TOUS les chapitres concernes par la modification
+3. Pour chaque chapitre concerne, produire le contenu COMPLET modifie (pas juste le diff)
+
+Anonymisation:
+- Le texte peut contenir des marqueurs comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
+- Tu DOIS reutiliser EXACTEMENT les memes marqueurs. Ne JAMAIS en inventer de nouveaux.
+
+Formatage:
+- Utilise des sous-titres avec ## pour les sections
+- Utilise **gras** pour les termes importants
+- Utilise des listes a puces avec - pour les enumerations
+
+IMPORTANT: Ta reponse DOIT etre un JSON valide avec cette structure exacte:
+{
+  "summary": "Resume court de ce qui a ete modifie",
+  "changes": [
+    {
+      "chapter_id": "uuid-du-chapitre",
+      "chapter_title": "Titre du chapitre",
+      "new_content": "Contenu COMPLET modifie du chapitre"
+    }
+  ]
+}
+
+Si l'instruction ne necessite aucune modification, retourne:
+{"summary": "Aucune modification necessaire.", "changes": []}"""
+
+        ai_context = project.ai_context or ""
+        if ai_context:
+            system_prompt += f"""
+
+Contexte de redaction fourni par l'utilisateur:
+{ai_context}"""
+
+        user_prompt = f"""Voici le document complet:
+
+{doc_snapshot}
+
+--- INSTRUCTION DE L'UTILISATEUR ---
+{anon_message}
+
+Applique cette instruction sur tous les chapitres concernes. Retourne le JSON."""
+
+        _update("generating", 40, "L'IA analyse et modifie le document...")
+
+        raw_response = await ai_service.generate(system_prompt, user_prompt, temperature=0.3)
+
+        _update("parsing", 75, "Traitement de la reponse...")
+
+        # Parse the AI response as JSON
+        import json as _json
+        import re as _re
+        cleaned = raw_response.strip()
+        cleaned = _re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
+        cleaned = _re.sub(r'\n?```\s*$', '', cleaned)
+
+        try:
+            result = _json.loads(cleaned)
+        except _json.JSONDecodeError:
+            # Try to extract JSON object
+            match = _re.search(r'\{[\s\S]*\}', cleaned)
+            if match:
+                result = _json.loads(match.group())
+            else:
+                raise ValueError("L'IA n'a pas retourne un JSON valide")
+
+        changes = result.get("changes", [])
+        summary = result.get("summary", "Modifications appliquees")
+
+        if changes:
+            _update("saving", 85, f"Enregistrement de {len(changes)} chapitre(s) modifie(s)...")
+
+            def _deanon(text: str) -> str:
+                if not text or not deanon_map:
+                    return text
+                for placeholder, original in deanon_map.items():
+                    text = text.replace(placeholder, original)
+                return text
+
+            async with TaskSession() as db:
+                changed_titles = []
+                for change in changes:
+                    ch_id = change.get("chapter_id")
+                    new_content = change.get("new_content", "")
+                    if not ch_id or not new_content:
+                        continue
+                    try:
+                        ch_result = await db.execute(
+                            select(Chapter).where(Chapter.id == uuid.UUID(ch_id))
+                        )
+                        chapter = ch_result.scalar_one_or_none()
+                        if chapter:
+                            chapter.content = _deanon(new_content)
+                            changed_titles.append(change.get("chapter_title", chapter.title))
+                    except Exception as e:
+                        logger.warning("Could not update chapter %s: %s", ch_id, e)
+                await db.commit()
+
+            set_progress(_NS_PREVIEW_CHAT, pid, {
+                "status": "completed", "step": "done", "progress": 100,
+                "message": summary,
+                "changed_chapters": changed_titles,
+            })
+        else:
+            set_progress(_NS_PREVIEW_CHAT, pid, {
+                "status": "completed", "step": "done", "progress": 100,
+                "message": summary,
+                "changed_chapters": [],
+            })
+
+    except Exception as e:
+        logger.exception("Preview chat failed for project %s", project_id)
+        set_progress(_NS_PREVIEW_CHAT, pid, {
+            "status": "error", "step": "error", "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        })
+    finally:
+        await task_engine.dispose()
