@@ -445,6 +445,18 @@ export class ApiService {
     return this.http.get<DocumentPreview>(`${this.baseUrl}/export/${projectId}/preview${params}`);
   }
 
+  sendPreviewChat(projectId: string, message: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/preview-chat`, { message });
+  }
+
+  getPreviewChatStatus(projectId: string): Observable<{ status: string; step: string; progress: number; message: string; changed_chapters?: string[] }> {
+    return this.http.get<any>(`${this.baseUrl}/export/${projectId}/preview-chat-status`);
+  }
+
+  cancelPreviewChat(projectId: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/preview-chat-cancel`, {});
+  }
+
   // ── Admin ──
   getUsers(): Observable<UserInfo[]> {
     return this.http.get<UserInfo[]>(`${this.baseUrl}/admin/users`);
