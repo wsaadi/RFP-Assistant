@@ -426,6 +426,10 @@ export class ApiService {
     return this.http.delete(`${this.baseUrl}/export/${projectId}/backup-progress`);
   }
 
+  cancelWordExport(projectId: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/word-cancel`, {});
+  }
+
   clearWordProgress(projectId: string): Observable<any> {
     return this.http.delete(`${this.baseUrl}/export/${projectId}/word-progress`);
   }

@@ -66,6 +66,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
         <div class="gen-progress-header">
           <mat-spinner diameter="20" class="spin-icon"></mat-spinner>
           <h3>{{ wordProgress.step === 'downloading' ? 'Telechargement Word...' : 'Export Word en cours...' }}</h3>
+          <span style="flex:1"></span>
+          <button mat-icon-button color="warn" (click)="cancelWordExport()" matTooltip="Annuler l'export" [disabled]="cancellingWord">
+            <mat-icon>close</mat-icon>
+          </button>
         </div>
         <mat-progress-bar [mode]="wordProgress.step === 'downloading' ? 'indeterminate' : 'determinate'" [value]="wordProgress.progress"></mat-progress-bar>
         <div class="gen-progress-details">
@@ -2236,8 +2240,29 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   }
 
   exportingWord = false;
+  cancellingWord = false;
   wordProgress: { status: string; step: string; progress: number; message: string } | null = null;
   private wordPollSub: Subscription | null = null;
+
+  cancelWordExport(): void {
+    this.cancellingWord = true;
+    this.stopWordPolling();
+    this.api.cancelWordExport(this.projectId).subscribe({
+      next: () => {
+        this.exportingWord = false;
+        this.cancellingWord = false;
+        this.wordProgress = null;
+        this.snackBar.open('Export Word annule', 'OK', { duration: 3000 });
+      },
+      error: () => {
+        // Even on error, reset the UI so user isn't stuck
+        this.exportingWord = false;
+        this.cancellingWord = false;
+        this.wordProgress = null;
+        this.snackBar.open('Export Word annule', 'OK', { duration: 3000 });
+      },
+    });
+  }
 
   exportWord(): void {
     this.exportingWord = true;
