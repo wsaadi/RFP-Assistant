@@ -846,10 +846,12 @@ class AnonymizationService:
         return results
 
     # Regex matching any placeholder the AI might generate: [PREFIX_N]
+    # Uses a broad pattern to catch ALL bracket-delimited uppercase placeholders,
+    # including AI-invented ones like [FILIALE_1], [GROUPE_MERE_2], [VILLE_SIEGE_1].
     _PLACEHOLDER_RE = re.compile(
         r'\['
-        r'(?:' + '|'.join(ENTITY_PREFIXES.values()) + r')'
-        r'_\d+'
+        r'[A-ZÀ-Ü][A-ZÀ-Ü_]+'  # Any uppercase word(s) with underscores
+        r'_\d+'                    # Followed by _N
         r'\]'
     )
 
@@ -860,7 +862,9 @@ class AnonymizationService:
         return all_found - known_placeholders
 
     # Generic replacement terms for AI-invented placeholders, keyed by prefix.
+    # Includes BOTH our official prefixes AND common ones Mistral likes to invent.
     _GENERIC_TERMS: Dict[str, str] = {
+        # Official prefixes (from ENTITY_PREFIXES)
         "ENTREPRISE": "l'entreprise",
         "PERSONNE": "le responsable",
         "SOLUTION": "la solution proposée",
@@ -872,15 +876,54 @@ class AnonymizationService:
         "DATE": "la date prévue",
         "MONTANT": "le montant",
         "ENTITE": "l'entité concernée",
+        # Common AI-invented prefixes (Mistral likes to create these)
+        "FILIALE": "la filiale",
+        "GROUPE": "le groupe",
+        "GROUPE_MERE": "le groupe",
+        "SOCIETE": "la société",
+        "SOCIETE_MERE": "la société mère",
+        "CLIENT": "le client",
+        "NOM_CLIENT": "le client",
+        "PARTENAIRE": "le partenaire",
+        "PRESTATAIRE": "le prestataire",
+        "CANDIDAT": "le candidat",
+        "VILLE": "la ville",
+        "VILLE_SIEGE": "la ville du siège",
+        "SIEGE": "le siège social",
+        "PAYS": "le pays",
+        "REGION": "la région",
+        "NOMBRE_EMPLOYES": "l'effectif",
+        "EFFECTIF": "l'effectif",
+        "CHIFFRE_AFFAIRES": "le chiffre d'affaires",
+        "CHIFFRE_DAFFAIRES": "le chiffre d'affaires",
+        "CA": "le chiffre d'affaires",
+        "CAPITAL": "le capital social",
+        "SIRET": "le numéro SIRET",
+        "SIREN": "le numéro SIREN",
+        "CERTIFICATION": "la certification",
+        "NOM_PROJET": "le projet",
+        "NOM_SOLUTION": "la solution",
+        "TECHNOLOGIE": "la technologie",
+        "OUTIL": "l'outil",
+        "PLATEFORME": "la plateforme",
+        "LOGICIEL": "le logiciel",
+        "REFERENCE": "la référence",
+        "NOM": "le nom",
+        "PRENOM": "le prénom",
+        "DIRECTEUR": "le directeur",
+        "RESPONSABLE": "le responsable",
+        "CHEF_PROJET": "le chef de projet",
     }
 
     @classmethod
     def strip_invented_placeholders(cls, text: str, known_placeholders: set) -> str:
         """Replace AI-invented placeholders with generic French terms.
 
-        When Mistral invents a new placeholder (e.g. [ENTREPRISE_2]) that does
-        not exist in our mappings, replace it with a generic term instead of
-        creating an orphan mapping with empty original_value.
+        When Mistral invents a new placeholder (e.g. [FILIALE_1], [GROUPE_MERE_2])
+        that does not exist in our mappings, replace it with a generic term instead
+        of leaving an orphan placeholder in the final text.
+
+        Handles ANY [UPPERCASE_WORD_N] pattern, not just known prefixes.
         """
         unknown = cls.find_unknown_placeholders(text, known_placeholders)
         if not unknown:
@@ -889,7 +932,19 @@ class AnonymizationService:
         for token in unknown:
             inner = token.strip("[]")
             prefix = inner.rsplit("_", 1)[0]
-            generic = cls._GENERIC_TERMS.get(prefix, "l'entité concernée")
+            # Try exact match first, then progressive prefix matching
+            generic = cls._GENERIC_TERMS.get(prefix)
+            if not generic:
+                # Try matching partial prefix (e.g., SOCIETE_MERE → SOCIETE)
+                for known_prefix, term in cls._GENERIC_TERMS.items():
+                    if prefix.startswith(known_prefix) or known_prefix.startswith(prefix):
+                        generic = term
+                        break
+            if not generic:
+                # Last resort: derive something readable from the prefix itself
+                # e.g., "NOMBRE_EMPLOYES" → "le nombre d'employés"
+                readable = prefix.lower().replace("_", " ")
+                generic = f"le {readable}"
             text = text.replace(token, generic)
             logger.info(
                 "[deanonymize] Stripped AI-invented placeholder %s → '%s'", token, generic,

@@ -739,11 +739,21 @@ Tu dois rédiger un contenu de HAUTE QUALITÉ RÉDACTIONNELLE pour un chapitre d
 - Être factuel et concret tout en restant développé et argumenté
 - Apporter de la valeur ajoutée : ne pas simplement reformuler l'exigence, mais montrer COMMENT on y répond
 
-## Anonymisation :
-- Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
-- Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
-- Tu ne dois JAMAIS inventer de nouveaux marqueurs.
-- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques (ex: "le client", "le prestataire", "la solution proposée").
+## ANONYMISATION — RÈGLES CRITIQUES :
+Le texte fourni contient des marqueurs anonymisés entre crochets comme [ENTREPRISE_1], [PERSONNE_1], etc.
+
+**OBLIGATIONS :**
+- Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs [XXXX_N] déjà présents dans le texte fourni.
+- Si le texte contient [ENTREPRISE_1], tu peux écrire [ENTREPRISE_1] dans ta réponse.
+
+**INTERDICTIONS ABSOLUES :**
+- Tu ne dois JAMAIS CRÉER de nouveau marqueur entre crochets. Pas de [FILIALE_1], [GROUPE_MERE_1], [VILLE_SIEGE_1], [NOMBRE_EMPLOYES_1], [CHIFFRE_DAFFAIRES_1], ni aucun autre marqueur inventé.
+- Tu ne dois JAMAIS utiliser le format [MOT_CHIFFRE] pour autre chose que les marqueurs déjà présents.
+- Si tu dois parler d'une filiale, écris "la filiale" ou "notre filiale", PAS [FILIALE_1].
+- Si tu dois parler d'un siège social, écris "le siège social", PAS [VILLE_SIEGE_1].
+- Si tu dois mentionner un effectif, écris "nos collaborateurs" ou "notre équipe", PAS [NOMBRE_EMPLOYES_1].
+- Si tu dois parler du chiffre d'affaires, écris "notre chiffre d'affaires", PAS [CHIFFRE_DAFFAIRES_1].
+- Pour TOUTE information qui n'a pas de marqueur existant, utilise des termes génériques en français normal.
 
 ## Formatage :
 - Utilise **##** pour les titres de sections et **###** pour les sous-sections
@@ -801,11 +811,11 @@ Tu dois enrichir et améliorer significativement le contenu existant d'un chapit
 - **Conserver toutes les informations existantes** tout en les développant
 - Le texte enrichi doit être au moins 50% plus long que l'original
 
-## Anonymisation :
-- Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
-- Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
-- Tu ne dois JAMAIS inventer de nouveaux marqueurs.
-- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques.
+## ANONYMISATION — RÈGLES CRITIQUES :
+Le texte contient des marqueurs anonymisés entre crochets comme [ENTREPRISE_1], [PERSONNE_1], etc.
+- Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs déjà présents.
+- Tu ne dois JAMAIS CRÉER de nouveau marqueur entre crochets (pas de [FILIALE_1], [GROUPE_MERE_1], [VILLE_SIEGE_1], etc.).
+- Pour toute information sans marqueur existant, utilise du français normal ("la filiale", "le siège social", "nos collaborateurs").
 
 ## Formatage :
 - Utilise **##** pour les titres de sections et **###** pour les sous-sections
@@ -1216,11 +1226,11 @@ Style de rédaction :
 - Utilise des transitions fluides entre les sections
 - Chaque paragraphe doit contenir plusieurs phrases développées
 
-Anonymisation :
-- Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
-- Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
-- Tu ne dois JAMAIS inventer de nouveaux marqueurs.
-- Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques.
+ANONYMISATION — RÈGLES CRITIQUES :
+- Le texte contient des marqueurs anonymisés entre crochets comme [ENTREPRISE_1], [PERSONNE_1], etc.
+- Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs déjà présents.
+- Tu ne dois JAMAIS CRÉER de nouveau marqueur entre crochets (pas de [FILIALE_1], [GROUPE_MERE_1], etc.).
+- Pour toute information sans marqueur existant, utilise du français normal.
 
 Formatage :
 - Utilise **##** pour les titres de sections et **###** pour les sous-sections
