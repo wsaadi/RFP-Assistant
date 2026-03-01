@@ -1,15 +1,21 @@
 """Anonymization service using a local LLM (Qwen2.5 14B via Ollama) for NER-based pseudonymization.
 
-Uses a capable 14B-parameter model for accurate context-aware entity detection,
-including short company names/acronyms (e.g., "EDF" alone, not just "EDF SA").
+Uses a capable 14B-parameter model for accurate context-aware entity detection
+of personal data (person names, emails, phone numbers, postal addresses) and
+project/RFP reference codes.
+
+Company names, solution/product names, brand names, and client names are
+intentionally kept in clear text. This gives the AI generation model (Mistral)
+enough business context to produce accurate responses without hallucinating
+fictional subsidiaries, products, or organizational structures.
 
 Architecture:
 - Primary: Ollama running on DGX Spark (GPU-accelerated)
 - Fallback: Regex-only detection if Ollama is unavailable
 
-The LLM receives a focused prompt asking it to extract ONLY real sensitive entities
-from French RFP documents, with explicit instructions to ignore job titles, roles,
-legal terms, etc.
+The LLM receives a focused prompt asking it to extract ONLY personal data and
+reference codes from French RFP documents, with explicit instructions to ignore
+company names, solution names, job titles, roles, legal terms, etc.
 """
 import asyncio
 import json
@@ -50,23 +56,20 @@ _CHUNK_SEPARATOR = "\n\n---\n\n"
 _NER_SYSTEM_PROMPT = """\
 Tu es un système d'extraction d'entités nommées spécialisé dans les documents d'appels d'offres français.
 
-Ta mission : extraire UNIQUEMENT les vraies données sensibles qui doivent être anonymisées.
+Ta mission : extraire UNIQUEMENT les vraies données personnelles sensibles qui doivent être anonymisées.
 
-EXTRAIRE (entités sensibles réelles) :
+EXTRAIRE (données personnelles sensibles) :
 - "person" : Vrais noms et prénoms de personnes physiques (ex: "Jean Dupont", "Marie-Claire Martin"). Un nom de personne contient TOUJOURS au minimum un prénom ET un nom de famille, tous deux avec une majuscule.
-- "company" : Vrais noms d'entreprises et organisations privées, Y COMPRIS les noms courts, acronymes et sigles d'entreprises. Exemples :
-  - Noms complets : "Capgemini", "Sopra Steria", "Orange Business Services", "Accenture"
-  - Noms courts / sigles : "EDF", "SFR", "Atos", "Engie", "SNCF", "TotalEnergies", "BNP Paribas"
-  - Avec forme juridique OU sans : "EDF SA" ET "EDF" doivent TOUS DEUX être extraits
-  - Groupements hospitaliers, centrales d'achat : "RESAH", "UniHA", "UGAP" (sauf s'ils sont le client de l'AO en cours)
-  - Media / autres : "MediaTV", "TF1", "Canal+"
-  IMPORTANT : si "EDF SA" apparaît, extrais AUSSI "EDF" quand il apparaît seul. Ne rate pas les formes courtes d'un nom d'entreprise.
-  PAS les institutions publiques connues de l'État (CNIL, ANSSI, DINUM, etc.).
 - "email" : Adresses email complètes
+- "phone" : Numéros de téléphone (fixes et mobiles)
 - "address" : Adresses postales physiques complètes (avec numéro, rue, ville)
-- "project_code" : Codes de référence de projet ou d'appel d'offres spécifiques (ex: "AO-2024-0847", "PRJ-FR-2025")
+- "project_code" : Codes de référence de projet ou d'appel d'offres spécifiques (ex: "AO-2024-0847", "PRJ-FR-2025", noms de code internes de projets)
 
-NE PAS EXTRAIRE (liste non exhaustive) :
+NE PAS EXTRAIRE (conserver en clair — liste non exhaustive) :
+- Noms d'entreprises et sociétés : NE PAS anonymiser les noms d'entreprises, filiales, groupes, ESN, intégrateurs, sous-traitants. Exemples à NE PAS extraire : "SCC", "EDF", "Capgemini", "Leviia", "Scalingo", "AWS", "Microsoft", etc.
+- Noms de solutions, logiciels, produits, plateformes : NE PAS anonymiser. Exemples : "Atrium FinOps", "ServiceNow", "Azure", "Scaleway", "VMware", etc.
+- Noms de marques, éditeurs, fournisseurs cloud, constructeurs : NE PAS anonymiser.
+- Noms du client de l'appel d'offres et de ses entités : NE PAS anonymiser.
 - Titres et fonctions : directeur, chef de projet, responsable, DPO, DSI, RSSI, Business Development Manager, consultant, architecte, ingénieur, pilote, référent, coordinateur...
 - Rôles contractuels : titulaire, prestataire, candidat, sous-traitant, bénéficiaire, attributaire, mandataire, acheteur, maître d'ouvrage, cotraitant...
 - Termes génériques : personne, client, fournisseur, partenaire, membre, tiers, autorité, entité, structure, service, direction, utilisateur...
@@ -79,21 +82,21 @@ NE PAS EXTRAIRE (liste non exhaustive) :
 - Mots en minuscules : un vrai nom propre commence TOUJOURS par une majuscule
 
 IMPORTANT :
-- Pour les entreprises : extrais TOUTES les formes du nom (courte ET longue). "EDF SA" et "EDF" sont deux occurrences à extraire séparément.
-- En cas de doute sur une entreprise connue, EXTRAIRE. Mieux vaut un faux positif entreprise qu'un oubli.
+- NE JAMAIS extraire de noms d'entreprises, de solutions ou de produits. Seules les données personnelles (noms de personnes, emails, téléphones, adresses) et les codes projet/AO doivent être anonymisés.
 - En cas de doute sur un rôle/titre, NE PAS extraire.
 - "Responsable de la sécurité" → NE PAS extraire (c'est un rôle)
 - "Pierre Durand, responsable de la sécurité" → extraire UNIQUEMENT "Pierre Durand"
 - "le prestataire" → NE PAS extraire
-- "la société Atos" → extraire "Atos"
-- "un contrat avec EDF" → extraire "EDF"
-- "EDF SA, filiale du groupe EDF" → extraire "EDF SA" ET "EDF"
+- "la société Atos" → NE PAS extraire (c'est un nom d'entreprise)
+- "un contrat avec EDF" → NE PAS extraire (c'est un nom d'entreprise)
+- "contacter jean.dupont@scc.com" → extraire "jean.dupont@scc.com"
+- "Pierre Durand au 01 23 45 67 89" → extraire "Pierre Durand" ET "01 23 45 67 89"
 
 Le texte peut contenir plusieurs blocs séparés par "--- BLOC N ---".
 Dans ce cas, ajoute le numéro du bloc dans ta réponse.
 
 Réponds UNIQUEMENT avec un tableau JSON (sans markdown, sans explication) :
-[{"text": "texte exact trouvé", "type": "person|company|email|address|project_code", "block": 1}]
+[{"text": "texte exact trouvé", "type": "person|email|phone|address|project_code", "block": 1}]
 
 Si aucune entité sensible n'est trouvée, réponds : []"""
 
@@ -287,6 +290,16 @@ _REJECT_PATTERNS: list = [
 _MIN_ENTITY_LENGTH = 3
 
 
+_SKIP_ENTITY_TYPES: set = {
+    # Company names and solution/product names are intentionally NOT anonymized.
+    # Keeping them in clear gives the AI model enough business context to generate
+    # accurate, non-hallucinated responses about the companies, their subsidiaries,
+    # products, and solutions involved in the RFP.
+    "company", "entreprise", "société", "societe", "organization", "organisation",
+    "solution", "solution_name", "nom_solution",
+}
+
+
 def _should_keep_entity(entity_text: str, label: str) -> bool:
     """Return True if the detected entity is likely a real sensitive entity.
 
@@ -296,6 +309,11 @@ def _should_keep_entity(entity_text: str, label: str) -> bool:
     cleaned = entity_text.strip()
 
     if len(cleaned) < _MIN_ENTITY_LENGTH:
+        return False
+
+    # Skip entity types that we intentionally keep in clear (companies, solutions)
+    if label.lower().strip() in _SKIP_ENTITY_TYPES:
+        logger.debug("[NER-filter] Skipping %s entity '%s' (type not anonymized)", label, cleaned)
         return False
 
     if cleaned.lower() in _STOPLIST_LOWER:
