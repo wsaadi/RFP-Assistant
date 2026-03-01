@@ -386,7 +386,7 @@ export class WorkspaceDetailComponent implements OnInit {
     this.api.createProject(this.workspaceId, this.newProject).subscribe({
       next: () => {
         this.showCreateProject = false;
-        this.newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp', 'inspiration'], context_mode: 'rag' };
+        this.newProject = { name: '', description: '', client_name: '', company_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp', 'inspiration'], context_mode: 'rag' };
         this.loadData();
       },
     });
