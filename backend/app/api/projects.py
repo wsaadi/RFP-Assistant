@@ -832,10 +832,13 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # Load project AI context
+            # Load project AI context and anonymize it (may contain client/company names)
             proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
             proj = proj_result.scalar_one()
-            proj_ai_context = proj.ai_context or ""
+            raw_ai_context = proj.ai_context or ""
+            proj_ai_context = await AnonymizationService.apply_existing_mappings(
+                raw_ai_context, project_id, db
+            ) if raw_ai_context else ""
 
             _update("loading", 5, "Chargement des documents (AO, ancien AO, ancienne reponse)...")
             # Load all 3 categories in parallel for speed
@@ -915,11 +918,14 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                     or rd.content_type in ("redaction", "REDACTION")
                 )
 
-            resp_docs = [
-                (str(rd.id), rd.title, rd.description)
-                for rd in all_docs
-                if _is_truly_redaction(rd)
-            ]
+            # Anonymize document titles/descriptions before sending to AI
+            _anon = AnonymizationService.apply_existing_mappings
+            resp_docs = []
+            for rd in all_docs:
+                if _is_truly_redaction(rd):
+                    anon_t = await _anon(rd.title or "", project_id, db)
+                    anon_d = await _anon(rd.description or "", project_id, db)
+                    resp_docs.append((str(rd.id), anon_t, anon_d))
             completion_docs_count = sum(
                 1 for rd in all_docs
                 if not _is_truly_redaction(rd)
@@ -1230,10 +1236,13 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # Load project settings
+            # Load project settings + anonymize AI context
             proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
             proj = proj_result.scalar_one()
-            proj_ai_context = proj.ai_context or ""
+            raw_ai_context = proj.ai_context or ""
+            proj_ai_context = await AnonymizationService.apply_existing_mappings(
+                raw_ai_context, project_id, db
+            ) if raw_ai_context else ""
             proj_context_mode = proj.context_mode or "rag"
 
             _update("loading", 5, "Chargement des chapitres...")
@@ -1246,14 +1255,19 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
             chapters = result.scalars().all()
 
             # Capture plain data we need (detach from session)
+            # Anonymize chapter metadata (titles may contain client/company names)
+            _anon = AnonymizationService.apply_existing_mappings
             to_prefill = []
             for ch in chapters:
                 if not ch.content:
                     to_prefill.append({
                         "id": ch.id,
                         "title": ch.title,
+                        "anon_title": await _anon(ch.title, project_id, db),
                         "description": ch.description,
+                        "anon_description": await _anon(ch.description, project_id, db),
                         "rfp_requirement": ch.rfp_requirement,
+                        "anon_rfp_requirement": await _anon(ch.rfp_requirement, project_id, db),
                     })
             total_chapters = len(chapters)
         # DB connection released here
@@ -1319,11 +1333,11 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                     async with async_session() as db:
                         anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
 
-                # AI call (no DB connection held)
+                # AI call (no DB connection held) — all fields anonymized
                 content = await ai_service.generate_chapter_content(
-                    chapter_title=ch_data["title"],
-                    chapter_description=ch_data["description"],
-                    rfp_requirement=ch_data["rfp_requirement"],
+                    chapter_title=ch_data["anon_title"],
+                    chapter_description=ch_data["anon_description"],
+                    rfp_requirement=ch_data["anon_rfp_requirement"],
                     old_response_content=anon_content,
                     ai_context=proj_ai_context,
                 )
@@ -1796,9 +1810,12 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # Load project AI context
+            # Load project AI context and anonymize it
             proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
-            proj_ai_context = (proj_result.scalar_one().ai_context or "")
+            raw_ai_context = (proj_result.scalar_one().ai_context or "")
+            proj_ai_context = await AnonymizationService.apply_existing_mappings(
+                raw_ai_context, project_id, db
+            ) if raw_ai_context else ""
 
             _update("loading", 5, "Chargement des documents à compléter...")
 
@@ -1820,12 +1837,16 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 })
                 return
 
-            # Capture plain data (detach from session)
-            docs_data = [
-                {"id": doc.id, "title": doc.title, "description": doc.description,
-                 "expected_format": doc.expected_format.value}
-                for doc in comp_docs
-            ]
+            # Capture plain data (detach from session) — anonymize titles/descriptions
+            _anon = AnonymizationService.apply_existing_mappings
+            docs_data = []
+            for doc in comp_docs:
+                docs_data.append({
+                    "id": doc.id,
+                    "title": await _anon(doc.title or "", project_id, db),
+                    "description": await _anon(doc.description or "", project_id, db),
+                    "expected_format": doc.expected_format.value,
+                })
 
             _update("loading", 10, f"{total} document(s) à compléter...")
 
@@ -1841,10 +1862,13 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 .order_by(Chapter.order)
             )
             existing_chapters = chapters_result.scalars().all()
-            chapter_context = "\n\n".join([
-                f"## {ch.title}\n{ch.content[:2000]}"
-                for ch in existing_chapters[:10]
-            ])
+            # Anonymize chapter context before sending to AI
+            chapter_parts_list = []
+            for ch in existing_chapters[:10]:
+                anon_ch_t = await _anon(ch.title, project_id, db)
+                anon_ch_c = await _anon(ch.content[:2000], project_id, db)
+                chapter_parts_list.append(f"## {anon_ch_t}\n{anon_ch_c}")
+            chapter_context = "\n\n".join(chapter_parts_list)
         # DB released
 
         import time
@@ -2048,7 +2072,10 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
                 chapter_parts.append("\n\n=== DOCUMENT: Memoire Technique (redige avec l'outil) ===\n")
                 for c in chapters_with_content:
                     text = (c.anonymized_content or c.content or "").strip()
-                    chapter_parts.append(f"\n--- {c.title} ---\n")
+                    anon_ch_title = await AnonymizationService.apply_existing_mappings(
+                        c.title, project_id, db
+                    )
+                    chapter_parts.append(f"\n--- {anon_ch_title} ---\n")
                     chapter_parts.append(text)
             anon_chapters = "\n\n".join(chapter_parts)
 
@@ -2303,7 +2330,10 @@ async def _run_rec_generation(
                 select(RFPProject).where(RFPProject.id == project_id)
             )
             project = project_result.scalar_one()
-            ai_context = project.ai_context or ""
+            raw_ai_context = project.ai_context or ""
+            ai_context = await AnonymizationService.apply_existing_mappings(
+                raw_ai_context, project_id, db
+            ) if raw_ai_context else ""
 
             _update("searching", 10, "Recherche de contexte...")
 
@@ -2335,10 +2365,14 @@ async def _run_rec_generation(
 
             existing_chapter_content = ""
             chapter_title = ""
+            anon_chapter_title = ""
             resolved_chapter_id = None
             if target_chapter:
                 existing_chapter_content = target_chapter.content or ""
                 chapter_title = target_chapter.title or ""
+                anon_chapter_title = await AnonymizationService.apply_existing_mappings(
+                    chapter_title, project_id, db
+                )
                 resolved_chapter_id = str(target_chapter.id)
 
             _update("anonymizing", 30, f"Preparation (chapitre: {chapter_title or 'auto'})...",
@@ -2390,9 +2424,9 @@ Contexte de rédaction (informations sur notre société et notre approche):
             user_parts.append(f"CONTEXTE DU CAHIER DES CHARGES (extraits pertinents):\n{anon_rfp[:5000]}")
         if anon_old_response:
             user_parts.append(f"ÉLÉMENTS DE L'ANCIENNE RÉPONSE (à exploiter et adapter):\n{anon_old_response[:5000]}")
-        if anon_existing and chapter_title:
+        if anon_existing and anon_chapter_title:
             user_parts.append(
-                f"CONTENU ACTUEL DU CHAPITRE \"{chapter_title}\" (ne pas répéter, compléter):\n{anon_existing[:3000]}"
+                f"CONTENU ACTUEL DU CHAPITRE \"{anon_chapter_title}\" (ne pas répéter, compléter):\n{anon_existing[:3000]}"
             )
         user_parts.append(
             "Génère un contenu structuré (1-2 pages) qui comble cette lacune. "

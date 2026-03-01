@@ -91,6 +91,18 @@ async def _run_chapter_generation(
             proj_ai_context = project.ai_context or ""
             proj_context_mode = project.context_mode or "rag"
 
+            # ── Anonymize ALL metadata fields before sending to Mistral ──
+            # These fields (title, description, requirement, notes, improvement
+            # axes, AI context) were previously sent in clear text, leaking
+            # company names, client names, etc. to the external AI.
+            _update("anonymizing", 10, "Anonymisation des metadonnees...")
+            _anon = AnonymizationService.apply_existing_mappings
+            anon_title = await _anon(ch_title, project_id, db)
+            anon_description = await _anon(ch_description, project_id, db)
+            anon_rfp_requirement = await _anon(ch_rfp_requirement, project_id, db)
+            anon_improvement = await _anon(proj_improvement, project_id, db) if proj_improvement else ""
+            anon_ai_context = await _anon(proj_ai_context, project_id, db) if proj_ai_context else ""
+
             if action == "custom" and custom_prompt:
                 _update("anonymizing", 15, "Anonymisation du contenu...")
                 anon_content = await AnonymizationService.anonymize_text(ch_content, project_id, db)
@@ -149,39 +161,41 @@ async def _run_chapter_generation(
 
                 _update("anonymizing", 25, "Preparation...")
                 notes_text = "\n".join([n.get("content", "") for n in ch_notes])
+                anon_notes = await _anon(notes_text, project_id, db) if notes_text else ""
                 ai_params = {
                     "mode": "generate",
                     "old_response_content": old_response_content,
                     "context_chunks_text": context_chunks_text,
                     "inspiration_content": inspiration_content,
-                    "notes_text": notes_text,
+                    "notes_text": anon_notes,
                 }
 
         # ── Phase 2: AI generation (NO DB connection held) ──
+        # All text fields sent to Mistral are now anonymized.
         mode = ai_params["mode"]
         if mode == "custom":
             _update("generating", 35, "Generation IA en cours...")
             result_text = await ai_service.execute_custom_prompt(
-                ai_params["anon_content"], ai_params["anon_prompt"], ch_title,
-                ai_context=proj_ai_context,
+                ai_params["anon_content"], ai_params["anon_prompt"], anon_title,
+                ai_context=anon_ai_context,
             )
         elif mode == "enrich":
             _update("generating", 35, "Enrichissement IA en cours...")
             result_text = await ai_service.enrich_content(
-                ai_params["anon_content"], ch_title, ch_rfp_requirement, proj_improvement,
-                ai_context=proj_ai_context,
+                ai_params["anon_content"], anon_title, anon_rfp_requirement, anon_improvement,
+                ai_context=anon_ai_context,
             )
         else:
             _update("generating", 40, "Generation IA du contenu...")
             result_text = await ai_service.generate_chapter_content(
-                chapter_title=ch_title,
-                chapter_description=ch_description,
-                rfp_requirement=ch_rfp_requirement,
+                chapter_title=anon_title,
+                chapter_description=anon_description,
+                rfp_requirement=anon_rfp_requirement,
                 old_response_content=ai_params["old_response_content"],
                 context_chunks=ai_params["context_chunks_text"],
-                improvement_axes=proj_improvement,
+                improvement_axes=anon_improvement,
                 notes=ai_params["notes_text"],
-                ai_context=proj_ai_context,
+                ai_context=anon_ai_context,
                 inspiration_content=ai_params.get("inspiration_content", ""),
             )
 
