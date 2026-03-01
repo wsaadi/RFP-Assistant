@@ -90,6 +90,8 @@ async def _run_chapter_generation(
             proj_improvement = project.improvement_axes if include_improvement_axes else ""
             proj_ai_context = project.ai_context or ""
             proj_context_mode = project.context_mode or "rag"
+            proj_company_name = getattr(project, 'company_name', '') or ''
+            proj_client_name = project.client_name or ''
 
             # ── Anonymize ALL metadata fields before sending to Mistral ──
             # These fields (title, description, requirement, notes, improvement
@@ -178,12 +180,14 @@ async def _run_chapter_generation(
             result_text = await ai_service.execute_custom_prompt(
                 ai_params["anon_content"], ai_params["anon_prompt"], anon_title,
                 ai_context=anon_ai_context,
+                company_name=proj_company_name, client_name=proj_client_name,
             )
         elif mode == "enrich":
             _update("generating", 35, "Enrichissement IA en cours...")
             result_text = await ai_service.enrich_content(
                 ai_params["anon_content"], anon_title, anon_rfp_requirement, anon_improvement,
                 ai_context=anon_ai_context,
+                company_name=proj_company_name, client_name=proj_client_name,
             )
         else:
             _update("generating", 40, "Generation IA du contenu...")
@@ -197,6 +201,8 @@ async def _run_chapter_generation(
                 notes=ai_params["notes_text"],
                 ai_context=anon_ai_context,
                 inspiration_content=ai_params.get("inspiration_content", ""),
+                company_name=proj_company_name,
+                client_name=proj_client_name,
             )
 
         # ── Phase 3: Deanonymize + save ──

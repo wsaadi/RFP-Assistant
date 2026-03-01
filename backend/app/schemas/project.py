@@ -8,6 +8,7 @@ class ProjectCreate(BaseModel):
     name: str = Field(..., min_length=1, max_length=500)
     description: str = ""
     client_name: str = ""
+    company_name: str = ""
     rfp_reference: str = ""
     deadline: str = ""
     ai_context: str = ""
@@ -19,6 +20,7 @@ class ProjectUpdate(BaseModel):
     name: Optional[str] = Field(None, min_length=1, max_length=500)
     description: Optional[str] = None
     client_name: Optional[str] = None
+    company_name: Optional[str] = None
     rfp_reference: Optional[str] = None
     deadline: Optional[str] = None
     status: Optional[str] = None
@@ -34,6 +36,7 @@ class ProjectOut(BaseModel):
     name: str
     description: str
     client_name: str
+    company_name: str
     rfp_reference: str
     deadline: str
     status: str

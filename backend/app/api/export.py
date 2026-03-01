@@ -190,6 +190,7 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
                     client_name=project.client_name,
                     rfp_reference=project.rfp_reference,
                     chapters=chapters_data,
+                    company_name=getattr(project, 'company_name', '') or '',
                 ))
             finally:
                 loop.close()
@@ -475,6 +476,7 @@ async def preview_document(
     preview = {
         "project_name": project.name,
         "client_name": project.client_name,
+        "company_name": getattr(project, 'company_name', '') or '',
         "rfp_reference": project.rfp_reference,
         "chapters": [
             build_preview(c, 1, str(i+1))
@@ -623,6 +625,8 @@ async def _run_preview_chat(project_id: uuid.UUID, workspace_id: uuid.UUID, user
 
             deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
             ai_context = project.ai_context or ""
+            proj_company_name = getattr(project, 'company_name', '') or ''
+            proj_client_name = project.client_name or ''
 
         if not chapters_data:
             set_progress(_NS_PREVIEW_CHAT, pid, {
@@ -717,6 +721,10 @@ Formatage:
 - Utilise des listes a puces avec - pour les enumerations
 
 Retourne UNIQUEMENT le contenu modifie du chapitre, sans explication ni JSON."""
+
+        # Add identity and anti-hallucination guardrails
+        from ..services.ai_service import _build_identity_block
+        modify_system += _build_identity_block(proj_company_name, proj_client_name)
 
         if ai_context:
             modify_system += f"""

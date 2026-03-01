@@ -78,8 +78,14 @@ import { Workspace, RFPProject, WorkspaceMember, UserInfo } from '../../models/r
                   <input matInput [(ngModel)]="newProject.name" required>
                 </mat-form-field>
                 <mat-form-field appearance="outline">
-                  <mat-label>Client</mat-label>
-                  <input matInput [(ngModel)]="newProject.client_name">
+                  <mat-label>Notre société (soumissionnaire)</mat-label>
+                  <input matInput [(ngModel)]="newProject.company_name" placeholder="Ex: SCC, Capgemini, Sopra Steria...">
+                  <mat-hint>Nom de votre société qui répond à l'AO</mat-hint>
+                </mat-form-field>
+                <mat-form-field appearance="outline">
+                  <mat-label>Client (donneur d'ordres)</mat-label>
+                  <input matInput [(ngModel)]="newProject.client_name" placeholder="Ex: EDF, SNCF, Ministère...">
+                  <mat-hint>Organisme qui publie l'appel d'offres</mat-hint>
                 </mat-form-field>
                 <mat-form-field appearance="outline">
                   <mat-label>Référence AO</mat-label>
@@ -132,6 +138,10 @@ import { Workspace, RFPProject, WorkspaceMember, UserInfo } from '../../models/r
                       <input matInput [(ngModel)]="editingProject!.name">
                     </mat-form-field>
                     <mat-form-field appearance="outline">
+                      <mat-label>Notre société</mat-label>
+                      <input matInput [(ngModel)]="editingProject!.company_name">
+                    </mat-form-field>
+                    <mat-form-field appearance="outline">
                       <mat-label>Client</mat-label>
                       <input matInput [(ngModel)]="editingProject!.client_name">
                     </mat-form-field>
@@ -159,7 +169,7 @@ import { Workspace, RFPProject, WorkspaceMember, UserInfo } from '../../models/r
                   <mat-card-header>
                     <mat-icon mat-card-avatar class="project-icon" [class]="'status-' + p.status">assignment</mat-icon>
                     <mat-card-title>{{ p.name }}</mat-card-title>
-                    <mat-card-subtitle>{{ p.client_name }} - {{ p.rfp_reference }}</mat-card-subtitle>
+                    <mat-card-subtitle>{{ p.company_name ? p.company_name + ' → ' : '' }}{{ p.client_name }} - {{ p.rfp_reference }}</mat-card-subtitle>
                   </mat-card-header>
                   <mat-card-content>
                     <p class="project-desc">{{ p.description || 'Aucune description' }}</p>
@@ -321,11 +331,11 @@ export class WorkspaceDetailComponent implements OnInit {
     { value: 'new_response', label: 'Notre Réponse', desc: 'Notre réponse à analyser', icon: 'task', color: '#7b1fa2' },
     { value: 'inspiration', label: 'Inspiration', desc: 'Réponses d\'autres clients pour inspiration (anonymisées auto.)', icon: 'lightbulb', color: '#f57c00' },
   ];
-  newProject = { name: '', description: '', client_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp', 'inspiration'] as string[], context_mode: 'rag' };
+  newProject = { name: '', description: '', client_name: '', company_name: '', rfp_reference: '', deadline: '', ai_context: '', enabled_categories: ['old_rfp', 'old_response', 'new_rfp', 'inspiration'] as string[], context_mode: 'rag' };
   editingWorkspace = false;
   editWsName = '';
   editWsDescription = '';
-  editingProject: { id: string; name: string; description: string; client_name: string; rfp_reference: string; deadline: string } | null = null;
+  editingProject: { id: string; name: string; description: string; client_name: string; company_name: string; rfp_reference: string; deadline: string } | null = null;
 
   // Member management
   showAddMember = false;
@@ -452,6 +462,7 @@ export class WorkspaceDetailComponent implements OnInit {
       name: p.name,
       description: p.description || '',
       client_name: p.client_name || '',
+      company_name: p.company_name || '',
       rfp_reference: p.rfp_reference || '',
       deadline: p.deadline || '',
     };
@@ -463,6 +474,7 @@ export class WorkspaceDetailComponent implements OnInit {
       name: this.editingProject.name,
       description: this.editingProject.description,
       client_name: this.editingProject.client_name,
+      company_name: this.editingProject.company_name,
       rfp_reference: this.editingProject.rfp_reference,
       deadline: this.editingProject.deadline || null,
     }).subscribe({

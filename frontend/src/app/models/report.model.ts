@@ -66,6 +66,7 @@ export interface RFPProject {
   name: string;
   description: string;
   client_name: string;
+  company_name: string;
   rfp_reference: string;
   deadline: string;
   status: string;
@@ -84,6 +85,7 @@ export interface ProjectCreate {
   name: string;
   description: string;
   client_name: string;
+  company_name: string;
   rfp_reference: string;
   deadline: string;
   ai_context: string;
