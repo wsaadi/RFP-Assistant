@@ -202,7 +202,24 @@ async def _process_document_async(document_id: str, project_id: str):
                     progress_callback=_anon_progress,
                 )
                 await db.commit()  # persist new anonymization mappings
-            logger.info("[doc:%s] Anonymization completed successfully", document_id)
+
+            # Check if NER actually worked or just regex fallback
+            ner_diag = AnonymizationService.get_ner_diagnostic()
+            if not ner_diag.get("ollama_reachable"):
+                logger.warning(
+                    "[doc:%s] Anonymization completed with REGEX ONLY — "
+                    "Ollama NER was not available. Reason: %s. "
+                    "Company names, person names, etc. were NOT detected.",
+                    document_id, ner_diag.get("failure_reason"),
+                )
+            elif ner_diag.get("last_ner_produced_entities") is False:
+                logger.warning(
+                    "[doc:%s] Anonymization completed but NER returned 0 entities. "
+                    "Reason: %s",
+                    document_id, ner_diag.get("failure_reason"),
+                )
+            else:
+                logger.info("[doc:%s] Anonymization completed successfully (NER active)", document_id)
         except SoftTimeLimitExceeded:
             raise  # Don't catch timeout — let it propagate to the outer handler
         except Exception as anon_err:

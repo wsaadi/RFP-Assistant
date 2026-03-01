@@ -317,12 +317,18 @@ def _should_keep_entity(entity_text: str, label: str) -> bool:
 class AnonymizationService:
     """Service for anonymizing/pseudonymizing sensitive content.
 
-    Uses a local LLM (Gemma via Ollama) for context-aware NER detection,
+    Uses a local LLM (Qwen via Ollama) for context-aware NER detection,
     with regex fallback for deterministic patterns (emails).
     """
 
     _ollama_available: Optional[bool] = None
     _http_client: Optional[httpx.AsyncClient] = None
+    # Track the *last* NER run outcome so callers can report it to the user.
+    # None = not run yet, True = last run produced entities, False = last run
+    # returned nothing (Ollama might be up but model returned empty).
+    _last_ner_produced_entities: Optional[bool] = None
+    # Human-readable reason when NER fails/returns nothing
+    _last_ner_failure_reason: Optional[str] = None
 
     @classmethod
     async def _get_http_client(cls) -> httpx.AsyncClient:
@@ -357,24 +363,49 @@ class AnonymizationService:
                 if available:
                     logger.info("Ollama available at %s with model %s", _OLLAMA_BASE_URL, _OLLAMA_MODEL)
                     cls._ollama_available = True
+                    cls._last_ner_failure_reason = None
                 else:
+                    reason = (
+                        f"Ollama joignable mais le modèle '{_OLLAMA_MODEL}' n'est pas chargé. "
+                        f"Modèles disponibles: {model_names}. "
+                        f"Lancez 'ollama pull {_OLLAMA_MODEL}' sur le serveur Ollama."
+                    )
                     logger.warning(
                         "Ollama reachable but model '%s' not found. Available: %s. "
                         "Run 'ollama pull %s' on the host to download it.",
                         _OLLAMA_MODEL, model_names, _OLLAMA_MODEL,
                     )
+                    cls._last_ner_failure_reason = reason
                     # Don't cache — model might be pulled later
             else:
+                reason = f"Ollama a retourné le status HTTP {resp.status_code}"
                 logger.warning("Ollama returned status %d", resp.status_code)
+                cls._last_ner_failure_reason = reason
         except Exception as e:
+            reason = (
+                f"Ollama non joignable à {_OLLAMA_BASE_URL}: {e}. "
+                f"Vérifiez que le serveur Ollama est démarré et accessible depuis les containers Docker."
+            )
             logger.warning(
                 "Ollama not reachable at %s: %s. "
                 "Falling back to regex-only anonymization for this batch. "
                 "Will retry on next request.",
                 _OLLAMA_BASE_URL, e,
             )
+            cls._last_ner_failure_reason = reason
 
         return cls._ollama_available is True
+
+    @classmethod
+    def get_ner_diagnostic(cls) -> dict:
+        """Return diagnostic info about NER availability for user-facing endpoints."""
+        return {
+            "ollama_reachable": cls._ollama_available is True,
+            "ollama_url": _OLLAMA_BASE_URL,
+            "ollama_model": _OLLAMA_MODEL,
+            "last_ner_produced_entities": cls._last_ner_produced_entities,
+            "failure_reason": cls._last_ner_failure_reason,
+        }
 
     @classmethod
     def is_ner_available(cls) -> bool:
@@ -464,6 +495,10 @@ class AnonymizationService:
         client = await cls._get_http_client()
 
         try:
+            # NOTE: Do NOT use "format": "json" — it forces some models (Qwen,
+            # Gemma) to wrap output in a root JSON *object* (e.g. {"entities":
+            # [...]}) instead of the plain array the prompt asks for. The prompt
+            # already instructs the model to reply with a JSON array.
             resp = await client.post(
                 "/api/chat",
                 json={
@@ -477,19 +512,34 @@ class AnonymizationService:
                         "temperature": 0.0,
                         "num_predict": 4096,
                     },
-                    "format": "json",
                 },
             )
             resp.raise_for_status()
             result = resp.json()
             raw_content = result.get("message", {}).get("content", "[]")
 
+            logger.info(
+                "[NER-LLM] Raw model response (%d chars): %s",
+                len(raw_content),
+                raw_content[:500],
+            )
+
             entities_data = _parse_llm_json(raw_content)
             if not entities_data:
-                logger.info("[NER-LLM] Model returned no entities (raw: %s)", raw_content[:300])
+                logger.warning(
+                    "[NER-LLM] Model returned no parseable entities. "
+                    "Full raw response (%d chars): %s",
+                    len(raw_content), raw_content[:1000],
+                )
+                cls._last_ner_failure_reason = (
+                    f"Le modèle Ollama a répondu mais sans entités exploitables. "
+                    f"Réponse brute ({len(raw_content)} chars): {raw_content[:200]}"
+                )
                 return results
 
             logger.info("[NER-LLM] Model returned %d raw entities", len(entities_data))
+            cls._last_ner_produced_entities = True
+            cls._last_ner_failure_reason = None
 
             for item in entities_data:
                 entity_text = item.get("text", "").strip()
@@ -546,13 +596,22 @@ class AnonymizationService:
             return results
 
         except httpx.TimeoutException:
-            logger.warning("Ollama grouped request timed out after %ds", _OLLAMA_TIMEOUT)
+            reason = f"Ollama NER timeout après {_OLLAMA_TIMEOUT}s sur {len(texts)} texte(s)"
+            logger.warning("[NER-LLM] %s", reason)
+            cls._last_ner_failure_reason = reason
+            cls._last_ner_produced_entities = False
             return results
         except httpx.HTTPStatusError as e:
-            logger.warning("Ollama HTTP error: %s", e)
+            reason = f"Ollama HTTP error: {e.response.status_code} — {e.response.text[:300]}"
+            logger.warning("[NER-LLM] %s", reason)
+            cls._last_ner_failure_reason = reason
+            cls._last_ner_produced_entities = False
             return results
         except Exception as e:
-            logger.error("LLM grouped entity detection failed: %s", e, exc_info=True)
+            reason = f"NER LLM call failed: {type(e).__name__}: {e}"
+            logger.error("[NER-LLM] %s", reason, exc_info=True)
+            cls._last_ner_failure_reason = reason
+            cls._last_ner_produced_entities = False
             return results
 
     @classmethod
@@ -638,8 +697,22 @@ class AnonymizationService:
                 "(%d LLM calls, %d skipped via cache)",
                 total_entities, len(texts), total_groups, skipped_count,
             )
+            if total_entities == 0 and total_groups > 0:
+                logger.warning(
+                    "[batch_detect] WARNING: %d LLM calls made but 0 entities detected. "
+                    "This may indicate the model is not responding correctly. "
+                    "Last failure reason: %s",
+                    total_groups, cls._last_ner_failure_reason,
+                )
+                cls._last_ner_produced_entities = False
         else:
-            logger.info("[batch_detect] Ollama unavailable, using regex-only fallback")
+            logger.warning(
+                "[batch_detect] Ollama unavailable — using regex-only fallback. "
+                "NER entities (company names, person names, etc.) will NOT be detected. "
+                "Reason: %s",
+                cls._last_ner_failure_reason,
+            )
+            cls._last_ner_produced_entities = False
             if progress_callback:
                 progress_callback(len(texts), len(texts))
 
@@ -1210,7 +1283,15 @@ Analyse le contexte de chaque marqueur et propose une valeur réelle."""
 
 
 def _parse_llm_json(raw: str) -> Optional[list]:
-    """Parse JSON from LLM response, handling common formatting issues."""
+    """Parse JSON from LLM response, handling common formatting issues.
+
+    Models (especially with/without ``format: json``) may return:
+    - A plain JSON array:  ``[{...}, ...]``
+    - A wrapper object:    ``{"entities": [...]}``
+    - An object with *any* key whose value is a list of dicts
+    - Markdown fences around JSON
+    - Text before/after the JSON payload
+    """
     if not raw or not raw.strip():
         return None
 
@@ -1227,22 +1308,58 @@ def _parse_llm_json(raw: str) -> Optional[list]:
     try:
         data = json.loads(text)
         if isinstance(data, list):
-            return data
-        # Some models wrap in {"entities": [...]} or {"results": [...]}
+            return data if data else None
+        # Models often wrap the array in a dict — check well-known keys first,
+        # then fall back to *any* key whose value is a list of dicts.
         if isinstance(data, dict):
-            for key in ("entities", "results", "data", "items"):
+            # Well-known keys
+            for key in ("entities", "results", "data", "items", "entités",
+                         "entites", "named_entities", "response"):
                 if key in data and isinstance(data[key], list):
-                    return data[key]
+                    return data[key] if data[key] else None
+            # Fallback: take the first list-of-dicts value we find
+            for val in data.values():
+                if isinstance(val, list) and val and isinstance(val[0], dict):
+                    logger.info(
+                        "[_parse_llm_json] Found entities under unexpected key in dict: %s",
+                        list(data.keys()),
+                    )
+                    return val
+            # Empty dict or dict with no list values
+            logger.warning(
+                "[_parse_llm_json] Parsed valid JSON dict but no entity list found. "
+                "Keys: %s. Full response: %s",
+                list(data.keys()), text[:500],
+            )
         return None
     except json.JSONDecodeError:
         pass
 
-    # Try to extract JSON array from the response
+    # Try to extract JSON array from the response (model may add text around it)
     match = re.search(r'\[.*\]', text, re.DOTALL)
     if match:
         try:
-            return json.loads(match.group())
+            parsed = json.loads(match.group())
+            if isinstance(parsed, list):
+                return parsed if parsed else None
         except json.JSONDecodeError:
             pass
+
+    # Try to extract a JSON object that wraps an array
+    match = re.search(r'\{.*\}', text, re.DOTALL)
+    if match:
+        try:
+            data = json.loads(match.group())
+            if isinstance(data, dict):
+                for val in data.values():
+                    if isinstance(val, list) and val and isinstance(val[0], dict):
+                        return val
+        except json.JSONDecodeError:
+            pass
+
+    logger.warning(
+        "[_parse_llm_json] Could not parse any JSON from response (%d chars): %s",
+        len(text), text[:500],
+    )
 
     return None

@@ -134,6 +134,11 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
             <mat-spinner *ngIf="reAnonymizing" diameter="18"></mat-spinner>
             <mat-icon *ngIf="!reAnonymizing">sync</mat-icon> Re-anonymiser tout
           </button>
+          <button mat-stroked-button (click)="testNer()" [disabled]="testingNer"
+            matTooltip="Tester la connectivite avec le modele NER (Ollama/Qwen)">
+            <mat-spinner *ngIf="testingNer" diameter="18"></mat-spinner>
+            <mat-icon *ngIf="!testingNer">science</mat-icon> Tester NER
+          </button>
           <div *ngIf="reAnonymizing && reanonProgress" class="reanon-progress">
             <mat-progress-bar mode="determinate" [value]="reanonProgress.progress"></mat-progress-bar>
             <span class="reanon-progress-label">{{ reanonProgress.message }}</span>
@@ -364,6 +369,7 @@ export class StatisticsComponent implements OnInit, OnDestroy {
   consolidating = false;
   purging = false;
   addingMapping = false;
+  testingNer = false;
   mappingColumns = ['original', 'anonymized', 'active', 'actions'];
   reanonProgress: { progress: number; message: string } | null = null;
   private reanonPollSub: Subscription | null = null;
@@ -518,9 +524,11 @@ export class StatisticsComponent implements OnInit, OnDestroy {
           this.reanonPollSub?.unsubscribe();
           this.reAnonymizing = false;
           this.reanonProgress = null;
-          const newMsg = res.new_entities ? `, ${res.new_entities} nouvelle(s) entite(s) detectee(s)` : '';
-          const nerWarn = res.ner_available === false ? ' ⚠ Modele NER non disponible.' : '';
-          this.snackBar.open(`Re-anonymisation terminee : ${res.updated_chunks} chunks, ${res.updated_chapters} chapitres${newMsg}${nerWarn}`, 'OK', { duration: 8000 });
+          // Use the detailed message from the backend which now includes
+          // NER diagnostic info (unreachable, model missing, empty response, etc.)
+          const msg = res.message || `Re-anonymisation terminee : ${res.updated_chunks} chunks, ${res.updated_chapters} chapitres`;
+          const duration = res.ner_available === false || res.new_entities === 0 ? 12000 : 8000;
+          this.snackBar.open(msg, 'OK', { duration });
           this.loadAnonReport();
         } else if (res.status === 'error') {
           this.reanonPollSub?.unsubscribe();
@@ -597,6 +605,31 @@ export class StatisticsComponent implements OnInit, OnDestroy {
       error: (err) => {
         this.snackBar.open(err.error?.detail || 'Erreur lors de la purge', 'OK', { duration: 5000 });
         this.purging = false;
+      },
+    });
+  }
+
+  testNer(): void {
+    this.testingNer = true;
+    this.api.getNerDiagnostic(this.projectId).subscribe({
+      next: (res: any) => {
+        this.testingNer = false;
+        let msg = '';
+        if (!res.ollama_reachable) {
+          msg = `NER INDISPONIBLE — ${res.failure_reason || 'Ollama non joignable'}`;
+        } else if (res.test_result?.status === 'ok') {
+          const entities = res.test_result.entities_found.map((e: any) => `${e.text} (${e.type})`).join(', ');
+          msg = `NER OK — ${res.test_result.count} entite(s) detectee(s) sur le texte test: ${entities}`;
+        } else if (res.test_result?.status === 'empty_response') {
+          msg = `NER PROBLEME — Ollama joignable mais le modele ne retourne aucune entite. Verifiez le modele ${res.ollama_model}.`;
+        } else {
+          msg = `NER ERREUR — ${res.test_result?.status || 'Erreur inconnue'}`;
+        }
+        this.snackBar.open(msg, 'OK', { duration: 15000 });
+      },
+      error: (err) => {
+        this.testingNer = false;
+        this.snackBar.open(err.error?.detail || 'Erreur lors du test NER', 'OK', { duration: 5000 });
       },
     });
   }

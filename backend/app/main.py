@@ -246,6 +246,13 @@ async def health_check():
     except Exception:
         ollama_status = "error"
 
+    # Get detailed NER diagnostic
+    ner_detail = {}
+    try:
+        ner_detail = AnonymizationService.get_ner_diagnostic()
+    except Exception:
+        pass
+
     overall = "healthy" if redis_ok else "degraded"
     return {
         "status": overall,
@@ -253,5 +260,6 @@ async def health_check():
         "components": {
             "redis": "connected" if redis_ok else "disconnected",
             "ollama_ner": ollama_status,
+            "ollama_ner_detail": ner_detail,
         },
     }
