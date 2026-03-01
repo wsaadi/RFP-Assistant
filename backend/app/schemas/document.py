@@ -112,6 +112,23 @@ class AnonymizationReportOut(BaseModel):
     sample_after: str = ""
 
 
+class FieldToComplete(BaseModel):
+    placeholder: str
+    readable_label: str
+    occurrences: int
+    chapters: List[str]  # chapter titles where this placeholder appears
+
+
+class FieldsToCompleteOut(BaseModel):
+    total: int = 0
+    fields: List[FieldToComplete] = []
+
+
+class FieldReplaceRequest(BaseModel):
+    placeholder: str
+    value: str
+
+
 class ExportMetadata(BaseModel):
     project_name: str
     exported_at: str

@@ -12,6 +12,7 @@ import {
   SearchResult, DocumentPreview,
   AIConfig, AIConfigUpdate,
   UserInfo, UserCreate, UserUpdate,
+  FieldsToComplete,
 } from '../models/report.model';
 
 @Injectable({ providedIn: 'root' })
@@ -399,6 +400,15 @@ export class ApiService {
 
   purgeAnonymization(projectId: string): Observable<{ restored_chapters: number; cleared_chunks: number; deleted_mappings: number }> {
     return this.http.post<{ restored_chapters: number; cleared_chunks: number; deleted_mappings: number }>(`${this.baseUrl}/projects/${projectId}/purge-anonymization`, {});
+  }
+
+  // ── Fields to Complete ──
+  getFieldsToComplete(projectId: string): Observable<FieldsToComplete> {
+    return this.http.get<FieldsToComplete>(`${this.baseUrl}/projects/${projectId}/fields-to-complete`);
+  }
+
+  replaceFieldToComplete(projectId: string, placeholder: string, value: string): Observable<{ updated_chapters: number; total_replacements: number }> {
+    return this.http.post<{ updated_chapters: number; total_replacements: number }>(`${this.baseUrl}/projects/${projectId}/fields-to-complete/replace`, { placeholder, value });
   }
 
   // ── Export/Import ──
