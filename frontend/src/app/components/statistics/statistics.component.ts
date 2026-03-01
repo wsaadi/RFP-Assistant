@@ -19,7 +19,7 @@ import { MatSlideToggleModule } from '@angular/material/slide-toggle';
 import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
-import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '../../models/report.model';
+import { ProjectStatistics, AnonymizationReport, AnonymizationMapping, FieldsToComplete, FieldToComplete } from '../../models/report.model';
 
 @Component({
   selector: 'app-statistics',
@@ -110,6 +110,68 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
               <span>Completes: {{ statusCount('completed') }}</span>
             </div>
           </div>
+        </mat-card>
+      </div>
+
+      <!-- Fields to complete (AI-invented placeholders) -->
+      <div class="section-header" *ngIf="fieldsToComplete && fieldsToComplete.total > 0">
+        <h2><mat-icon>edit_note</mat-icon> Informations a completer
+          <span class="fields-count">{{ fieldsToComplete.total }} champ(s)</span>
+        </h2>
+        <button mat-raised-button (click)="loadFieldsToComplete()" [disabled]="loadingFields">
+          <mat-icon>refresh</mat-icon> Actualiser
+        </button>
+      </div>
+
+      <div *ngIf="fieldsToComplete && fieldsToComplete.total > 0" class="fields-section">
+        <mat-card class="full-width-card fields-hint-card">
+          <p class="fields-hint">
+            <mat-icon>info</mat-icon>
+            L'IA a insere ces marqueurs dans le texte car elle ne disposait pas de l'information.
+            Renseignez la valeur reelle et elle sera remplacee automatiquement dans tous les chapitres concernes.
+          </p>
+        </mat-card>
+
+        <mat-card class="full-width-card">
+          <table mat-table [dataSource]="fieldsToComplete.fields" class="fields-table">
+            <ng-container matColumnDef="placeholder">
+              <th mat-header-cell *matHeaderCellDef>Marqueur</th>
+              <td mat-cell *matCellDef="let f">
+                <span class="anon-value">{{ f.placeholder }}</span>
+              </td>
+            </ng-container>
+            <ng-container matColumnDef="label">
+              <th mat-header-cell *matHeaderCellDef>Information demandee</th>
+              <td mat-cell *matCellDef="let f">
+                <span class="field-label">{{ f.readable_label }}</span>
+                <span class="field-chapters" matTooltip="{{ f.chapters.join(', ') }}">
+                  ({{ f.occurrences }} occurrence(s) dans {{ f.chapters.length }} chapitre(s))
+                </span>
+              </td>
+            </ng-container>
+            <ng-container matColumnDef="value">
+              <th mat-header-cell *matHeaderCellDef>Valeur</th>
+              <td mat-cell *matCellDef="let f">
+                <mat-form-field appearance="outline" class="field-input">
+                  <input matInput [(ngModel)]="fieldValues[f.placeholder]" placeholder="Saisir la valeur...">
+                </mat-form-field>
+              </td>
+            </ng-container>
+            <ng-container matColumnDef="actions">
+              <th mat-header-cell *matHeaderCellDef></th>
+              <td mat-cell *matCellDef="let f">
+                <button mat-raised-button color="primary" (click)="replaceField(f)"
+                  [disabled]="!fieldValues[f.placeholder] || replacingField === f.placeholder"
+                  matTooltip="Remplacer dans tous les chapitres">
+                  <mat-spinner *ngIf="replacingField === f.placeholder" diameter="18"></mat-spinner>
+                  <mat-icon *ngIf="replacingField !== f.placeholder">check</mat-icon>
+                  Appliquer
+                </button>
+              </td>
+            </ng-container>
+            <tr mat-header-row *matHeaderRowDef="fieldColumns"></tr>
+            <tr mat-row *matRowDef="let row; columns: fieldColumns"></tr>
+          </table>
         </mat-card>
       </div>
 
@@ -356,13 +418,26 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping } from '..
     .reanon-progress { margin-top: 8px; width: 100%; }
     .reanon-progress mat-progress-bar { margin-bottom: 4px; }
     .reanon-progress-label { font-size: 12px; color: #666; }
+
+    /* Fields to complete section */
+    .fields-count { display: inline-flex; align-items: center; gap: 4px; background: #e3f2fd; color: #1565c0; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 600; margin-left: 8px; }
+    .fields-section { margin-bottom: 32px; }
+    .fields-hint-card { margin-bottom: 16px; }
+    .fields-hint { display: flex; align-items: center; gap: 8px; color: #555; font-size: 13px; margin: 0; }
+    .fields-hint mat-icon { color: #1565c0; flex-shrink: 0; }
+    .fields-table { width: 100%; }
+    .field-label { font-weight: 500; color: #1B3A5C; }
+    .field-chapters { font-size: 12px; color: #888; margin-left: 8px; }
+    .field-input { width: 100%; font-size: 13px; }
   `],
 })
 export class StatisticsComponent implements OnInit, OnDestroy {
   projectId = '';
   stats: ProjectStatistics | null = null;
   anonReport: AnonymizationReport | null = null;
+  fieldsToComplete: FieldsToComplete | null = null;
   loading = false;
+  loadingFields = false;
   error = '';
   reAnonymizing = false;
   resolvingOrphans = false;
@@ -370,7 +445,10 @@ export class StatisticsComponent implements OnInit, OnDestroy {
   purging = false;
   addingMapping = false;
   testingNer = false;
+  replacingField: string | null = null;
   mappingColumns = ['original', 'anonymized', 'active', 'actions'];
+  fieldColumns = ['placeholder', 'label', 'value', 'actions'];
+  fieldValues: Record<string, string> = {};
   reanonProgress: { progress: number; message: string } | null = null;
   private reanonPollSub: Subscription | null = null;
 
@@ -408,6 +486,7 @@ export class StatisticsComponent implements OnInit, OnDestroy {
   loadAll(): void {
     this.loadStats();
     this.loadAnonReport();
+    this.loadFieldsToComplete();
   }
 
   loadStats(): void {
@@ -422,6 +501,45 @@ export class StatisticsComponent implements OnInit, OnDestroy {
   loadAnonReport(): void {
     this.api.getAnonymizationReport(this.projectId).subscribe({
       next: (res) => this.anonReport = res,
+    });
+  }
+
+  loadFieldsToComplete(): void {
+    this.loadingFields = true;
+    this.api.getFieldsToComplete(this.projectId).subscribe({
+      next: (res) => {
+        this.fieldsToComplete = res;
+        this.loadingFields = false;
+        // Pre-populate fieldValues for any new fields
+        for (const f of res.fields) {
+          if (!(f.placeholder in this.fieldValues)) {
+            this.fieldValues[f.placeholder] = '';
+          }
+        }
+      },
+      error: () => { this.loadingFields = false; },
+    });
+  }
+
+  replaceField(field: FieldToComplete): void {
+    const value = this.fieldValues[field.placeholder];
+    if (!value) return;
+    this.replacingField = field.placeholder;
+    this.api.replaceFieldToComplete(this.projectId, field.placeholder, value).subscribe({
+      next: (res) => {
+        this.snackBar.open(
+          `"${field.readable_label}" remplace par "${value}" dans ${res.updated_chapters} chapitre(s) (${res.total_replacements} occurrence(s))`,
+          'OK', { duration: 5000 },
+        );
+        this.replacingField = null;
+        delete this.fieldValues[field.placeholder];
+        this.loadFieldsToComplete();
+        this.loadStats(); // Refresh word count etc.
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 4000 });
+        this.replacingField = null;
+      },
     });
   }
 

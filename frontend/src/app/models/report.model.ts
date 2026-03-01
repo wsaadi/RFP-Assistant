@@ -300,6 +300,19 @@ export interface AnonymizationReport {
   sample_after: string;
 }
 
+// ── Fields to Complete (AI-invented placeholders) ──
+export interface FieldToComplete {
+  placeholder: string;
+  readable_label: string;
+  occurrences: number;
+  chapters: string[];
+}
+
+export interface FieldsToComplete {
+  total: number;
+  fields: FieldToComplete[];
+}
+
 // ── Search ──
 export interface SearchResult {
   chunk_id: string;

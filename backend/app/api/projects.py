@@ -25,6 +25,7 @@ from ..schemas.project import (
 from ..schemas.document import (
     StatisticsOut, AnonymizationMappingOut, AnonymizationReportOut, AnonymizationEntityGroup,
     AnonymizationMappingCreate, AnonymizationMappingUpdate,
+    FieldsToCompleteOut, FieldToComplete, FieldReplaceRequest,
 )
 from ..schemas.response_document import ResponseDocumentOut, ResponseDocumentUpdate, BulkUpdateSelectionRequest
 from ..services.ai_service import MistralAIService, create_ai_service
@@ -3433,6 +3434,98 @@ async def purge_anonymization(
         "restored_chapters": restored_chapters,
         "cleared_chunks": cleared_chunks,
         "deleted_mappings": deleted_mappings,
+    }
+
+
+# ── Fields to Complete (AI-invented placeholders) ──────────────────
+
+@router.get("/{project_id}/fields-to-complete", response_model=FieldsToCompleteOut)
+async def get_fields_to_complete(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Scan chapter content for AI-invented placeholders that need user input.
+
+    When Mistral doesn't have certain information (year of creation, share
+    capital, SIRET number, etc.), it inserts placeholder tokens like
+    [ANNÉE_DE_CRÉATION] or [CAPITAL_SOCIAL]. This endpoint finds them all
+    and returns them so the user can fill them in.
+    """
+    from ..services.anonymization_service import AnonymizationService
+
+    # Get known anonymization placeholders so we can exclude them
+    mappings = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
+    known_placeholders = set(mappings.keys())
+
+    chapters_result = await db.execute(
+        select(Chapter).where(Chapter.project_id == project_id)
+    )
+    chapters = chapters_result.scalars().all()
+
+    # Scan all chapters for AI-invented fields
+    placeholder_info: dict = {}  # placeholder -> {occurrences, chapters}
+    for ch in chapters:
+        if not ch.content:
+            continue
+        fields = AnonymizationService.find_ai_fields_to_complete(ch.content, known_placeholders)
+        for field in fields:
+            if field not in placeholder_info:
+                placeholder_info[field] = {"occurrences": 0, "chapters": set()}
+            placeholder_info[field]["occurrences"] += ch.content.count(field)
+            placeholder_info[field]["chapters"].add(ch.title or f"Chapitre {ch.numbering}")
+
+    fields_out = []
+    for placeholder, info in sorted(placeholder_info.items()):
+        # Build a human-readable label from the placeholder:
+        # [ANNÉE_DE_CRÉATION] → "Année de création"
+        inner = placeholder.strip("[]")
+        readable = inner.replace("_", " ").capitalize()
+        fields_out.append(FieldToComplete(
+            placeholder=placeholder,
+            readable_label=readable,
+            occurrences=info["occurrences"],
+            chapters=sorted(info["chapters"]),
+        ))
+
+    return FieldsToCompleteOut(total=len(fields_out), fields=fields_out)
+
+
+@router.post("/{project_id}/fields-to-complete/replace")
+async def replace_field_to_complete(
+    project_id: uuid.UUID,
+    request: FieldReplaceRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Replace an AI-invented placeholder with a real value across all chapters.
+
+    For example, replace [ANNÉE_DE_CRÉATION] with "2014" everywhere.
+    """
+    if not request.placeholder or not request.value:
+        raise HTTPException(status_code=400, detail="placeholder and value are required")
+
+    chapters_result = await db.execute(
+        select(Chapter).where(Chapter.project_id == project_id)
+    )
+    chapters = chapters_result.scalars().all()
+
+    updated_chapters = 0
+    total_replacements = 0
+    for ch in chapters:
+        if ch.content and request.placeholder in ch.content:
+            count = ch.content.count(request.placeholder)
+            ch.content = ch.content.replace(request.placeholder, request.value)
+            updated_chapters += 1
+            total_replacements += count
+
+    await db.commit()
+
+    return {
+        "updated_chapters": updated_chapters,
+        "total_replacements": total_replacements,
+        "placeholder": request.placeholder,
+        "value": request.value,
     }
 
 

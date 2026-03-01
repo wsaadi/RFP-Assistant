@@ -936,11 +936,19 @@ class AnonymizationService:
         await db.flush()
         return results
 
-    # Regex matching any placeholder the AI might generate: [WORD_N] or [WORD_WORD_N]
-    # Catches BOTH our known prefixes (ENTREPRISE_1) AND arbitrary ones invented by
-    # the AI (FILIALE_1, VILLE_SIEGE, NOMBRE_EMPLOYES, CLIENT_1, etc.).
+    # Regex matching numbered placeholders: [WORD_N] or [WORD_WORD_N]
+    # Catches our known prefixes (PERSONNE_1, EMAIL_2) AND numbered ones
+    # invented by the AI (FILIALE_1, CLIENT_2, etc.).
     _PLACEHOLDER_RE = re.compile(
         r'\[([A-ZÀ-Ü][A-ZÀ-Ü0-9_]*_\d+)\]'
+    )
+
+    # Broader regex: catches ALL bracket patterns that look like AI-invented
+    # fields to complete.  Matches both numbered ([CAPITAL_SOCIAL_1]) and
+    # non-numbered ([ANNÉE_DE_CRÉATION], [CAPITAL_SOCIAL]) patterns.
+    # Must be at least 3 uppercase chars to avoid matching [A] or [OK].
+    _AI_FIELD_RE = re.compile(
+        r'\[([A-ZÀ-Ü][A-ZÀ-Ü0-9_\' ]{2,})\]'
     )
 
     @classmethod
@@ -949,70 +957,21 @@ class AnonymizationService:
         all_found = set(f"[{m}]" for m in cls._PLACEHOLDER_RE.findall(text))
         return all_found - known_placeholders
 
-    # Generic replacement terms for AI-invented placeholders, keyed by prefix.
-    _GENERIC_TERMS: Dict[str, str] = {
-        "ENTREPRISE": "l'entreprise",
-        "PERSONNE": "le responsable",
-        "SOLUTION": "la solution proposée",
-        "EMAIL": "l'adresse de contact",
-        "TELEPHONE": "le numéro de contact",
-        "ADRESSE": "l'adresse indiquée",
-        "CODE_PROJET": "le projet",
-        "CODE_AO": "l'appel d'offres",
-        "DATE": "la date prévue",
-        "MONTANT": "le montant",
-        "ENTITE": "l'entité concernée",
-        # Common AI-invented prefixes (Mistral tends to generate these)
-        "FILIALE": "la filiale",
-        "CLIENT": "le client",
-        "VILLE": "la ville",
-        "VILLE_SIEGE": "la ville",
-        "NOMBRE_EMPLOYES": "le nombre d'employés",
-        "NOMBRE": "le nombre indiqué",
-        "SOCIETE": "la société",
-        "GROUPE": "le groupe",
-        "SIEGE": "le siège",
-        "PROJET": "le projet",
-        "NOM": "le nom",
-        "PRENOM": "le prénom",
-        "REFERENCE": "la référence",
-        "REF": "la référence",
-        "MARCHE": "le marché",
-        "BUDGET": "le budget",
-        "EFFECTIF": "l'effectif",
-        "CHIFFRE_AFFAIRES": "le chiffre d'affaires",
-        "CA": "le chiffre d'affaires",
-        "SITE": "le site",
-        "REGION": "la région",
-        "PAYS": "le pays",
-        "CONTACT": "le contact",
-        "RESPONSABLE": "le responsable",
-        "DIRECTEUR": "le directeur",
-        "INTERLOCUTEUR": "l'interlocuteur",
-    }
-
     @classmethod
-    def strip_invented_placeholders(cls, text: str, known_placeholders: set) -> str:
-        """Replace AI-invented placeholders with generic French terms.
+    def find_ai_fields_to_complete(cls, text: str, known_placeholders: Optional[set] = None) -> List[str]:
+        """Find all AI-invented placeholder patterns in text.
 
-        When Mistral invents a new placeholder (e.g. [ENTREPRISE_2], [FILIALE_1],
-        [VILLE_SIEGE], etc.) that does not exist in our mappings, replace it with
-        a generic term instead of leaving an unresolved placeholder in the output.
+        Returns unique placeholder strings like '[ANNÉE_DE_CRÉATION]',
+        '[CAPITAL_SOCIAL]', '[PERSONNE_3]', etc. that are NOT in our
+        known anonymization mappings.
+
+        These are fields Mistral invented because it didn't have the
+        information — they should be surfaced to the user as "fields to
+        complete" rather than silently stripped.
         """
-        unknown = cls.find_unknown_placeholders(text, known_placeholders)
-        if not unknown:
-            return text
-
-        for token in unknown:
-            inner = token.strip("[]")
-            prefix = inner.rsplit("_", 1)[0]
-            generic = cls._GENERIC_TERMS.get(prefix, "l'entité concernée")
-            text = text.replace(token, generic)
-            logger.info(
-                "[deanonymize] Stripped AI-invented placeholder %s → '%s'", token, generic,
-            )
-
-        return text
+        known = known_placeholders or set()
+        all_found = set(f"[{m}]" for m in cls._AI_FIELD_RE.findall(text))
+        return sorted(all_found - known)
 
     @classmethod
     async def deanonymize_text(
@@ -1021,7 +980,12 @@ class AnonymizationService:
         project_id: uuid.UUID,
         db: AsyncSession,
     ) -> str:
-        """Replace anonymized placeholders with original values."""
+        """Replace anonymized placeholders with original values.
+
+        AI-invented placeholders (fields Mistral created for missing info
+        like [ANNÉE_DE_CRÉATION], [CAPITAL_SOCIAL]) are intentionally kept
+        in the text so the user can see and fill them in via the UI.
+        """
         if not anonymized_text:
             return anonymized_text
 
@@ -1033,9 +997,14 @@ class AnonymizationService:
             if original:
                 result = result.replace(placeholder, original)
 
-        # Strip any AI-invented placeholders that we don't know about —
-        # replace them with generic terms instead of creating orphan mappings.
-        result = cls.strip_invented_placeholders(result, set(mappings.keys()))
+        # Log AI-invented placeholders but keep them in the text
+        # so the user can fill them in via the "fields to complete" UI.
+        unknown = cls.find_unknown_placeholders(result, set(mappings.keys()))
+        if unknown:
+            logger.info(
+                "[deanonymize] Found %d AI-invented placeholder(s) kept for user completion: %s",
+                len(unknown), ", ".join(sorted(unknown)),
+            )
 
         return result
 
