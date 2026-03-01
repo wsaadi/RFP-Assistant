@@ -96,6 +96,7 @@ async def list_projects(
             name=p.name,
             description=p.description,
             client_name=p.client_name,
+            company_name=getattr(p, 'company_name', '') or '',
             rfp_reference=p.rfp_reference,
             deadline=p.deadline,
             status=p.status.value,
@@ -125,6 +126,7 @@ async def create_project(
         name=request.name,
         description=request.description,
         client_name=request.client_name,
+        company_name=request.company_name,
         rfp_reference=request.rfp_reference,
         deadline=request.deadline,
         ai_context=request.ai_context,
@@ -142,6 +144,7 @@ async def create_project(
         name=project.name,
         description=project.description,
         client_name=project.client_name,
+        company_name=project.company_name or '',
         rfp_reference=project.rfp_reference,
         deadline=project.deadline,
         status=project.status.value,
@@ -182,6 +185,7 @@ async def get_project(
         name=project.name,
         description=project.description,
         client_name=project.client_name,
+        company_name=project.company_name or '',
         rfp_reference=project.rfp_reference,
         deadline=project.deadline,
         status=project.status.value,
@@ -210,7 +214,7 @@ async def update_project(
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    for field in ["name", "description", "client_name", "rfp_reference", "deadline", "improvement_axes", "ai_context", "enabled_categories", "context_mode"]:
+    for field in ["name", "description", "client_name", "company_name", "rfp_reference", "deadline", "improvement_axes", "ai_context", "enabled_categories", "context_mode"]:
         value = getattr(request, field, None)
         if value is not None:
             setattr(project, field, value)
@@ -839,6 +843,8 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             proj_ai_context = await AnonymizationService.apply_existing_mappings(
                 raw_ai_context, project_id, db
             ) if raw_ai_context else ""
+            proj_company_name = getattr(proj, 'company_name', '') or ''
+            proj_client_name = proj.client_name or ''
 
             _update("loading", 5, "Chargement des documents (AO, ancien AO, ancienne reponse)...")
             # Load all 3 categories in parallel for speed
@@ -1001,6 +1007,8 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                         rfp_summary=rfp_summary,
                         on_progress=_doc_progress,
                         ai_context=proj_ai_context,
+                        company_name=proj_company_name,
+                        client_name=proj_client_name,
                     )
                     _doc_done_count += 1
                     return (doc_id, structure)
@@ -1074,6 +1082,8 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 gap_analysis=gap_analysis,
                 on_progress=gen_cb,
                 ai_context=proj_ai_context,
+                company_name=proj_company_name,
+                client_name=proj_client_name,
             )
 
             if not structure:
@@ -1244,6 +1254,8 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                 raw_ai_context, project_id, db
             ) if raw_ai_context else ""
             proj_context_mode = proj.context_mode or "rag"
+            proj_company_name = getattr(proj, 'company_name', '') or ''
+            proj_client_name = proj.client_name or ''
 
             _update("loading", 5, "Chargement des chapitres...")
 
@@ -1340,6 +1352,8 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                     rfp_requirement=ch_data["anon_rfp_requirement"],
                     old_response_content=anon_content,
                     ai_context=proj_ai_context,
+                    company_name=proj_company_name,
+                    client_name=proj_client_name,
                 )
 
                 # Short DB session for deanonymization + save
@@ -1812,10 +1826,13 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
 
             # Load project AI context and anonymize it
             proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
-            raw_ai_context = (proj_result.scalar_one().ai_context or "")
+            proj = proj_result.scalar_one()
+            raw_ai_context = proj.ai_context or ""
             proj_ai_context = await AnonymizationService.apply_existing_mappings(
                 raw_ai_context, project_id, db
             ) if raw_ai_context else ""
+            proj_company_name = getattr(proj, 'company_name', '') or ''
+            proj_client_name = proj.client_name or ''
 
             _update("loading", 5, "Chargement des documents à compléter...")
 
@@ -1904,6 +1921,8 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                     old_response_content=combined_context,
                     on_progress=_on_fill_progress,
                     ai_context=proj_ai_context,
+                    company_name=proj_company_name,
+                    client_name=proj_client_name,
                 )
                 _fill_done += 1
                 return (doc_data["id"], fill_content)
@@ -2334,6 +2353,8 @@ async def _run_rec_generation(
             ai_context = await AnonymizationService.apply_existing_mappings(
                 raw_ai_context, project_id, db
             ) if raw_ai_context else ""
+            proj_company_name = getattr(project, 'company_name', '') or ''
+            proj_client_name = project.client_name or ''
 
             _update("searching", 10, "Recherche de contexte...")
 
@@ -2407,6 +2428,10 @@ Règles:
 Anonymisation:
 - Le texte peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], etc.
 - Réutilise EXACTEMENT les mêmes marqueurs. N'en invente JAMAIS de nouveaux."""
+
+        # Add identity and anti-hallucination guardrails
+        from ..services.ai_service import _build_identity_block
+        system_prompt += _build_identity_block(proj_company_name, proj_client_name)
 
         if ai_context:
             system_prompt += f"""

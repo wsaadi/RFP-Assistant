@@ -144,3 +144,13 @@ async def init_db():
                 ))
             except Exception:
                 logger.debug("%s column already exists or ALTER TABLE not supported", col)
+
+    # Add company_name column for respondent identity (distinct from client_name)
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "ALTER TABLE rfp_projects ADD COLUMN IF NOT EXISTS "
+                "company_name VARCHAR(255) DEFAULT ''"
+            ))
+        except Exception:
+            logger.debug("company_name column already exists or ALTER TABLE not supported")

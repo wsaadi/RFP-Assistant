@@ -45,6 +45,7 @@ class RFPProject(Base):
     name: Mapped[str] = mapped_column(String(500), nullable=False)
     description: Mapped[str] = mapped_column(Text, default="")
     client_name: Mapped[str] = mapped_column(String(255), default="")
+    company_name: Mapped[str] = mapped_column(String(255), default="")
     rfp_reference: Mapped[str] = mapped_column(String(255), default="")
     deadline: Mapped[str] = mapped_column(String(100), default="")
     status: Mapped[ProjectStatus] = mapped_column(

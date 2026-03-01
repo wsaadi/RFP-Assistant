@@ -13,6 +13,43 @@ from ..models.project import AIConfig
 logger = logging.getLogger(__name__)
 
 
+# ── Identity & anti-hallucination guardrail ─────────────────────────
+def _build_identity_block(company_name: str = "", client_name: str = "") -> str:
+    """Build a prompt block clarifying who is the respondent vs. the client.
+
+    This prevents the LLM from confusing the two entities (e.g. attributing
+    the respondent's products to the client, or describing the client's
+    organization as if it were the respondent's).
+    """
+    lines = []
+    lines.append("\n## IDENTITÉ ET RÔLES — RÈGLES ABSOLUES")
+
+    if company_name and client_name:
+        lines.append(f"- Tu rédiges pour le compte de **{company_name}** (le soumissionnaire/prestataire/candidat).")
+        lines.append(f"- Le CLIENT (donneur d'ordres / acheteur) est **{client_name}**.")
+        lines.append(f"- **{company_name}** et **{client_name}** sont DEUX entités DISTINCTES. Ne les confonds JAMAIS.")
+        lines.append(f"- Les produits, filiales, compétences et références que tu décris sont ceux de **{company_name}**, PAS de **{client_name}**.")
+        lines.append(f"- **{client_name}** est l'entité qui a publié l'appel d'offres et qui évalue la réponse.")
+    elif company_name:
+        lines.append(f"- Tu rédiges pour le compte de **{company_name}** (le soumissionnaire/prestataire/candidat).")
+        lines.append(f"- Ne confonds JAMAIS l'identité du soumissionnaire avec celle du client.")
+    elif client_name:
+        lines.append(f"- Le CLIENT (donneur d'ordres / acheteur) est **{client_name}**.")
+        lines.append(f"- Ne confonds JAMAIS l'identité du client avec celle du soumissionnaire.")
+
+    lines.append("")
+    lines.append("## INTERDICTIONS ABSOLUES — ANTI-HALLUCINATION")
+    lines.append("- Tu ne dois JAMAIS inventer, fabriquer ou supposer des informations factuelles qui ne figurent pas dans les documents fournis.")
+    lines.append("- N'invente JAMAIS de filiales, entités juridiques, numéros SIREN, capitaux sociaux, dates de création, formes juridiques ou tout autre détail administratif.")
+    lines.append("- N'invente JAMAIS de chiffres, statistiques, pourcentages de performance, montants financiers ou résultats de projets.")
+    lines.append("- N'invente JAMAIS de noms de produits, solutions, plateformes ou outils sauf s'ils sont explicitement mentionnés dans les documents fournis.")
+    lines.append("- N'attribue JAMAIS les produits ou compétences du soumissionnaire au client, ni inversement.")
+    lines.append("- Si une information factuelle te manque (nom de filiale, chiffre, référence), utilise un marqueur explicite comme « [À COMPLÉTER] » ou « [INFORMATION À FOURNIR PAR L'ÉQUIPE] » plutôt que d'inventer.")
+    lines.append("- Quand tu mentionnes des capacités ou références, base-toi UNIQUEMENT sur les documents fournis (ancienne réponse, documents d'inspiration, contexte). Si aucun document ne mentionne un fait, ne l'affirme pas.")
+
+    return "\n".join(lines)
+
+
 # ── Robust JSON parsing helpers ──────────────────────────────────────
 
 def _clean_json_response(raw: str) -> str:
@@ -354,6 +391,8 @@ Analyse les écarts entre ces deux appels d'offres."""
         gap_analysis: Optional[Dict] = None,
         on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
         ai_context: str = "",
+        company_name: str = "",
+        client_name: str = "",
     ) -> List[Dict]:
         """Generate the complete response structure by deeply analyzing the new RFP,
         comparing with the old RFP, and leveraging the old response."""
@@ -415,6 +454,9 @@ Valeurs de delta:
 - "modified": exigence existante mais modifiée
 - "unchanged": exigence identique à l'ancien AO
 - "removed_context": chapitre nécessaire même si l'exigence directe a été retirée (contexte, transition)"""
+
+        # Add identity and anti-hallucination guardrails
+        system_prompt += _build_identity_block(company_name, client_name)
 
         # Mistral Large supports 128K context.
         # Priority: maximize coverage of the new RFP, then old response, then old RFP.
@@ -629,6 +671,8 @@ Format: texte structuré avec des titres markdown. Pas de JSON."""
         rfp_summary: str = "",
         on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
         ai_context: str = "",
+        company_name: str = "",
+        client_name: str = "",
     ) -> List[Dict]:
         """Generate chapter structure for a specific response document (redaction type only)."""
         system_prompt = f"""Tu es un expert senior en réponse aux appels d'offres.
@@ -667,6 +711,9 @@ Réponds UNIQUEMENT au format JSON suivant (sans markdown):
     ]
   }}
 ]"""
+
+        # Add identity and anti-hallucination guardrails
+        system_prompt += _build_identity_block(company_name, client_name)
 
         # Use the pre-computed summary if available (much smaller prompt),
         # otherwise fall back to truncated full content.
@@ -711,6 +758,8 @@ Réponds UNIQUEMENT au format JSON suivant (sans markdown):
         notes: str = "",
         ai_context: str = "",
         inspiration_content: str = "",
+        company_name: str = "",
+        client_name: str = "",
     ) -> str:
         """Generate or enrich content for a chapter."""
         system_prompt = """Tu es un rédacteur senior expert en réponses aux appels d'offres, avec 15 ans d'expérience dans la rédaction de mémoires techniques gagnants.
@@ -735,9 +784,10 @@ Tu dois rédiger un contenu de HAUTE QUALITÉ RÉDACTIONNELLE pour un chapitre d
 
 ## Règles de contenu :
 - Répondre précisément et exhaustivement aux exigences de l'appel d'offres
-- Mettre en valeur les compétences, l'expérience et la méthodologie
+- Mettre en valeur les compétences, l'expérience et la méthodologie du SOUMISSIONNAIRE (pas du client)
 - Être factuel et concret tout en restant développé et argumenté
 - Apporter de la valeur ajoutée : ne pas simplement reformuler l'exigence, mais montrer COMMENT on y répond
+- Ne JAMAIS décrire l'organisation, les filiales ou les produits du CLIENT — tu décris ceux du SOUMISSIONNAIRE
 
 ## Anonymisation :
 - Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
@@ -752,6 +802,9 @@ Tu dois rédiger un contenu de HAUTE QUALITÉ RÉDACTIONNELLE pour un chapitre d
 - Utilise des tableaux markdown quand c'est pertinent (comparaisons, plannings, matrices)
 - Structure en paragraphes clairs, aérés et DÉVELOPPÉS
 - Sépare les sections par des lignes vides pour la lisibilité"""
+
+        # Add identity and anti-hallucination guardrails
+        system_prompt += _build_identity_block(company_name, client_name)
 
         if ai_context:
             system_prompt += f"""
@@ -787,6 +840,8 @@ Contexte de rédaction fourni par l'utilisateur (utilise-le pour orienter le ton
         rfp_requirement: str = "",
         improvement_axes: str = "",
         ai_context: str = "",
+        company_name: str = "",
+        client_name: str = "",
     ) -> str:
         """Enrich existing chapter content."""
         system_prompt = """Tu es un rédacteur senior expert en réponses aux appels d'offres.
@@ -800,6 +855,7 @@ Tu dois enrichir et améliorer significativement le contenu existant d'un chapit
 - **Enrichir le vocabulaire** : remplacer les formulations génériques par des termes précis et professionnels
 - **Conserver toutes les informations existantes** tout en les développant
 - Le texte enrichi doit être au moins 50% plus long que l'original
+- Ne JAMAIS ajouter de faits inventés (chiffres, filiales, produits) qui ne sont pas dans le texte original
 
 ## Anonymisation :
 - Le texte fourni peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], [PERSONNE_1], etc.
@@ -813,6 +869,9 @@ Tu dois enrichir et améliorer significativement le contenu existant d'un chapit
 - Utilise des listes à puces avec une phrase d'introduction, jamais des listes "sèches"
 - Utilise des tableaux markdown quand pertinent
 - Structure en paragraphes développés et aérés"""
+
+        # Add identity and anti-hallucination guardrails
+        system_prompt += _build_identity_block(company_name, client_name)
 
         if ai_context:
             system_prompt += f"""
@@ -936,6 +995,8 @@ Décris cette image et suggère des tags et chapitres pertinents."""
         old_response_content: str = "",
         on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
         ai_context: str = "",
+        company_name: str = "",
+        client_name: str = "",
     ) -> str:
         """Generate fill-in content/instructions for a completion-type document (BPU, DQE, forms, etc.).
 
@@ -984,6 +1045,9 @@ Génère le contenu en Markdown structuré avec:
 - Du contenu rédigé pour les rubriques textuelles
 
 Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un maximum de champs."""
+
+        # Add identity and anti-hallucination guardrails
+        system_prompt += _build_identity_block(company_name, client_name)
 
         parts = [f"CONTENU DE L'APPEL D'OFFRES:\n{new_rfp_content[:60000]}"]
         if old_response_content:
@@ -1205,7 +1269,10 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
 
         return data
 
-    async def execute_custom_prompt(self, content: str, prompt: str, context: str = "", ai_context: str = "") -> str:
+    async def execute_custom_prompt(
+        self, content: str, prompt: str, context: str = "", ai_context: str = "",
+        company_name: str = "", client_name: str = "",
+    ) -> str:
         """Execute a custom user prompt on content."""
         system_prompt = """Tu es un rédacteur senior expert en réponses aux appels d'offres.
 Applique exactement l'instruction de l'utilisateur au contenu fourni.
@@ -1227,6 +1294,9 @@ Formatage :
 - Utilise **gras** pour les termes clés
 - Utilise des listes à puces avec phrases d'introduction, pas de listes sèches
 - Utilise des tableaux markdown quand pertinent"""
+
+        # Add identity and anti-hallucination guardrails
+        system_prompt += _build_identity_block(company_name, client_name)
 
         if ai_context:
             system_prompt += f"""
