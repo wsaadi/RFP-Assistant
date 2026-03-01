@@ -3027,6 +3027,56 @@ async def get_reanonymize_status(
     return get_or_idle(_NS_REANON, pid)
 
 
+@router.get("/{project_id}/ner-diagnostic")
+async def get_ner_diagnostic(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Test NER connectivity and optionally run a quick detection test.
+
+    Returns diagnostic info: Ollama reachability, model status, and optionally
+    results from a sample NER call so the user can verify it works.
+    """
+    from ..services.anonymization_service import AnonymizationService
+
+    diag = AnonymizationService.get_ner_diagnostic()
+
+    # Run a live connectivity check (don't use cache)
+    AnonymizationService._ollama_available = None  # reset cache to force fresh check
+    ollama_ok = await AnonymizationService._check_ollama()
+    diag["ollama_reachable"] = ollama_ok
+    diag["failure_reason"] = AnonymizationService._last_ner_failure_reason
+
+    # If Ollama is reachable, do a quick test NER call with known entities
+    test_result = None
+    if ollama_ok:
+        sample_text = (
+            "La société SCC France, éditrice de la solution Atrium FinOps, "
+            "propose une réponse complète. Le chef de projet est Jean Dupont "
+            "(jean.dupont@scc.fr)."
+        )
+        try:
+            entities = await AnonymizationService._detect_entities_llm(sample_text)
+            test_result = {
+                "sample_text": sample_text,
+                "entities_found": [
+                    {"text": e[0], "type": e[1]} for e in entities
+                ],
+                "count": len(entities),
+                "status": "ok" if entities else "empty_response",
+            }
+        except Exception as e:
+            test_result = {
+                "sample_text": sample_text,
+                "entities_found": [],
+                "count": 0,
+                "status": f"error: {e}",
+            }
+
+    diag["test_result"] = test_result
+    return diag
+
+
 async def _run_reanonymize(project_id: uuid.UUID):
     """Background task: re-anonymize all document chunks and chapter content."""
     from ..database import async_session
@@ -3141,6 +3191,25 @@ async def _run_reanonymize(project_id: uuid.UUID):
             await db.commit()
 
         ner_available = AnonymizationService.is_ner_available()
+        ner_diagnostic = AnonymizationService.get_ner_diagnostic()
+
+        # Build a clear user-facing message
+        if not ner_available:
+            message = (
+                f"Re-anonymisation terminée (regex uniquement — "
+                f"NER indisponible: {ner_diagnostic.get('failure_reason', 'raison inconnue')}). "
+                f"Seuls les emails et téléphones ont été détectés."
+            )
+        elif new_entities == 0 and ner_diagnostic.get("last_ner_produced_entities") is False:
+            message = (
+                f"Re-anonymisation terminée mais le modèle NER n'a retourné aucune entité. "
+                f"Raison possible: {ner_diagnostic.get('failure_reason', 'réponse vide du modèle')}. "
+                f"Vérifiez les logs du worker Celery."
+            )
+        elif new_entities == 0:
+            message = "Re-anonymisation terminée — aucune nouvelle entité détectée."
+        else:
+            message = f"Re-anonymisation terminée — {new_entities} nouvelle(s) entité(s) détectée(s)."
 
         set_progress(_NS_REANON, pid, {
             "status": "done",
@@ -3148,11 +3217,12 @@ async def _run_reanonymize(project_id: uuid.UUID):
             "current": total_chunks,
             "total": total_chunks,
             "phase": "done",
-            "message": "Re-anonymisation terminee",
+            "message": message,
             "updated_chunks": total_chunks,
             "updated_chapters": updated_chapters,
             "new_entities": new_entities,
             "ner_available": ner_available,
+            "ner_diagnostic": ner_diagnostic,
         })
 
     except Exception as e:

@@ -381,6 +381,10 @@ export class ApiService {
     return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/re-anonymize-status`);
   }
 
+  getNerDiagnostic(projectId: string): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/ner-diagnostic`);
+  }
+
   resolveOrphansWithAI(projectId: string): Observable<{ resolved: number; suggestions: any[] }> {
     return this.http.post<{ resolved: number; suggestions: any[] }>(`${this.baseUrl}/projects/${projectId}/resolve-orphans-ai`, {});
   }
