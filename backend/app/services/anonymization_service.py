@@ -845,18 +845,17 @@ class AnonymizationService:
         await db.flush()
         return results
 
-    # Regex matching any placeholder the AI might generate: [PREFIX_N]
+    # Regex matching any placeholder the AI might generate: [WORD_N] or [WORD_WORD_N]
+    # Catches BOTH our known prefixes (ENTREPRISE_1) AND arbitrary ones invented by
+    # the AI (FILIALE_1, VILLE_SIEGE, NOMBRE_EMPLOYES, CLIENT_1, etc.).
     _PLACEHOLDER_RE = re.compile(
-        r'\['
-        r'(?:' + '|'.join(ENTITY_PREFIXES.values()) + r')'
-        r'_\d+'
-        r'\]'
+        r'\[([A-ZÀ-Ü][A-ZÀ-Ü0-9_]*_\d+)\]'
     )
 
     @classmethod
     def find_unknown_placeholders(cls, text: str, known_placeholders: set) -> set:
         """Find all [PREFIX_N] placeholders in text that have no known mapping."""
-        all_found = set(cls._PLACEHOLDER_RE.findall(text))
+        all_found = set(f"[{m}]" for m in cls._PLACEHOLDER_RE.findall(text))
         return all_found - known_placeholders
 
     # Generic replacement terms for AI-invented placeholders, keyed by prefix.
@@ -872,15 +871,42 @@ class AnonymizationService:
         "DATE": "la date prévue",
         "MONTANT": "le montant",
         "ENTITE": "l'entité concernée",
+        # Common AI-invented prefixes (Mistral tends to generate these)
+        "FILIALE": "la filiale",
+        "CLIENT": "le client",
+        "VILLE": "la ville",
+        "VILLE_SIEGE": "la ville",
+        "NOMBRE_EMPLOYES": "le nombre d'employés",
+        "NOMBRE": "le nombre indiqué",
+        "SOCIETE": "la société",
+        "GROUPE": "le groupe",
+        "SIEGE": "le siège",
+        "PROJET": "le projet",
+        "NOM": "le nom",
+        "PRENOM": "le prénom",
+        "REFERENCE": "la référence",
+        "REF": "la référence",
+        "MARCHE": "le marché",
+        "BUDGET": "le budget",
+        "EFFECTIF": "l'effectif",
+        "CHIFFRE_AFFAIRES": "le chiffre d'affaires",
+        "CA": "le chiffre d'affaires",
+        "SITE": "le site",
+        "REGION": "la région",
+        "PAYS": "le pays",
+        "CONTACT": "le contact",
+        "RESPONSABLE": "le responsable",
+        "DIRECTEUR": "le directeur",
+        "INTERLOCUTEUR": "l'interlocuteur",
     }
 
     @classmethod
     def strip_invented_placeholders(cls, text: str, known_placeholders: set) -> str:
         """Replace AI-invented placeholders with generic French terms.
 
-        When Mistral invents a new placeholder (e.g. [ENTREPRISE_2]) that does
-        not exist in our mappings, replace it with a generic term instead of
-        creating an orphan mapping with empty original_value.
+        When Mistral invents a new placeholder (e.g. [ENTREPRISE_2], [FILIALE_1],
+        [VILLE_SIEGE], etc.) that does not exist in our mappings, replace it with
+        a generic term instead of leaving an unresolved placeholder in the output.
         """
         unknown = cls.find_unknown_placeholders(text, known_placeholders)
         if not unknown:
