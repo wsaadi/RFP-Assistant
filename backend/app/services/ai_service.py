@@ -538,34 +538,48 @@ Valeurs de delta:
         """Analyze the RFP to detect all expected deliverables/documents."""
         system_prompt = """Tu es un expert senior en marchés publics et appels d'offres.
 
-Ta mission est d'analyser le contenu d'un appel d'offres pour identifier TOUS les documents
-et livrables que le candidat doit fournir dans sa réponse.
+Ta mission est d'analyser le contenu d'un appel d'offres pour identifier les DOCUMENTS PHYSIQUEMENT DISTINCTS
+que le candidat doit fournir dans sa réponse.
 
-## Ce que tu dois identifier:
-- Le mémoire technique (ou offre technique)
-- L'acte d'engagement (AE)
-- Le bordereau des prix unitaires (BPU)
-- Le détail quantitatif estimatif (DQE) ou DPGF
-- Les annexes spécifiques demandées (annexes techniques, financières, etc.)
-- Les formulaires obligatoires (DC1, DC2, ATTRI1, etc.)
-- Les attestations et certificats demandés
-- Le planning ou calendrier d'exécution
-- Les fiches de références / expériences similaires
-- Les CV des intervenants clés
-- Le mémoire environnemental / RSE si demandé
-- Tout autre document spécifiquement mentionné dans le RC, le CCTP ou le CCP
+## RÈGLE FONDAMENTALE — NE PAS ÉCLATER LES DOCUMENTS:
+Tu dois identifier UNIQUEMENT les documents qui sont **physiquement séparés** (fichiers distincts à remettre).
+Ne crée PAS un livrable séparé pour chaque thématique ou section d'un même document.
+
+Exemples de ce qu'il NE FAUT PAS faire:
+- NE PAS séparer "Fiches de références" en un document distinct si elles font partie du mémoire technique
+- NE PAS séparer "CV des intervenants" en un document distinct s'ils sont une section du mémoire technique
+- NE PAS séparer "Note méthodologique" si c'est un chapitre du mémoire technique
+- NE PAS séparer "Planning" si c'est une section du mémoire technique
+- NE PAS séparer "Mémoire RSE/environnemental" si c'est une section du mémoire technique
+
+Ces éléments (références, CV, méthodologie, planning, RSE) sont des CHAPITRES à l'intérieur du mémoire technique,
+pas des documents séparés. Ils seront gérés comme des chapitres lors de la génération de la structure.
+
+## Quand créer un document SÉPARÉ:
+- L'AO demande EXPLICITEMENT un document séparé (ex: "fournir un document distinct", "fichier séparé")
+- C'est un fichier d'un FORMAT DIFFÉRENT (ex: BPU en Excel vs mémoire en Word)
+- C'est un formulaire administratif officiel (DC1, DC2, ATTRI1, etc.)
+- L'AO mentionne clairement que ce document est une PIÈCE DISTINCTE de la candidature
+
+## Documents typiques à identifier:
+- Le mémoire technique (UN SEUL document regroupant toute l'offre technique: méthodologie, moyens, planning, références, CV, RSE, etc.)
+- L'acte d'engagement (AE) — si formulaire séparé
+- Le bordereau des prix unitaires (BPU) — fichier Excel séparé
+- Le DQE/DPGF — fichier Excel séparé
+- Les formulaires obligatoires (DC1, DC2, ATTRI1, etc.) — chacun est un formulaire séparé
+- Les annexes EXPLICITEMENT demandées comme fichiers séparés
 
 ## Règles:
 - Base-toi UNIQUEMENT sur ce que l'AO demande explicitement
 - Cite la source dans l'AO (article, page, section) quand possible
-- Indique le format attendu (docx, xlsx, pdf) si précisé dans l'AO
-- Classe les documents par ordre logique de présentation
-- Si une ancienne réponse est fournie, utilise-la pour confirmer/compléter la liste
+- En cas de doute, REGROUPE dans le mémoire technique plutôt que de créer un document séparé
+- Vise un nombre RAISONNABLE de documents (typiquement 3-8 pour un AO standard)
+- Si une ancienne réponse est fournie, utilise-la pour confirmer la liste des fichiers PHYSIQUES remis
 
 ## IMPORTANT - Classification du type de contenu (content_type):
 Tu DOIS classifier chaque livrable selon son type de contenu:
 
-- "redaction": Document à RÉDIGER entièrement par le candidat (mémoire technique, note méthodologique, planning détaillé rédigé, etc.)
+- "redaction": Document à RÉDIGER entièrement par le candidat (mémoire technique, etc.)
   → Le candidat écrit le contenu de zéro, avec des chapitres et du texte libre.
 
 - "completion": Document FOURNI par l'acheteur que le candidat doit COMPLÉTER/REMPLIR (BPU Excel, DQE, DPGF, formulaires DC1/DC2, AE pré-formaté, cadre de réponse imposé, etc.)
@@ -579,16 +593,13 @@ Indices pour "completion":
 - Document avec mention "à compléter", "à remplir", "fourni en annexe" → "completion"
 
 Indices pour "redaction":
-- Mémoire technique → "redaction"
-- Note méthodologique → "redaction"
-- Mémoire environnemental / RSE → "redaction"
-- Fiches références / CV → "redaction"
+- Mémoire technique → "redaction" (UN SEUL document, pas plusieurs)
 
 Réponds UNIQUEMENT au format JSON suivant (sans markdown):
 [
   {
     "title": "Titre du document (ex: Memoire Technique)",
-    "description": "Description du contenu attendu dans ce document",
+    "description": "Description du contenu attendu dans ce document, incluant toutes les sections/thématiques qui en font partie",
     "expected_format": "docx|xlsx|pdf|other",
     "content_type": "redaction|completion",
     "rfp_source": "Reference dans l'AO (ex: Article 5.2 du RC, page 12)",
