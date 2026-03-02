@@ -771,6 +771,7 @@ Réponds UNIQUEMENT au format JSON suivant (sans markdown):
         inspiration_content: str = "",
         company_name: str = "",
         client_name: str = "",
+        available_images: Optional[List[Dict]] = None,
     ) -> str:
         """Generate or enrich content for a chapter."""
         system_prompt = """Tu es un rédacteur senior expert en réponses aux appels d'offres, avec 15 ans d'expérience dans la rédaction de mémoires techniques gagnants.
@@ -806,6 +807,14 @@ Tu dois rédiger un contenu de HAUTE QUALITÉ RÉDACTIONNELLE pour un chapitre d
 - Tu ne dois JAMAIS inventer de nouveaux marqueurs.
 - Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques (ex: "le client", "le prestataire", "la solution proposée").
 
+## Insertion d'images :
+- Des images extraites des documents sources peuvent être disponibles (décrites ci-dessous par leurs métadonnées, pas les images elles-mêmes).
+- Si une image est pertinente pour illustrer un point du chapitre, insère le marqueur [INSERT_IMAGE:identifiant] à l'endroit approprié dans le texte.
+- Place le marqueur sur sa propre ligne, entre deux paragraphes, à l'endroit le plus logique pour illustrer le propos.
+- N'insère une image que si elle apporte une vraie valeur (schéma d'architecture, organigramme, graphique de performance, etc.).
+- N'insère PAS d'images décoratives, de logos ou d'images sans rapport direct avec le contenu du chapitre.
+- Tu peux insérer 0, 1 ou plusieurs images selon leur pertinence. Ne force pas l'insertion.
+
 ## Formatage :
 - Utilise **##** pour les titres de sections et **###** pour les sous-sections
 - Utilise **gras** pour les termes clés et les concepts importants
@@ -839,6 +848,20 @@ Contexte de rédaction fourni par l'utilisateur (utilise-le pour orienter le ton
         if notes:
             parts.append(f"Notes additionnelles:\n{notes}")
 
+        # Add available images catalog for intelligent placement
+        if available_images:
+            img_lines = ["Images disponibles pour illustration (insère [INSERT_IMAGE:id] si pertinent) :"]
+            for img in available_images:
+                img_id = img.get("id", "")
+                img_desc = img.get("anonymized_description", img.get("description", ""))
+                img_type = img.get("image_type", img.get("type", ""))
+                img_usage = img.get("suggested_usage", "")
+                line = f"- `{img_id}` [{img_type}] : {img_desc}"
+                if img_usage:
+                    line += f" (usage suggéré: {img_usage})"
+                img_lines.append(line)
+            parts.append("\n".join(img_lines))
+
         user_prompt = "\n\n".join(parts)
         user_prompt += "\n\nRédige le contenu COMPLET et DÉVELOPPÉ pour ce chapitre. Chaque section doit être argumentée avec des paragraphes de plusieurs phrases."
 
@@ -853,6 +876,7 @@ Contexte de rédaction fourni par l'utilisateur (utilise-le pour orienter le ton
         ai_context: str = "",
         company_name: str = "",
         client_name: str = "",
+        available_images: Optional[List[Dict]] = None,
     ) -> str:
         """Enrich existing chapter content."""
         system_prompt = """Tu es un rédacteur senior expert en réponses aux appels d'offres.
@@ -873,6 +897,12 @@ Tu dois enrichir et améliorer significativement le contenu existant d'un chapit
 - Tu DOIS réutiliser EXACTEMENT les mêmes marqueurs présents dans le texte fourni.
 - Tu ne dois JAMAIS inventer de nouveaux marqueurs.
 - Si tu dois mentionner une entité générique qui n'a pas de marqueur, utilise des termes génériques.
+
+## Insertion d'images :
+- Des images extraites des documents sources peuvent être disponibles (décrites par leurs métadonnées).
+- Si une image est pertinente pour illustrer un point, insère [INSERT_IMAGE:identifiant] sur sa propre ligne.
+- N'insère que les images qui apportent une vraie valeur ajoutée au contenu.
+- Conserve les marqueurs [INSERT_IMAGE:...] déjà présents dans le contenu existant.
 
 ## Formatage :
 - Utilise **##** pour les titres de sections et **###** pour les sous-sections
@@ -895,7 +925,20 @@ Exigence AO: {rfp_requirement}
 Axes d'amélioration: {improvement_axes}
 
 Contenu actuel à enrichir:
-{content}
+{content}"""
+
+        # Add available images catalog
+        if available_images:
+            img_lines = ["\nImages disponibles pour illustration (insère [INSERT_IMAGE:id] si pertinent) :"]
+            for img in available_images:
+                img_id = img.get("id", "")
+                img_desc = img.get("anonymized_description", img.get("description", ""))
+                img_type = img.get("image_type", img.get("type", ""))
+                line = f"- `{img_id}` [{img_type}] : {img_desc}"
+                img_lines.append(line)
+            user_prompt += "\n".join(img_lines)
+
+        user_prompt += """
 
 Enrichis et développe significativement ce contenu. Chaque section doit être plus argumentée, avec des paragraphes complets et des transitions fluides. Le résultat doit ressembler à un vrai mémoire technique professionnel, pas à une synthèse."""
 

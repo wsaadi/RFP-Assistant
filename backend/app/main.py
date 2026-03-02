@@ -253,6 +253,14 @@ async def health_check():
     except Exception:
         pass
 
+    # Check Vision model availability for image analysis
+    vision_status = {}
+    try:
+        from .services.image_analysis_service import ImageAnalysisService
+        vision_status = await ImageAnalysisService.check_vision_model_available()
+    except Exception:
+        vision_status = {"vision_available": False, "failure_reason": "check failed"}
+
     overall = "healthy" if redis_ok else "degraded"
     return {
         "status": overall,
@@ -261,5 +269,6 @@ async def health_check():
             "redis": "connected" if redis_ok else "disconnected",
             "ollama_ner": ollama_status,
             "ollama_ner_detail": ner_detail,
+            "ollama_vision": vision_status,
         },
     }

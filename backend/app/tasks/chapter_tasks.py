@@ -54,7 +54,7 @@ async def _run_chapter_generation(
     from ..database import create_task_engine
     from ..models.project import RFPProject, AIConfig
     from ..models.chapter import Chapter, ChapterStatus
-    from ..models.document import Document, DocumentChunk, DocumentCategory, ProcessingStatus
+    from ..models.document import Document, DocumentChunk, DocumentImage, DocumentCategory, ProcessingStatus
     from ..services.ai_service import MistralAIService, create_ai_service
     from ..services.vector_service import VectorService
     from ..services.anonymization_service import AnonymizationService
@@ -172,8 +172,17 @@ async def _run_chapter_generation(
                     "notes_text": anon_notes,
                 }
 
+            # ── Load analyzed images for this project ──
+            # Only include informative images that were successfully analyzed.
+            # Mistral receives anonymized metadata only — never the actual images.
+            _update("loading_images", 28, "Chargement des images analysees...")
+            available_images = await _load_project_images(
+                db, project_id, ch_title, ch_description,
+            )
+
         # ── Phase 2: AI generation (NO DB connection held) ──
         # All text fields sent to Mistral are now anonymized.
+        # available_images contains only anonymized metadata — no raw image data.
         mode = ai_params["mode"]
         if mode == "custom":
             _update("generating", 35, "Generation IA en cours...")
@@ -188,6 +197,7 @@ async def _run_chapter_generation(
                 ai_params["anon_content"], anon_title, anon_rfp_requirement, anon_improvement,
                 ai_context=anon_ai_context,
                 company_name=proj_company_name, client_name=proj_client_name,
+                available_images=available_images,
             )
         else:
             _update("generating", 40, "Generation IA du contenu...")
@@ -203,18 +213,38 @@ async def _run_chapter_generation(
                 inspiration_content=ai_params.get("inspiration_content", ""),
                 company_name=proj_company_name,
                 client_name=proj_client_name,
+                available_images=available_images,
             )
 
-        # ── Phase 3: Deanonymize + save ──
+        # ── Phase 3: Deanonymize + save (with image references) ──
         _update("deanonymizing", 80, "Deanonymisation...")
         async with TaskSession() as db:
             final_content = await AnonymizationService.deanonymize_text(result_text, project_id, db)
+
+            # Extract image references from the generated content
+            import re
+            image_refs = re.findall(r'\[INSERT_IMAGE:([^\]]+)\]', final_content)
+            image_references = []
+            if image_refs and available_images:
+                img_lookup = {str(img["id"]): img for img in available_images}
+                for ref_id in image_refs:
+                    ref_id_clean = ref_id.strip()
+                    if ref_id_clean in img_lookup:
+                        img = img_lookup[ref_id_clean]
+                        image_references.append({
+                            "image_id": ref_id_clean,
+                            "file_path": img.get("file_path", ""),
+                            "description": img.get("description", ""),
+                            "image_type": img.get("image_type", ""),
+                        })
 
             _update("saving", 90, "Enregistrement...")
             chap_result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
             chap = chap_result.scalar_one()
             chap.content = final_content
             chap.status = ChapterStatus.IN_PROGRESS
+            if image_references:
+                chap.image_references = image_references
             await db.commit()
 
         set_progress(NS, cid, {
@@ -230,6 +260,84 @@ async def _run_chapter_generation(
         })
     finally:
         await task_engine.dispose()
+
+
+async def _load_project_images(db, project_id, chapter_title: str, chapter_description: str):
+    """Load analyzed images from the project's documents for AI context.
+
+    Returns a list of image metadata dicts containing ONLY anonymized information
+    (no raw image data). Mistral uses these to decide where to insert images
+    via [INSERT_IMAGE:id] markers.
+
+    Images are filtered to:
+    - Only include successfully analyzed images (analysis_status = 'completed')
+    - Only include informative images (not decorative logos/separators)
+    - Prefer images whose suggested_usage matches the chapter context
+    """
+    from sqlalchemy import select
+    from ..models.document import Document, DocumentImage, ProcessingStatus
+
+    try:
+        result = await db.execute(
+            select(DocumentImage, Document.original_filename)
+            .join(Document, Document.id == DocumentImage.document_id)
+            .where(Document.project_id == project_id)
+            .where(Document.processing_status == ProcessingStatus.COMPLETED)
+            .where(DocumentImage.analysis_status == "completed")
+            .order_by(DocumentImage.page_number, DocumentImage.created_at)
+        )
+        rows = result.all()
+    except Exception as e:
+        logger.warning("Failed to load project images: %s", e)
+        return []
+
+    images = []
+    for db_image, doc_name in rows:
+        # Skip non-informative images (decorative, logos, etc.)
+        img_type = db_image.image_type or ""
+        if img_type in ("logo", "illustration") and not db_image.key_information:
+            continue
+
+        # Build the anonymized metadata that Mistral will see
+        images.append({
+            "id": str(db_image.id),
+            "file_path": db_image.file_path,
+            "image_type": img_type,
+            "description": db_image.description or "",
+            "anonymized_description": db_image.anonymized_description or "",
+            "key_information": db_image.key_information or [],
+            "suggested_usage": db_image.suggested_usage or "",
+            "page_number": db_image.page_number,
+            "document_name": doc_name,
+            "width": db_image.width,
+            "height": db_image.height,
+        })
+
+    # Limit to most relevant images (avoid flooding the prompt)
+    # Prioritize images whose suggested_usage matches the chapter context
+    if len(images) > 15:
+        chapter_context = f"{chapter_title} {chapter_description}".lower()
+        for img in images:
+            usage = (img.get("suggested_usage") or "").lower()
+            desc = (img.get("anonymized_description") or "").lower()
+            # Simple relevance scoring
+            score = 0
+            for word in chapter_context.split():
+                if len(word) > 3:
+                    if word in usage:
+                        score += 2
+                    if word in desc:
+                        score += 1
+            img["_relevance"] = score
+
+        images.sort(key=lambda x: x.get("_relevance", 0), reverse=True)
+        images = images[:15]
+
+        # Clean up internal scoring field
+        for img in images:
+            img.pop("_relevance", None)
+
+    return images
 
 
 async def _get_full_text_anon(db, project_id, category):

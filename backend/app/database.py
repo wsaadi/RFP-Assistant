@@ -154,3 +154,25 @@ async def init_db():
             ))
         except Exception:
             logger.debug("company_name column already exists or ALTER TABLE not supported")
+
+    # ── Vision AI image analysis columns on document_images ──
+    vision_columns = {
+        "analysis_status": "VARCHAR(20) DEFAULT 'pending'",
+        "image_type": "VARCHAR(50) DEFAULT ''",
+        "anonymized_description": "TEXT DEFAULT ''",
+        "key_information": "JSON DEFAULT '[]'",
+        "pii_detected": "JSON DEFAULT '[]'",
+        "ocr_text": "TEXT DEFAULT ''",
+        "anonymized_ocr_text": "TEXT DEFAULT ''",
+        "suggested_usage": "TEXT DEFAULT ''",
+        "section_title": "VARCHAR(500) DEFAULT ''",
+    }
+    async with engine.begin() as conn:
+        for col_name, col_type in vision_columns.items():
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE document_images ADD COLUMN IF NOT EXISTS "
+                    f"{col_name} {col_type}"
+                ))
+            except Exception:
+                logger.debug("document_images.%s column already exists", col_name)

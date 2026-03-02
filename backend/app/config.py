@@ -40,6 +40,11 @@ class Settings(BaseSettings):
     ollama_gen_timeout: int = 300
     ollama_gen_stream_timeout: int = 600
 
+    # Ollama Vision (local image analysis on DGX Spark)
+    ollama_vision_model: str = "llava:13b"
+    ollama_vision_timeout: int = 120
+    ollama_vision_concurrency: int = 2
+
     # HuggingFace
     hf_token: Optional[str] = None
 
