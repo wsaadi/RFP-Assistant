@@ -9,11 +9,11 @@ Reliability features:
 - Dedicated queues: document processing vs quick tasks
 - Visibility timeout: prevents message loss on long tasks
 - Exponential retry backoff: avoids thundering herd on transient errors
-- Staggered model preloading: embedding model loaded once per worker at startup
+- Background model preloading: embedding model loaded in a thread to avoid blocking worker init
 """
 import logging
 import os
-import time
+import threading
 
 from celery import Celery
 from celery.signals import worker_process_init
@@ -124,28 +124,34 @@ celery.conf.update(
 
 # ── Embedding model preloading ──
 # The SentenceTransformer model (~800MB) is loaded lazily by VectorService.
-# When multiple prefork workers start simultaneously, each one loading the
-# model causes a memory spike that can trigger OOM kills.
-# This signal handler staggers the loading: each worker process waits
-# (worker_index * 3s) before preloading, so only one loads at a time.
+# Loading happens in a background thread so it does NOT block
+# worker_process_init — the worker must send its "UP" message within
+# worker_proc_alive_timeout (default 4s) or the main process kills it.
+# A stagger delay avoids simultaneous memory spikes across workers.
 
-@worker_process_init.connect
-def _preload_embedding_model(**kwargs):
-    """Preload the embedding model in each worker process at startup.
-
-    Staggered by worker index to avoid simultaneous memory spikes.
-    """
+def _load_model_background(stagger_delay: int) -> None:
+    """Load the embedding model in a background thread (does not block worker init)."""
+    import time
+    pid = os.getpid()
     try:
-        # Stagger loading: each worker waits a bit based on its PID
-        # to avoid all workers loading the model at the exact same moment.
-        stagger_delay = (os.getpid() % 4) * 3  # 0, 3, 6, or 9 seconds
         if stagger_delay:
-            _logger.info("Worker PID %d: waiting %ds before loading embedding model", os.getpid(), stagger_delay)
+            _logger.info("Worker PID %d: waiting %ds before loading embedding model", pid, stagger_delay)
             time.sleep(stagger_delay)
 
         from .services.vector_service import VectorService
-        _logger.info("Worker PID %d: preloading embedding model...", os.getpid())
+        _logger.info("Worker PID %d: preloading embedding model...", pid)
         VectorService.get_embedding_function()
-        _logger.info("Worker PID %d: embedding model loaded", os.getpid())
+        _logger.info("Worker PID %d: embedding model loaded", pid)
     except Exception as e:
-        _logger.warning("Worker PID %d: failed to preload embedding model: %s", os.getpid(), e)
+        _logger.warning("Worker PID %d: failed to preload embedding model: %s", pid, e)
+
+
+@worker_process_init.connect
+def _preload_embedding_model(**kwargs):
+    """Schedule embedding model preload in a background thread.
+
+    Must not block: the worker needs to send its UP message quickly.
+    """
+    stagger_delay = (os.getpid() % 4) * 3  # 0, 3, 6, or 9 seconds
+    t = threading.Thread(target=_load_model_background, args=(stagger_delay,), daemon=True)
+    t.start()

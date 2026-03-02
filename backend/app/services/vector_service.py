@@ -1,4 +1,5 @@
 """Vector database service using ChromaDB for document indexing and search."""
+import threading
 import uuid
 from typing import List, Optional, Dict
 
@@ -30,6 +31,7 @@ class VectorService:
 
     _client = None
     _embedding_fn = None
+    _embedding_lock = threading.Lock()
 
     @classmethod
     def get_client(cls) -> chromadb.ClientAPI:
@@ -42,11 +44,13 @@ class VectorService:
 
     @classmethod
     def get_embedding_function(cls):
-        """Get or create the embedding function (singleton)."""
+        """Get or create the embedding function (singleton, thread-safe)."""
         if cls._embedding_fn is None:
-            cls._embedding_fn = _E5EmbeddingFunction(
-                model_name=settings.embedding_model,
-            )
+            with cls._embedding_lock:
+                if cls._embedding_fn is None:
+                    cls._embedding_fn = _E5EmbeddingFunction(
+                        model_name=settings.embedding_model,
+                    )
         return cls._embedding_fn
 
     @classmethod
