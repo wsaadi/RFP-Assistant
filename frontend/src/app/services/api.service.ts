@@ -163,7 +163,8 @@ export class ApiService {
   }
 
   getImageUrl(imageId: string): string {
-    return `${this.baseUrl}/documents/image-file/${imageId}`;
+    const token = localStorage.getItem('rfp_token') || '';
+    return `${this.baseUrl}/documents/image-file/${imageId}?token=${encodeURIComponent(token)}`;
   }
 
   updateImage(imageId: string, data: { image_category?: string; selected?: boolean }): Observable<DocumentImage> {
