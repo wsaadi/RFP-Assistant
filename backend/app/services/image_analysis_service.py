@@ -31,56 +31,24 @@ _VISION_TIMEOUT = int(os.environ.get("OLLAMA_VISION_TIMEOUT", str(settings.ollam
 _VISION_CONCURRENCY = int(os.environ.get("OLLAMA_VISION_CONCURRENCY", str(settings.ollama_vision_concurrency)))
 
 # ── Vision analysis prompt ──
-_VISION_SYSTEM_PROMPT = """\
-Tu es un système d'analyse d'images spécialisé dans les documents d'appels d'offres et mémoires techniques.
+# LLaVA works best with: English, single user message (no system), short direct instructions.
+_VISION_USER_PROMPT = """\
+Look at this image from a business document and respond ONLY with a JSON object. No other text.
 
-Tu dois analyser l'image fournie et produire une description structurée en JSON.
-
-## Ce que tu dois extraire :
-
-1. **type** : Le type d'image parmi :
-   - "diagramme" : schéma d'architecture, diagramme de flux, organigramme
-   - "graphique" : graphique statistique, histogramme, camembert, courbe
-   - "tableau" : tableau de données, matrice, grille
-   - "capture_ecran" : capture d'écran d'un logiciel, interface, dashboard
-   - "photo" : photographie de personnes, lieux, équipements
-   - "logo" : logo d'entreprise, marque, certification
-   - "schema_technique" : schéma réseau, infrastructure, technique
-   - "carte" : carte géographique, plan
-   - "illustration" : illustration générique, icône décorative
-   - "autre" : tout ce qui ne rentre pas dans les catégories ci-dessus
-
-2. **description** : Description détaillée et factuelle du contenu de l'image (3-5 phrases).
-   Décris ce que tu VOIS réellement, pas ce que tu devines.
-
-3. **key_information** : Liste des informations clés visibles (données, chiffres, noms de technologies, etc.)
-
-4. **pii_detected** : Liste des données personnelles visibles dans l'image :
-   - Noms de personnes (prénom + nom)
-   - Adresses email
-   - Numéros de téléphone
-   - Adresses postales
-   Pour chaque élément, indique le type et la valeur exacte lue.
-   NE PAS signaler les noms d'entreprises, de produits ou de solutions comme PII.
-
-5. **ocr_text** : Tout texte lisible dans l'image, transcrit fidèlement.
-
-6. **suggested_usage** : Dans quel type de section/chapitre cette image serait pertinente
-   (ex: "architecture technique", "méthodologie projet", "références clients", "organigramme équipe").
-
-7. **is_informative** : true si l'image apporte une information utile, false si elle est purement décorative
-   (logos génériques, séparateurs, icônes sans valeur informative).
-
-## Format de réponse OBLIGATOIRE (JSON strict, sans markdown) :
 {
-  "type": "...",
-  "description": "...",
-  "key_information": ["info1", "info2"],
-  "pii_detected": [{"type": "person|email|phone|address", "value": "..."}],
-  "ocr_text": "...",
-  "suggested_usage": "...",
+  "type": "<one of: diagram, chart, table, screenshot, photo, logo, schema, map, illustration, other>",
+  "description": "<2-3 sentence factual description of what you see>",
+  "key_information": ["<important visible data points, technologies, metrics>"],
+  "pii_detected": [{"type": "person", "value": "<full name>"}],
+  "ocr_text": "<all readable text in the image>",
+  "suggested_usage": "<what section this image fits: architecture, methodology, team, references, etc>",
   "is_informative": true
-}"""
+}
+
+Rules:
+- pii_detected: ONLY real person names, emails, phone numbers. NOT company/product names.
+- is_informative: false for decorative logos, separators, icons with no useful info.
+- Respond with ONLY the JSON object, nothing else."""
 
 
 class ImageAnalysisService:
@@ -131,13 +99,15 @@ class ImageAnalysisService:
         if not image_b64:
             return cls._empty_analysis("Impossible de lire le fichier image")
 
-        # Build the user prompt with context
-        user_parts = ["Analyse cette image extraite d'un document d'appel d'offres."]
-        if section_title:
-            user_parts.append(f"Section du document : {section_title}")
-        if page_context:
-            user_parts.append(f"Texte environnant dans le document :\n{page_context[:1000]}")
-        user_prompt = "\n\n".join(user_parts)
+        # Build the user prompt with context appended
+        user_prompt = _VISION_USER_PROMPT
+        if section_title or page_context:
+            ctx_parts = []
+            if section_title:
+                ctx_parts.append(f"Document section: {section_title}")
+            if page_context:
+                ctx_parts.append(f"Surrounding text: {page_context[:500]}")
+            user_prompt += "\n\nContext:\n" + "\n".join(ctx_parts)
 
         # Call Ollama vision API with concurrency control
         sem = cls._get_semaphore()
@@ -206,11 +176,34 @@ class ImageAnalysisService:
 
         Ollama's vision API accepts images as base64-encoded strings in the
         ``images`` field of the message payload.
+
+        LLaVA does NOT support system messages properly — we use a single
+        user message containing both the instructions and the image.
+        If the first attempt returns no JSON (refusal), we retry once
+        with a minimal fallback prompt.
         """
+        # First attempt with full prompt
+        result = await cls._call_ollama_once(image_b64, user_prompt)
+        if result.get("type") != "autre" or result.get("description", "").startswith("Type:"):
+            return result
+
+        # If the model refused or returned garbage, retry with a minimal prompt
+        logger.info("Vision model returned empty/refusal — retrying with minimal prompt")
+        fallback_prompt = (
+            "Describe this image in JSON format: "
+            '{"type":"diagram|chart|table|photo|logo|other",'
+            '"description":"what you see",'
+            '"ocr_text":"any text in the image",'
+            '"is_informative":true}'
+        )
+        return await cls._call_ollama_once(image_b64, fallback_prompt)
+
+    @classmethod
+    async def _call_ollama_once(cls, image_b64: str, user_prompt: str) -> Dict:
+        """Single call to the Ollama vision API."""
         payload = {
             "model": _VISION_MODEL,
             "messages": [
-                {"role": "system", "content": _VISION_SYSTEM_PROMPT},
                 {
                     "role": "user",
                     "content": user_prompt,
@@ -234,14 +227,29 @@ class ImageAnalysisService:
         raw_content = data.get("message", {}).get("content", "")
         return cls._parse_vision_response(raw_content)
 
+    # Map English type names (from LLaVA) → French (used in the rest of the app)
+    _TYPE_MAP = {
+        "diagram": "diagramme",
+        "chart": "graphique",
+        "table": "tableau",
+        "screenshot": "capture_ecran",
+        "photo": "photo",
+        "logo": "logo",
+        "schema": "schema_technique",
+        "map": "carte",
+        "illustration": "illustration",
+        "other": "autre",
+    }
+
     @classmethod
     def _parse_vision_response(cls, raw: str) -> Dict:
         """Parse the JSON response from the vision model."""
         # Strip markdown fences if present
         text = raw.strip()
-        text = text.removeprefix("```json").removeprefix("```")
-        text = text.removesuffix("```")
-        text = text.strip()
+        if text.startswith("```"):
+            text = text.removeprefix("```json").removeprefix("```")
+            text = text.removesuffix("```")
+            text = text.strip()
 
         try:
             result = json.loads(text)
@@ -259,15 +267,22 @@ class ImageAnalysisService:
                 logger.warning("No JSON found in vision response. Raw: %s", text[:300])
                 return cls._empty_analysis("Réponse non-JSON du modèle vision")
 
-        # Validate and normalize the result
+        # Normalize the type from English to French
+        raw_type = str(result.get("type", "other")).lower().strip()
+        norm_type = cls._TYPE_MAP.get(raw_type, raw_type)
+        # Fallback: if the model returned a French type already, keep it
+        valid_fr_types = set(cls._TYPE_MAP.values())
+        if norm_type not in valid_fr_types:
+            norm_type = "autre"
+
         return {
-            "type": result.get("type", "autre"),
+            "type": norm_type,
             "description": result.get("description", ""),
-            "key_information": result.get("key_information", []),
-            "pii_detected": result.get("pii_detected", []),
+            "key_information": result.get("key_information") if isinstance(result.get("key_information"), list) else [],
+            "pii_detected": result.get("pii_detected") if isinstance(result.get("pii_detected"), list) else [],
             "ocr_text": result.get("ocr_text", ""),
             "suggested_usage": result.get("suggested_usage", ""),
-            "is_informative": result.get("is_informative", True),
+            "is_informative": bool(result.get("is_informative", True)),
         }
 
     @staticmethod
