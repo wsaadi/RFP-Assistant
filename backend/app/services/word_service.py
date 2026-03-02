@@ -1,8 +1,9 @@
 """Service for generating professional Word documents for RFP responses."""
 import io
+import logging
 import os
 import re
-from typing import List, Optional
+from typing import Dict, List, Optional
 from docx import Document
 from docx.shared import Pt, Cm, Inches, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -12,6 +13,11 @@ from docx.oxml.ns import qn, nsdecls
 from docx.oxml import parse_xml
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
+
+# Regex to match [INSERT_IMAGE:some_id] markers in generated content
+_IMAGE_MARKER_RE = re.compile(r'^\s*\[INSERT_IMAGE:([^\]]+)\]\s*$')
 
 
 class RFPWordService:
@@ -252,48 +258,78 @@ class RFPWordService:
         doc.add_paragraph()  # spacing after table
 
     @classmethod
+    def _insert_image_in_doc(cls, doc: Document, filepath: str, description: str = ""):
+        """Insert a centered image with optional caption into the Word document."""
+        if not filepath or not os.path.exists(filepath):
+            logger.warning("Image file not found: %s", filepath)
+            return
+
+        try:
+            doc.add_paragraph()
+            p = doc.add_paragraph()
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = p.add_run()
+            run.add_picture(filepath, width=Inches(4.5))
+
+            if description:
+                caption = doc.add_paragraph()
+                caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                run = caption.add_run(f"Figure : {description}")
+                run.italic = True
+                run.font.size = Pt(9)
+                run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+        except Exception as e:
+            logger.error("Error inserting image %s: %s", filepath, e)
+
+    @classmethod
     def add_chapter_content(cls, doc: Document, title: str, content: str,
                             numbering: str, level: int = 1,
-                            images: Optional[List[dict]] = None):
-        """Add a chapter with content parsed from markdown."""
+                            images: Optional[List[dict]] = None,
+                            image_lookup: Optional[Dict[str, dict]] = None):
+        """Add a chapter with content parsed from markdown.
+
+        Args:
+            image_lookup: Optional dict mapping image IDs to image info dicts
+                          (with file_path, description keys). Used to resolve
+                          [INSERT_IMAGE:id] markers in the generated content.
+        """
         heading_text = f"{numbering} {title}" if numbering else title
         doc.add_heading(heading_text, level=min(level, 3))
 
         if content and content.strip():
-            cls._parse_markdown_to_docx(doc, content, base_heading_level=min(level + 1, 3))
+            cls._parse_markdown_to_docx(
+                doc, content,
+                base_heading_level=min(level + 1, 3),
+                image_lookup=image_lookup,
+            )
         else:
             p = doc.add_paragraph("[Section à compléter]")
             p.runs[0].italic = True
             p.runs[0].font.color.rgb = RGBColor(0x99, 0x99, 0x99)
 
-        # Add images if any
+        # Add trailing images (legacy behavior for explicitly attached images)
         if images:
             for img_info in images:
-                filepath = img_info.get("file_path", "")
-                description = img_info.get("description", "")
-                if filepath and os.path.exists(filepath):
-                    try:
-                        doc.add_paragraph()
-                        p = doc.add_paragraph()
-                        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        run = p.add_run()
-                        run.add_picture(filepath, width=Inches(4.5))
-
-                        if description:
-                            caption = doc.add_paragraph()
-                            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            run = caption.add_run(f"Figure: {description}")
-                            run.italic = True
-                            run.font.size = Pt(9)
-                    except Exception as e:
-                        print(f"Error adding image: {e}")
+                cls._insert_image_in_doc(
+                    doc,
+                    img_info.get("file_path", ""),
+                    img_info.get("description", ""),
+                )
 
     @classmethod
-    def _parse_markdown_to_docx(cls, doc: Document, content: str, base_heading_level: int = 2):
+    def _parse_markdown_to_docx(cls, doc: Document, content: str,
+                                base_heading_level: int = 2,
+                                image_lookup: Optional[Dict[str, dict]] = None):
         """Parse markdown content and add properly formatted elements to the Word document.
 
         Handles: headings (##), bold/italic, bullet lists (- *), numbered lists (1.),
-        tables (|...|), horizontal rules (---), and regular paragraphs.
+        tables (|...|), horizontal rules (---), [INSERT_IMAGE:id] markers,
+        and regular paragraphs.
+
+        Args:
+            image_lookup: Optional dict mapping image IDs to image info dicts.
+                          When a [INSERT_IMAGE:id] marker is encountered, the
+                          corresponding original image is inserted into the document.
         """
         lines = content.split('\n')
         i = 0
@@ -304,6 +340,22 @@ class RFPWordService:
 
             # Skip empty lines
             if not stripped:
+                i += 1
+                continue
+
+            # [INSERT_IMAGE:id] marker — insert actual image from lookup
+            img_match = _IMAGE_MARKER_RE.match(stripped)
+            if img_match:
+                img_id = img_match.group(1).strip()
+                if image_lookup and img_id in image_lookup:
+                    img_info = image_lookup[img_id]
+                    cls._insert_image_in_doc(
+                        doc,
+                        img_info.get("file_path", ""),
+                        img_info.get("description", ""),
+                    )
+                else:
+                    logger.warning("Image marker [INSERT_IMAGE:%s] not found in lookup", img_id)
                 i += 1
                 continue
 
@@ -376,7 +428,8 @@ class RFPWordService:
                     re.match(r'^[\-\*]\s+', l) or
                     re.match(r'^\d+[\.\)]\s+', l) or
                     l.startswith('|') or
-                    re.match(r'^-{3,}$|^\*{3,}$|^_{3,}$', l)):
+                    re.match(r'^-{3,}$|^\*{3,}$|^_{3,}$', l) or
+                    _IMAGE_MARKER_RE.match(l)):
                     break
                 para_lines.append(lines[i].strip())
                 i += 1
@@ -394,8 +447,15 @@ class RFPWordService:
         rfp_reference: str,
         chapters: List[dict],
         company_name: str = "",
+        image_lookup: Optional[Dict[str, dict]] = None,
     ) -> io.BytesIO:
-        """Generate a complete Word document for the RFP response."""
+        """Generate a complete Word document for the RFP response.
+
+        Args:
+            image_lookup: Optional dict mapping image IDs (str UUID) to image info
+                          dicts with keys: file_path, description, image_type.
+                          Used to resolve [INSERT_IMAGE:id] markers in chapter content.
+        """
         doc = Document()
 
         # Set margins
@@ -427,6 +487,7 @@ class RFPWordService:
                     numbering=numbering,
                     level=level,
                     images=chapter.get("images"),
+                    image_lookup=image_lookup,
                 )
 
                 children = chapter.get("children", [])
@@ -455,6 +516,7 @@ class RFPWordService:
                     numbering=f"A{i}",
                     level=2,
                     images=annexe.get("images"),
+                    image_lookup=image_lookup,
                 )
 
         # Save to BytesIO

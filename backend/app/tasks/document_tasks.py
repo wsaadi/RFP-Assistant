@@ -278,8 +278,76 @@ async def _process_document_async(document_id: str, project_id: str):
                 document_id, vec_err, exc_info=True,
             )
 
-        # ── Phase 3d: Save images + finalize document ──
-        logger.info("[doc:%s] Phase 3d: Finalizing", document_id)
+        # ── Phase 3d: Analyze images with local Vision AI ──
+        # Uses a local vision model (LLaVA on DGX Spark) to generate structured
+        # metadata for each image. This metadata (anonymized) is later used by
+        # Mistral for intelligent image placement — Mistral never sees the images.
+        analyzed_images = images_data  # fallback: use raw extraction data
+        if images_data:
+            from ..services.image_analysis_service import ImageAnalysisService
+            from ..models.document import ImageAnalysisStatus
+
+            logger.info("[doc:%s] Phase 3d: Analyzing %d images with Vision AI", document_id, len(images_data))
+            ProgressTracker.update(document_id, "analyzing_images")
+
+            def _img_progress(done: int, total: int):
+                ProgressTracker.update_sub_progress(document_id, done, total)
+
+            try:
+                analysis_results = await ImageAnalysisService.analyze_images_batch(
+                    images_data, progress_callback=_img_progress,
+                )
+
+                # Merge analysis results into images_data
+                for img_data, analysis in zip(images_data, analysis_results):
+                    img_data["image_type"] = analysis.get("type", "autre")
+                    img_data["description"] = analysis.get("description", "")
+                    img_data["key_information"] = analysis.get("key_information", [])
+                    img_data["pii_detected"] = analysis.get("pii_detected", [])
+                    img_data["ocr_text"] = analysis.get("ocr_text", "")
+                    img_data["suggested_usage"] = analysis.get("suggested_usage", "")
+                    img_data["tags"] = analysis.get("key_information", [])[:10]
+                    img_data["is_informative"] = analysis.get("is_informative", True)
+                    img_data["analysis_status"] = ImageAnalysisStatus.COMPLETED.value
+
+                    # Anonymize OCR text using existing mappings
+                    ocr_text = img_data.get("ocr_text", "")
+                    if ocr_text:
+                        try:
+                            async with TaskSession() as db:
+                                anon_ocr = await AnonymizationService.anonymize_text(
+                                    ocr_text, uuid.UUID(project_id), db,
+                                )
+                                await db.commit()
+                            img_data["anonymized_ocr_text"] = anon_ocr
+                        except Exception:
+                            img_data["anonymized_ocr_text"] = ""
+
+                    # Build the anonymized description (what Mistral will see)
+                    img_data["anonymized_description"] = ImageAnalysisService.build_anonymized_description(
+                        analysis, img_data.get("anonymized_ocr_text", ""),
+                    )
+
+                # Filter out non-informative images (decorative)
+                informative_count = sum(1 for img in images_data if img.get("is_informative", True))
+                logger.info(
+                    "[doc:%s] Image analysis done: %d/%d informative images",
+                    document_id, informative_count, len(images_data),
+                )
+
+            except SoftTimeLimitExceeded:
+                raise
+            except Exception as vision_err:
+                logger.warning(
+                    "[doc:%s] Vision analysis failed (images saved without analysis): %s",
+                    document_id, vision_err, exc_info=True,
+                )
+                # Non-fatal: images are still saved, just without analysis metadata
+                for img_data in images_data:
+                    img_data["analysis_status"] = ImageAnalysisStatus.FAILED.value
+
+        # ── Phase 3e: Save images + finalize document ──
+        logger.info("[doc:%s] Phase 3e: Finalizing", document_id)
         ProgressTracker.update(document_id, "finalizing")
         async with TaskSession() as db:
             for img_data in images_data:
@@ -293,6 +361,16 @@ async def _process_document_async(document_id: str, project_id: str):
                     tags=img_data.get("tags", []),
                     width=img_data.get("width", 0),
                     height=img_data.get("height", 0),
+                    # Vision analysis fields
+                    analysis_status=img_data.get("analysis_status", "pending"),
+                    image_type=img_data.get("image_type", ""),
+                    anonymized_description=img_data.get("anonymized_description", ""),
+                    key_information=img_data.get("key_information", []),
+                    pii_detected=img_data.get("pii_detected", []),
+                    ocr_text=img_data.get("ocr_text", ""),
+                    anonymized_ocr_text=img_data.get("anonymized_ocr_text", ""),
+                    suggested_usage=img_data.get("suggested_usage", ""),
+                    section_title=img_data.get("section_title", ""),
                 )
                 db.add(db_image)
 

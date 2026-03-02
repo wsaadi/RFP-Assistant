@@ -97,6 +97,13 @@ class DocumentChunk(Base):
     document = relationship("Document", back_populates="chunks")
 
 
+class ImageAnalysisStatus(str, enum.Enum):
+    PENDING = "pending"
+    ANALYZING = "analyzing"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
 class DocumentImage(Base):
     __tablename__ = "document_images"
 
@@ -114,6 +121,20 @@ class DocumentImage(Base):
     tags: Mapped[dict] = mapped_column(JSON, default=list)
     width: Mapped[int] = mapped_column(Integer, default=0)
     height: Mapped[int] = mapped_column(Integer, default=0)
+
+    # ── Vision AI analysis fields ──
+    analysis_status: Mapped[str] = mapped_column(
+        String(20), default=ImageAnalysisStatus.PENDING.value
+    )
+    image_type: Mapped[str] = mapped_column(String(50), default="")
+    anonymized_description: Mapped[str] = mapped_column(Text, default="")
+    key_information: Mapped[dict] = mapped_column(JSON, default=list)
+    pii_detected: Mapped[dict] = mapped_column(JSON, default=list)
+    ocr_text: Mapped[str] = mapped_column(Text, default="")
+    anonymized_ocr_text: Mapped[str] = mapped_column(Text, default="")
+    suggested_usage: Mapped[str] = mapped_column(Text, default="")
+    section_title: Mapped[str] = mapped_column(String(500), default="")
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

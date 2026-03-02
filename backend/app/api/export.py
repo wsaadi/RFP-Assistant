@@ -143,6 +143,9 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
             docs = docs_result.scalars().all()
             doc_ids = [d.id for d in docs]
 
+            # Build image lookup for [INSERT_IMAGE:id] marker resolution
+            # Maps image UUID → {file_path, description, image_type}
+            image_lookup = {}
             images_by_doc = {}
             if doc_ids:
                 img_result = await db.execute(
@@ -154,6 +157,12 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
                         "description": img.description,
                         "tags": img.tags or [],
                     })
+                    # Add to global lookup for marker resolution
+                    image_lookup[str(img.id)] = {
+                        "file_path": img.file_path,
+                        "description": img.description or "",
+                        "image_type": getattr(img, "image_type", "") or "",
+                    }
 
             deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
 
@@ -191,6 +200,7 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
                     rfp_reference=project.rfp_reference,
                     chapters=chapters_data,
                     company_name=getattr(project, 'company_name', '') or '',
+                    image_lookup=image_lookup,
                 ))
             finally:
                 loop.close()
