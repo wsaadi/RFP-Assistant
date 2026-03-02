@@ -108,6 +108,15 @@ celery.conf.update(
         "tasks.export_backup": {"queue": "default"},
     },
 
+    # ── Worker startup timeout ──
+    # The default worker_proc_alive_timeout is 4s, which is too short when
+    # the worker_process_init signal preloads the embedding model (weight
+    # materialisation + HuggingFace HTTP requests can take 10-30s, and the
+    # stagger delay adds up to 9s on top of that).  If the child doesn't
+    # send its UP message before this timeout, the main process kills it
+    # with SIGKILL ("Timed out waiting for UP message").
+    worker_proc_alive_timeout=120,
+
     # ── Worker event emission (for monitoring) ──
     worker_send_task_events=True,
     task_send_sent_event=True,
