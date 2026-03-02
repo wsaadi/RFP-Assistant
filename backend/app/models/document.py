@@ -3,7 +3,7 @@ import uuid
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Integer, DateTime, ForeignKey, Text, Enum as SAEnum, BigInteger, JSON
+from sqlalchemy import String, Integer, DateTime, ForeignKey, Text, Enum as SAEnum, BigInteger, JSON, Boolean
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -122,6 +122,12 @@ class DocumentImage(Base):
     tags: Mapped[dict] = mapped_column(JSON, default=list)
     width: Mapped[int] = mapped_column(Integer, default=0)
     height: Mapped[int] = mapped_column(Integer, default=0)
+
+    # ── User selection & categorization ──
+    image_category: Mapped[str] = mapped_column(
+        String(30), default="autre"
+    )  # icone, logo, schema, illustration, photo, graphique, tableau, autre
+    selected: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # ── Vision AI analysis fields ──
     analysis_status: Mapped[str] = mapped_column(

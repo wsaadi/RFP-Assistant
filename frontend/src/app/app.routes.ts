@@ -39,6 +39,11 @@ export const routes: Routes = [
           import('./components/chapter-editor/chapter-editor.component').then((m) => m.ChapterEditorComponent),
       },
       {
+        path: 'project/:projectId/images',
+        loadComponent: () =>
+          import('./components/image-gallery/image-gallery.component').then((m) => m.ImageGalleryComponent),
+      },
+      {
         path: 'project/:projectId/preview',
         loadComponent: () =>
           import('./components/preview/preview.component').then((m) => m.PreviewComponent),

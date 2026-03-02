@@ -316,73 +316,30 @@ async def _process_document_async(document_id: str, project_id: str):
                 document_id, vec_err, exc_info=True,
             )
 
-        # ── Phase 3d: Analyze images with local Vision AI ──
-        # Uses a local vision model (LLaVA on DGX Spark) to generate structured
-        # metadata for each image. This metadata (anonymized) is later used by
-        # Mistral for intelligent image placement — Mistral never sees the images.
-        analyzed_images = images_data  # fallback: use raw extraction data
+        # ── Phase 3d: Categorize images by size heuristics ──
+        # Vision AI analysis is NO LONGER automatic — users select images
+        # to analyze from the image gallery UI, then trigger analysis on demand.
+        # Here we only assign a basic category based on dimensions.
         if images_data:
-            from ..services.image_analysis_service import ImageAnalysisService
             from ..models.document import ImageAnalysisStatus
 
-            logger.info("[doc:%s] Phase 3d: Analyzing %d images with Vision AI", document_id, len(images_data))
-            ProgressTracker.update(document_id, "analyzing_images")
+            logger.info("[doc:%s] Phase 3d: Categorizing %d images by size", document_id, len(images_data))
 
-            def _img_progress(done: int, total: int):
-                ProgressTracker.update_sub_progress(document_id, done, total)
+            for img_data in images_data:
+                w = img_data.get("width", 0)
+                h = img_data.get("height", 0)
+                img_data["image_category"] = _guess_image_category(w, h)
+                img_data["analysis_status"] = ImageAnalysisStatus.PENDING.value
+                img_data["selected"] = False
 
-            try:
-                analysis_results = await ImageAnalysisService.analyze_images_batch(
-                    images_data, progress_callback=_img_progress,
-                )
-
-                # Merge analysis results into images_data
-                for img_data, analysis in zip(images_data, analysis_results):
-                    img_data["image_type"] = analysis.get("type", "autre")
-                    img_data["description"] = analysis.get("description", "")
-                    img_data["key_information"] = analysis.get("key_information", [])
-                    img_data["pii_detected"] = analysis.get("pii_detected", [])
-                    img_data["ocr_text"] = analysis.get("ocr_text", "")
-                    img_data["suggested_usage"] = analysis.get("suggested_usage", "")
-                    img_data["tags"] = analysis.get("key_information", [])[:10]
-                    img_data["is_informative"] = analysis.get("is_informative", True)
-                    img_data["analysis_status"] = ImageAnalysisStatus.COMPLETED.value
-
-                    # Anonymize OCR text using existing mappings
-                    ocr_text = img_data.get("ocr_text", "")
-                    if ocr_text:
-                        try:
-                            async with TaskSession() as db:
-                                anon_ocr = await AnonymizationService.anonymize_text(
-                                    ocr_text, uuid.UUID(project_id), db,
-                                )
-                                await db.commit()
-                            img_data["anonymized_ocr_text"] = anon_ocr
-                        except Exception:
-                            img_data["anonymized_ocr_text"] = ""
-
-                    # Build the anonymized description (what Mistral will see)
-                    img_data["anonymized_description"] = ImageAnalysisService.build_anonymized_description(
-                        analysis, img_data.get("anonymized_ocr_text", ""),
-                    )
-
-                # Filter out non-informative images (decorative)
-                informative_count = sum(1 for img in images_data if img.get("is_informative", True))
-                logger.info(
-                    "[doc:%s] Image analysis done: %d/%d informative images",
-                    document_id, informative_count, len(images_data),
-                )
-
-            except SoftTimeLimitExceeded:
-                raise
-            except Exception as vision_err:
-                logger.warning(
-                    "[doc:%s] Vision analysis failed (images saved without analysis): %s",
-                    document_id, vision_err, exc_info=True,
-                )
-                # Non-fatal: images are still saved, just without analysis metadata
-                for img_data in images_data:
-                    img_data["analysis_status"] = ImageAnalysisStatus.FAILED.value
+            cats = {}
+            for img in images_data:
+                c = img["image_category"]
+                cats[c] = cats.get(c, 0) + 1
+            logger.info(
+                "[doc:%s] Image categorization done: %s",
+                document_id, ", ".join(f"{k}={v}" for k, v in cats.items()),
+            )
 
         # ── Phase 3e: Save images + finalize document ──
         logger.info("[doc:%s] Phase 3e: Finalizing", document_id)
@@ -399,7 +356,10 @@ async def _process_document_async(document_id: str, project_id: str):
                     tags=img_data.get("tags", []),
                     width=img_data.get("width", 0),
                     height=img_data.get("height", 0),
-                    # Vision analysis fields
+                    # Gallery fields
+                    image_category=img_data.get("image_category", "autre"),
+                    selected=img_data.get("selected", False),
+                    # Vision analysis fields (populated later on demand)
                     analysis_status=img_data.get("analysis_status", "pending"),
                     image_type=img_data.get("image_type", ""),
                     anonymized_description=img_data.get("anonymized_description", ""),
@@ -507,3 +467,184 @@ async def _mark_document_failed(document_id: str, reason: str):
         await _mark_document_failed_safe(TaskSession, document_id, reason)
     finally:
         await task_engine.dispose()
+
+
+@celery.task(
+    name="tasks.analyze_images",
+    bind=True,
+    max_retries=1,
+    reject_on_worker_lost=True,
+)
+def analyze_images_task(self, project_id: str, image_ids: list[str]):
+    """Celery task: run Vision AI analysis on selected images.
+
+    Triggered from the image gallery when the user clicks "Analyze".
+    """
+    logger.info("[project:%s] analyze_images_task started (%d images)", project_id, len(image_ids))
+    asyncio.run(_analyze_images_async(project_id, image_ids))
+
+
+async def _analyze_images_async(project_id: str, image_ids: list[str]):
+    """Run Vision AI on the given image IDs, updating DB records in place."""
+    from sqlalchemy import select
+    from ..database import create_task_engine
+    from ..models.document import DocumentImage, ImageAnalysisStatus
+    from ..services.image_analysis_service import ImageAnalysisService
+    from ..services.anonymization_service import AnonymizationService
+    from ..services.progress_service import set_progress
+
+    task_engine, TaskSession = create_task_engine()
+    try:
+        # Load images from DB
+        async with TaskSession() as db:
+            result = await db.execute(
+                select(DocumentImage).where(
+                    DocumentImage.id.in_([uuid.UUID(iid) for iid in image_ids])
+                )
+            )
+            db_images = result.scalars().all()
+
+        total = len(db_images)
+        if total == 0:
+            logger.warning("[project:%s] No images found for analysis", project_id)
+            return
+
+        # Build batch data for the analysis service
+        images_data = [
+            {
+                "file_path": img.file_path,
+                "context": img.context or "",
+                "section_title": img.section_title or "",
+                "_db_id": str(img.id),
+            }
+            for img in db_images
+        ]
+
+        done_count = 0
+
+        def _progress(done: int, total: int):
+            nonlocal done_count
+            done_count = done
+            set_progress("image_analysis", project_id, {
+                "status": "running",
+                "step": "analyzing",
+                "progress": int(100 * done / total),
+                "message": f"Analyse {done}/{total} images",
+            })
+
+        set_progress("image_analysis", project_id, {
+            "status": "running",
+            "step": "analyzing",
+            "progress": 0,
+            "message": f"Lancement de l'analyse de {total} images...",
+        })
+
+        analysis_results = await ImageAnalysisService.analyze_images_batch(
+            images_data, progress_callback=_progress,
+        )
+
+        # Update DB records with analysis results
+        async with TaskSession() as db:
+            for img_meta, analysis in zip(images_data, analysis_results):
+                result = await db.execute(
+                    select(DocumentImage).where(
+                        DocumentImage.id == uuid.UUID(img_meta["_db_id"])
+                    )
+                )
+                img = result.scalar_one_or_none()
+                if not img:
+                    continue
+
+                img.image_type = analysis.get("type", "autre")
+                img.description = analysis.get("description", "")
+                img.key_information = analysis.get("key_information", [])
+                img.pii_detected = analysis.get("pii_detected", [])
+                img.ocr_text = analysis.get("ocr_text", "")
+                img.suggested_usage = analysis.get("suggested_usage", "")
+                img.tags = analysis.get("key_information", [])[:10]
+                img.analysis_status = ImageAnalysisStatus.COMPLETED.value
+
+                # Anonymize OCR text
+                ocr_text = analysis.get("ocr_text", "")
+                if ocr_text:
+                    try:
+                        anon_ocr = await AnonymizationService.anonymize_text(
+                            ocr_text, uuid.UUID(project_id), db,
+                        )
+                        img.anonymized_ocr_text = anon_ocr
+                    except Exception:
+                        img.anonymized_ocr_text = ""
+
+                # Build anonymized description
+                img.anonymized_description = ImageAnalysisService.build_anonymized_description(
+                    analysis, img.anonymized_ocr_text or "",
+                )
+
+            await db.commit()
+
+        set_progress("image_analysis", project_id, {
+            "status": "completed",
+            "step": "completed",
+            "progress": 100,
+            "message": f"Analyse terminée : {total} images traitées",
+        })
+        logger.info("[project:%s] Image analysis completed: %d images", project_id, total)
+
+    except Exception as e:
+        logger.error("[project:%s] Image analysis failed: %s", project_id, e, exc_info=True)
+        set_progress("image_analysis", project_id, {
+            "status": "error",
+            "step": "error",
+            "progress": -1,
+            "message": f"Erreur: {str(e)[:120]}",
+        })
+        # Mark images as failed
+        try:
+            async with TaskSession() as db:
+                result = await db.execute(
+                    select(DocumentImage).where(
+                        DocumentImage.id.in_([uuid.UUID(iid) for iid in image_ids])
+                    )
+                )
+                for img in result.scalars().all():
+                    img.analysis_status = ImageAnalysisStatus.FAILED.value
+                await db.commit()
+        except Exception:
+            pass
+    finally:
+        await task_engine.dispose()
+
+
+def _guess_image_category(width: int, height: int) -> str:
+    """Guess an image category from its pixel dimensions.
+
+    This is a rough heuristic to pre-sort images before the user reviews
+    them in the gallery.  The Vision AI analysis (triggered on demand)
+    will produce a more accurate classification.
+    """
+    area = width * height
+    if area == 0:
+        return "autre"
+
+    # Tiny images are almost always icons / bullets
+    if area < 4_000:          # < ~63×63
+        return "icone"
+
+    # Small square-ish images are usually logos
+    ratio = max(width, height) / max(min(width, height), 1)
+    if area < 40_000 and ratio < 2:  # < ~200×200 and roughly square
+        return "logo"
+
+    # Very wide images (banners, separators, headers)
+    if ratio > 5:
+        return "icone"
+
+    # Medium images with landscape orientation → likely schema/diagram
+    if area < 300_000 and ratio > 1.3:
+        return "schema"
+
+    # Large images → illustration or photo
+    if area >= 300_000:
+        return "illustration"
+
+    return "autre"

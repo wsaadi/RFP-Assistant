@@ -177,6 +177,21 @@ async def init_db():
             except Exception:
                 logger.debug("document_images.%s column already exists", col_name)
 
+    # ── Image gallery columns: category + selection ──
+    gallery_columns = {
+        "image_category": "VARCHAR(30) DEFAULT 'autre'",
+        "selected": "BOOLEAN DEFAULT false",
+    }
+    async with engine.begin() as conn:
+        for col_name, col_type in gallery_columns.items():
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE document_images ADD COLUMN IF NOT EXISTS "
+                    f"{col_name} {col_type}"
+                ))
+            except Exception:
+                logger.debug("document_images.%s column already exists", col_name)
+
     # Add content_hash column for duplicate file detection
     async with engine.begin() as conn:
         try:

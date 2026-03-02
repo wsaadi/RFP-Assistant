@@ -15,7 +15,10 @@ from ..models.document import (
     Document, DocumentChunk, DocumentImage,
     DocumentCategory, FileType, ProcessingStatus,
 )
-from ..schemas.document import DocumentOut, DocumentImageOut, SearchRequest, SearchResult
+from ..schemas.document import (
+    DocumentOut, DocumentImageOut, SearchRequest, SearchResult,
+    ImageUpdateRequest, ImageBatchUpdateRequest, ImageAnalyzeRequest,
+)
 from ..services.document_service import DocumentProcessor
 from ..services.vector_service import VectorService
 from ..services.progress_service import ProgressTracker
@@ -192,6 +195,24 @@ async def delete_document(
     await db.commit()
 
 
+def _image_to_out(img: DocumentImage) -> DocumentImageOut:
+    return DocumentImageOut(
+        id=str(img.id),
+        document_id=str(img.document_id),
+        stored_filename=img.stored_filename,
+        description=img.description,
+        page_number=img.page_number,
+        context=img.context,
+        tags=img.tags or [],
+        width=img.width,
+        height=img.height,
+        image_category=img.image_category or "autre",
+        selected=bool(img.selected),
+        analysis_status=img.analysis_status or "pending",
+        image_type=img.image_type or "",
+    )
+
+
 @router.get("/{document_id}/images", response_model=list[DocumentImageOut])
 async def list_document_images(
     document_id: uuid.UUID,
@@ -204,22 +225,7 @@ async def list_document_images(
         .where(DocumentImage.document_id == document_id)
         .order_by(DocumentImage.page_number)
     )
-    images = result.scalars().all()
-
-    return [
-        DocumentImageOut(
-            id=str(img.id),
-            document_id=str(img.document_id),
-            stored_filename=img.stored_filename,
-            description=img.description,
-            page_number=img.page_number,
-            context=img.context,
-            tags=img.tags or [],
-            width=img.width,
-            height=img.height,
-        )
-        for img in images
-    ]
+    return [_image_to_out(img) for img in result.scalars().all()]
 
 
 @router.get("/images/{project_id}", response_model=list[DocumentImageOut])
@@ -235,22 +241,7 @@ async def list_project_images(
         .where(Document.project_id == project_id)
         .order_by(Document.category, DocumentImage.page_number)
     )
-    images = result.scalars().all()
-
-    return [
-        DocumentImageOut(
-            id=str(img.id),
-            document_id=str(img.document_id),
-            stored_filename=img.stored_filename,
-            description=img.description,
-            page_number=img.page_number,
-            context=img.context,
-            tags=img.tags or [],
-            width=img.width,
-            height=img.height,
-        )
-        for img in images
-    ]
+    return [_image_to_out(img) for img in result.scalars().all()]
 
 
 @router.get("/image-file/{image_id}")
@@ -266,6 +257,99 @@ async def get_image_file(
         raise HTTPException(status_code=404, detail="Image non trouvée")
 
     return FileResponse(image.file_path)
+
+
+@router.put("/image/{image_id}", response_model=DocumentImageOut)
+async def update_image(
+    image_id: uuid.UUID,
+    body: ImageUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update category or selection status of a single image."""
+    result = await db.execute(select(DocumentImage).where(DocumentImage.id == image_id))
+    image = result.scalar_one_or_none()
+    if not image:
+        raise HTTPException(status_code=404, detail="Image non trouvée")
+
+    if body.image_category is not None:
+        image.image_category = body.image_category
+    if body.selected is not None:
+        image.selected = body.selected
+    await db.commit()
+    await db.refresh(image)
+    return _image_to_out(image)
+
+
+@router.put("/images-batch/{project_id}")
+async def batch_update_images(
+    project_id: uuid.UUID,
+    body: ImageBatchUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update category or selection for multiple images at once."""
+    image_uuids = [uuid.UUID(iid) for iid in body.image_ids]
+    result = await db.execute(
+        select(DocumentImage)
+        .join(Document, Document.id == DocumentImage.document_id)
+        .where(Document.project_id == project_id, DocumentImage.id.in_(image_uuids))
+    )
+    images = result.scalars().all()
+
+    for img in images:
+        if body.image_category is not None:
+            img.image_category = body.image_category
+        if body.selected is not None:
+            img.selected = body.selected
+    await db.commit()
+
+    return {"updated": len(images)}
+
+
+@router.post("/images-analyze/{project_id}")
+async def analyze_selected_images(
+    project_id: uuid.UUID,
+    body: ImageAnalyzeRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Trigger Vision AI analysis on selected images.
+
+    Dispatches a Celery task that processes only the given image IDs.
+    """
+    from ..models.document import ImageAnalysisStatus
+
+    image_uuids = [uuid.UUID(iid) for iid in body.image_ids]
+    result = await db.execute(
+        select(DocumentImage)
+        .join(Document, Document.id == DocumentImage.document_id)
+        .where(Document.project_id == project_id, DocumentImage.id.in_(image_uuids))
+    )
+    images = result.scalars().all()
+    if not images:
+        raise HTTPException(status_code=404, detail="Aucune image trouvée")
+
+    # Mark images as analyzing
+    for img in images:
+        img.analysis_status = ImageAnalysisStatus.ANALYZING.value
+    await db.commit()
+
+    from ..tasks.document_tasks import analyze_images_task
+    analyze_images_task.delay(str(project_id), body.image_ids)
+
+    return {"status": "started", "count": len(images)}
+
+
+@router.get("/images-analysis-status/{project_id}")
+async def get_image_analysis_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Get status of image analysis task for a project."""
+    from ..services.progress_service import get_or_idle
+    status = get_or_idle("image_analysis", str(project_id))
+    return status
 
 
 @router.post("/search/{project_id}")

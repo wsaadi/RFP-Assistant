@@ -128,6 +128,17 @@ export interface DocumentImage {
   tags: string[];
   width: number;
   height: number;
+  image_category: string;
+  selected: boolean;
+  analysis_status: string;
+  image_type: string;
+}
+
+export interface ImageAnalysisStatus {
+  status: 'idle' | 'running' | 'completed' | 'error';
+  step: string;
+  progress: number;
+  message: string;
 }
 
 // ── Chapter ──

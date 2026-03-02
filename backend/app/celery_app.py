@@ -103,6 +103,7 @@ celery.conf.update(
         "tasks.compliance_analysis": {"queue": "default"},
         "tasks.generate_recommendation": {"queue": "default"},
         "tasks.reanonymize": {"queue": "documents"},
+        "tasks.analyze_images": {"queue": "documents"},
         "tasks.export_word": {"queue": "default"},
         "tasks.export_backup": {"queue": "default"},
     },
