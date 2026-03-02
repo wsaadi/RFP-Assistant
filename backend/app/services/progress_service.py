@@ -134,12 +134,12 @@ def get_or_idle(namespace: str, task_id: str) -> dict:
 DOCUMENT_STEPS = [
     {"key": "reading", "label": "Lecture du fichier", "pct": 5},
     {"key": "extracting_text", "label": "Extraction du texte", "pct": 15},
-    {"key": "extracting_images", "label": "Extraction des images", "pct": 30},
-    {"key": "chunking", "label": "Découpage en chunks", "pct": 40},
+    {"key": "extracting_images", "label": "Extraction des images", "pct": 25},
+    {"key": "chunking", "label": "Découpage en chunks", "pct": 35},
     {"key": "anonymizing", "label": "Anonymisation des entités", "pct": 50},
     {"key": "saving_chunks", "label": "Enregistrement des chunks", "pct": 65},
-    {"key": "indexing", "label": "Indexation vectorielle", "pct": 75},
-    {"key": "finalizing", "label": "Finalisation du document", "pct": 90},
+    {"key": "indexing", "label": "Indexation vectorielle", "pct": 80},
+    {"key": "finalizing", "label": "Finalisation du document", "pct": 92},
     {"key": "completed", "label": "Terminé", "pct": 100},
     {"key": "failed", "label": "Échec", "pct": -1},
 ]

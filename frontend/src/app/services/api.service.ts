@@ -13,6 +13,7 @@ import {
   AIConfig, AIConfigUpdate,
   UserInfo, UserCreate, UserUpdate,
   FieldsToComplete,
+  ImageAnalysisStatus,
 } from '../models/report.model';
 
 @Injectable({ providedIn: 'root' })
@@ -163,6 +164,28 @@ export class ApiService {
 
   getImageUrl(imageId: string): string {
     return `${this.baseUrl}/documents/image-file/${imageId}`;
+  }
+
+  updateImage(imageId: string, data: { image_category?: string; selected?: boolean }): Observable<DocumentImage> {
+    return this.http.put<DocumentImage>(`${this.baseUrl}/documents/image/${imageId}`, data);
+  }
+
+  batchUpdateImages(projectId: string, imageIds: string[], data: { image_category?: string; selected?: boolean }): Observable<{ updated: number }> {
+    return this.http.put<{ updated: number }>(
+      `${this.baseUrl}/documents/images-batch/${projectId}`,
+      { image_ids: imageIds, ...data }
+    );
+  }
+
+  analyzeImages(projectId: string, imageIds: string[]): Observable<{ status: string; count: number }> {
+    return this.http.post<{ status: string; count: number }>(
+      `${this.baseUrl}/documents/images-analyze/${projectId}`,
+      { image_ids: imageIds }
+    );
+  }
+
+  getImageAnalysisStatus(projectId: string): Observable<ImageAnalysisStatus> {
+    return this.http.get<ImageAnalysisStatus>(`${this.baseUrl}/documents/images-analysis-status/${projectId}`);
   }
 
   searchDocuments(projectId: string, query: string, category?: string, topK: number = 10): Observable<{ results: SearchResult[] }> {

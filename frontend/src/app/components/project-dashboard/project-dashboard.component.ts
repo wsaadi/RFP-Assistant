@@ -55,6 +55,11 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
             <mat-icon *ngIf="!exportingBackup">save</mat-icon>
             {{ exportingBackup ? 'Export...' : 'Backup' }}
           </button>
+          <button mat-raised-button [routerLink]="['/project', projectId, 'images']"
+            matTooltip="Galerie d'images extraites">
+            <mat-icon>photo_library</mat-icon> Images
+            <span *ngIf="stats?.images_count" class="image-badge">{{ stats.images_count }}</span>
+          </button>
           <button mat-raised-button color="accent" [routerLink]="['/project', projectId, 'preview']">
             <mat-icon>visibility</mat-icon> Aperçu
           </button>
@@ -197,17 +202,17 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       <span class="step-dot" [class.active]="prog.progress >= 5" [class.current]="prog.step === 'reading'" matTooltip="Lecture">1</span>
                       <span class="step-line" [class.active]="prog.progress >= 15"></span>
                       <span class="step-dot" [class.active]="prog.progress >= 15" [class.current]="prog.step === 'extracting_text'" matTooltip="Extraction texte">2</span>
-                      <span class="step-line" [class.active]="prog.progress >= 30"></span>
-                      <span class="step-dot" [class.active]="prog.progress >= 30" [class.current]="prog.step === 'extracting_images'" matTooltip="Extraction images">3</span>
-                      <span class="step-line" [class.active]="prog.progress >= 40"></span>
-                      <span class="step-dot" [class.active]="prog.progress >= 40" [class.current]="prog.step === 'chunking'" matTooltip="Decoupage">4</span>
+                      <span class="step-line" [class.active]="prog.progress >= 25"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 25" [class.current]="prog.step === 'extracting_images'" matTooltip="Extraction images">3</span>
+                      <span class="step-line" [class.active]="prog.progress >= 35"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 35" [class.current]="prog.step === 'chunking'" matTooltip="Decoupage">4</span>
                       <span class="step-line" [class.active]="prog.progress >= 50"></span>
                       <span class="step-dot" [class.active]="prog.progress >= 50" [class.current]="prog.step === 'anonymizing'" matTooltip="Anonymisation">5</span>
                       <span class="step-line" [class.active]="prog.progress >= 65"></span>
                       <span class="step-dot" [class.active]="prog.progress >= 65" [class.current]="prog.step === 'saving_chunks'" matTooltip="Enregistrement">6</span>
-                      <span class="step-line" [class.active]="prog.progress >= 75"></span>
-                      <span class="step-dot" [class.active]="prog.progress >= 75" [class.current]="prog.step === 'indexing'" matTooltip="Indexation">7</span>
-                      <span class="step-line" [class.active]="prog.progress >= 90"></span>
+                      <span class="step-line" [class.active]="prog.progress >= 80"></span>
+                      <span class="step-dot" [class.active]="prog.progress >= 80" [class.current]="prog.step === 'indexing'" matTooltip="Indexation">7</span>
+                      <span class="step-line" [class.active]="prog.progress >= 92"></span>
                       <span class="step-dot" [class.active]="prog.progress >= 90" [class.current]="prog.step === 'finalizing'" matTooltip="Finalisation">8</span>
                     </div>
                   </div>
@@ -943,7 +948,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .header-left { display: flex; align-items: center; gap: 8px; }
     .header-left h1 { margin: 0; color: #1B3A5C; }
     .subtitle { color: #666; font-size: 14px; }
-    .header-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+    .header-actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .image-badge { background: #1976d2; color: white; font-size: 11px; padding: 1px 6px; border-radius: 10px; margin-left: 4px; }
     .stats-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 16px; }
     .stat-card { display: flex; align-items: center; gap: 12px; padding: 16px; }
     .stat-card mat-icon { font-size: 32px; width: 32px; height: 32px; color: #2C5F8A; }

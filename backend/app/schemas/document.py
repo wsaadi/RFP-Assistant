@@ -41,8 +41,27 @@ class DocumentImageOut(BaseModel):
     tags: list
     width: int
     height: int
+    image_category: str = "autre"
+    selected: bool = False
+    analysis_status: str = "pending"
+    image_type: str = ""
 
     model_config = {"from_attributes": True}
+
+
+class ImageUpdateRequest(BaseModel):
+    image_category: Optional[str] = None
+    selected: Optional[bool] = None
+
+
+class ImageBatchUpdateRequest(BaseModel):
+    image_ids: List[str]
+    image_category: Optional[str] = None
+    selected: Optional[bool] = None
+
+
+class ImageAnalyzeRequest(BaseModel):
+    image_ids: List[str]
 
 
 class AnonymizationMappingOut(BaseModel):
