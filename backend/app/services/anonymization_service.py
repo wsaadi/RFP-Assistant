@@ -512,29 +512,48 @@ class AnonymizationService:
 
         client = await cls._get_http_client()
 
+        # NOTE: Do NOT use "format": "json" — it forces some models (Qwen,
+        # Gemma) to wrap output in a root JSON *object* (e.g. {"entities":
+        # [...]}) instead of the plain array the prompt asks for. The prompt
+        # already instructs the model to reply with a JSON array.
+        _NER_MAX_RETRIES = 2
+        payload = {
+            "model": _OLLAMA_MODEL,
+            "messages": [
+                {"role": "system", "content": _NER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            "stream": False,
+            "options": {
+                "temperature": 0.0,
+                "num_predict": 4096,
+            },
+        }
+
         try:
-            # NOTE: Do NOT use "format": "json" — it forces some models (Qwen,
-            # Gemma) to wrap output in a root JSON *object* (e.g. {"entities":
-            # [...]}) instead of the plain array the prompt asks for. The prompt
-            # already instructs the model to reply with a JSON array.
-            resp = await client.post(
-                "/api/chat",
-                json={
-                    "model": _OLLAMA_MODEL,
-                    "messages": [
-                        {"role": "system", "content": _NER_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_content},
-                    ],
-                    "stream": False,
-                    "options": {
-                        "temperature": 0.0,
-                        "num_predict": 4096,
-                    },
-                },
-            )
-            resp.raise_for_status()
-            result = resp.json()
-            raw_content = result.get("message", {}).get("content", "[]")
+            # Retry on transient network errors (Ollama model swap / disconnect)
+            raw_content = None
+            for attempt in range(1 + _NER_MAX_RETRIES):
+                try:
+                    resp = await client.post("/api/chat", json=payload)
+                    resp.raise_for_status()
+                    result = resp.json()
+                    raw_content = result.get("message", {}).get("content", "[]")
+                    break
+                except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as net_err:
+                    if attempt < _NER_MAX_RETRIES:
+                        wait = 2 ** (attempt + 1)
+                        logger.warning(
+                            "[NER-LLM] Attempt %d/%d failed (%s), retrying in %ds",
+                            attempt + 1, 1 + _NER_MAX_RETRIES,
+                            type(net_err).__name__, wait,
+                        )
+                        await asyncio.sleep(wait)
+                    else:
+                        raise
+
+            if raw_content is None:
+                return results
 
             logger.info(
                 "[NER-LLM] Raw model response (%d chars): %s",

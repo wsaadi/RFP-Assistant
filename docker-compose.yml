@@ -99,10 +99,14 @@ services:
           memory: 2G
 
   # Single worker handling both queues (documents + default).
-  # concurrency=2: allows 2 tasks in parallel (e.g. 1 document + 1 AI generation)
-  # max-memory-per-child=500000: auto-restarts child workers that grow beyond ~500MB
-  #   (prevents memory leaks from accumulating across many tasks)
-  # max-tasks-per-child=20: periodically recycles workers for a clean state
+  # concurrency=1: one task at a time avoids doubling the ~800MB embedding model
+  #   in memory (2×800MB = 1.6GB leaves no room for actual processing in 4GB).
+  #   Document processing is mostly I/O-bound (waiting for Ollama NER + Vision)
+  #   so concurrency=1 doesn't meaningfully reduce throughput.
+  # max-memory-per-child=2000000: ~2GB — must exceed the embedding model size
+  #   (~800MB) plus processing overhead.  The old 500MB limit was BELOW the model
+  #   size, causing an infinite SIGKILL→reload→SIGKILL loop.
+  # max-tasks-per-child=50: periodically recycles workers for a clean state
   celery-worker:
     build:
       context: ./backend
@@ -112,10 +116,10 @@ services:
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=2
+      --concurrency=1
       --queues=documents,default
-      --max-memory-per-child=500000
-      --max-tasks-per-child=20
+      --max-memory-per-child=2000000
+      --max-tasks-per-child=50
       --without-heartbeat
     environment:
       - PYTHONUNBUFFERED=1
@@ -148,7 +152,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 3G
+          memory: 4G
 
   frontend:
     build:

@@ -65,6 +65,7 @@ class ImageAnalysisService:
     """
 
     _semaphore: Optional[asyncio.Semaphore] = None
+    _http_client: Optional[httpx.AsyncClient] = None
 
     @classmethod
     def _get_semaphore(cls) -> asyncio.Semaphore:
@@ -72,6 +73,15 @@ class ImageAnalysisService:
         if cls._semaphore is None:
             cls._semaphore = asyncio.Semaphore(_VISION_CONCURRENCY)
         return cls._semaphore
+
+    @classmethod
+    def _get_http_client(cls) -> httpx.AsyncClient:
+        """Get or create a reusable async HTTP client for Ollama vision."""
+        if cls._http_client is None or cls._http_client.is_closed:
+            cls._http_client = httpx.AsyncClient(
+                timeout=httpx.Timeout(_VISION_TIMEOUT, connect=30),
+            )
+        return cls._http_client
 
     @staticmethod
     def _image_to_base64(file_path: str) -> Optional[str]:
@@ -200,11 +210,18 @@ class ImageAnalysisService:
         )
         return await cls._call_ollama_once(image_b64, fallback, use_system=False)
 
+    # Max retries for transient Ollama errors (model swap, server disconnect)
+    _MAX_RETRIES = 2
+
     @classmethod
     async def _call_ollama_once(
         cls, image_b64: str, user_prompt: str, use_system: bool = True,
     ) -> Dict:
-        """Single call to the Ollama vision API."""
+        """Single call to the Ollama vision API with retry on transient errors.
+
+        Retries with exponential backoff when Ollama disconnects (common when
+        the GPU is swapping between NER and vision models).
+        """
         messages = []
         if use_system:
             messages.append({"role": "system", "content": _VISION_SYSTEM_PROMPT})
@@ -224,15 +241,27 @@ class ImageAnalysisService:
             },
         }
 
-        async with httpx.AsyncClient(
-            timeout=httpx.Timeout(_VISION_TIMEOUT, connect=30)
-        ) as client:
-            resp = await client.post(f"{_OLLAMA_BASE_URL}/api/chat", json=payload)
-            resp.raise_for_status()
-            data = resp.json()
+        client = cls._get_http_client()
+        last_exc = None
 
-        raw_content = data.get("message", {}).get("content", "")
-        return cls._parse_vision_response(raw_content)
+        for attempt in range(1 + cls._MAX_RETRIES):
+            try:
+                resp = await client.post(f"{_OLLAMA_BASE_URL}/api/chat", json=payload)
+                resp.raise_for_status()
+                data = resp.json()
+                raw_content = data.get("message", {}).get("content", "")
+                return cls._parse_vision_response(raw_content)
+            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
+                last_exc = e
+                if attempt < cls._MAX_RETRIES:
+                    wait = 2 ** (attempt + 1)  # 2s, 4s
+                    logger.warning(
+                        "Vision call attempt %d/%d failed (%s), retrying in %ds",
+                        attempt + 1, 1 + cls._MAX_RETRIES, type(e).__name__, wait,
+                    )
+                    await asyncio.sleep(wait)
+
+        raise last_exc
 
     # Normalize type values — accepts both French (preferred) and English (fallback)
     _TYPE_MAP = {
