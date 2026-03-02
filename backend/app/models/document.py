@@ -54,6 +54,7 @@ class Document(Base):
     )
     file_size: Mapped[int] = mapped_column(BigInteger, default=0)
     file_path: Mapped[str] = mapped_column(String(1000), nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
     processing_status: Mapped[ProcessingStatus] = mapped_column(
         SAEnum(ProcessingStatus, name="processing_status"),
         default=ProcessingStatus.PENDING,

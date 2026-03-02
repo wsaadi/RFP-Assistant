@@ -9,11 +9,17 @@ Reliability features:
 - Dedicated queues: document processing vs quick tasks
 - Visibility timeout: prevents message loss on long tasks
 - Exponential retry backoff: avoids thundering herd on transient errors
+- Staggered model preloading: embedding model loaded once per worker at startup
 """
+import logging
 import os
+import time
 
 from celery import Celery
+from celery.signals import worker_process_init
 from kombu import Exchange, Queue
+
+_logger = logging.getLogger(__name__)
 
 # Read broker/backend from environment (same vars as config.py)
 broker_url = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
@@ -114,3 +120,32 @@ celery.conf.update(
         "app.tasks.export_tasks",
     ],
 )
+
+
+# ── Embedding model preloading ──
+# The SentenceTransformer model (~800MB) is loaded lazily by VectorService.
+# When multiple prefork workers start simultaneously, each one loading the
+# model causes a memory spike that can trigger OOM kills.
+# This signal handler staggers the loading: each worker process waits
+# (worker_index * 3s) before preloading, so only one loads at a time.
+
+@worker_process_init.connect
+def _preload_embedding_model(**kwargs):
+    """Preload the embedding model in each worker process at startup.
+
+    Staggered by worker index to avoid simultaneous memory spikes.
+    """
+    try:
+        # Stagger loading: each worker waits a bit based on its PID
+        # to avoid all workers loading the model at the exact same moment.
+        stagger_delay = (os.getpid() % 4) * 3  # 0, 3, 6, or 9 seconds
+        if stagger_delay:
+            _logger.info("Worker PID %d: waiting %ds before loading embedding model", os.getpid(), stagger_delay)
+            time.sleep(stagger_delay)
+
+        from .services.vector_service import VectorService
+        _logger.info("Worker PID %d: preloading embedding model...", os.getpid())
+        VectorService.get_embedding_function()
+        _logger.info("Worker PID %d: embedding model loaded", os.getpid())
+    except Exception as e:
+        _logger.warning("Worker PID %d: failed to preload embedding model: %s", os.getpid(), e)

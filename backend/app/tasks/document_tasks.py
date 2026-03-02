@@ -5,12 +5,14 @@ Reliability features:
 - Structured logging: every step logs document_id + phase for debugging
 - Partial recovery: if anonymization fails, we still save raw chunks
 - Graceful timeout: catches SoftTimeLimitExceeded to save progress
+- Redis lock: prevents concurrent processing of the same content hash
 """
 import asyncio
 import logging
 import time
 import uuid
 
+import redis as _redis_lib
 from celery.exceptions import SoftTimeLimitExceeded
 
 from ..celery_app import celery
@@ -84,6 +86,7 @@ async def _process_document_async(document_id: str, project_id: str):
 
     task_engine, TaskSession = create_task_engine()
     t_start = time.monotonic()
+    _content_lock = None  # Redis lock for content dedup
 
     try:
         # ── Phase 1: Load document metadata + mark processing ──
@@ -96,6 +99,41 @@ async def _process_document_async(document_id: str, project_id: str):
             if not document:
                 logger.error("[doc:%s] Document not found in DB — aborting", document_id)
                 return
+
+            # ── Content-hash lock: prevent concurrent processing of identical files ──
+            content_hash = getattr(document, "content_hash", "") or ""
+            if content_hash:
+                import os
+                _redis_url = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+                _lock_redis = _redis_lib.from_url(_redis_url, decode_responses=True)
+                lock_key = f"docproc:lock:{content_hash}"
+                _content_lock = _lock_redis.lock(
+                    lock_key, timeout=1200, blocking_timeout=5,
+                )
+                acquired = _content_lock.acquire(blocking=True)
+                if not acquired:
+                    logger.warning(
+                        "[doc:%s] Another worker is processing identical content (hash=%s) — skipping",
+                        document_id, content_hash[:12],
+                    )
+                    # Check if a sibling document with same hash is already completed
+                    from sqlalchemy import and_
+                    sibling = await db.execute(
+                        select(Document).where(
+                            and_(
+                                Document.project_id == document.project_id,
+                                Document.content_hash == content_hash,
+                                Document.id != document.id,
+                                Document.processing_status == ProcessingStatus.COMPLETED,
+                            )
+                        )
+                    )
+                    if sibling.scalar_one_or_none():
+                        logger.info("[doc:%s] Sibling already completed — marking as duplicate", document_id)
+                        document.processing_status = ProcessingStatus.FAILED
+                        await db.commit()
+                        ProgressTracker.fail(document_id, "Doublon déjà traité")
+                    return
 
             ProgressTracker.start(document_id, document.original_filename)
             document.processing_status = ProcessingStatus.PROCESSING
@@ -419,6 +457,12 @@ async def _process_document_async(document_id: str, project_id: str):
         await _mark_document_failed_safe(TaskSession, document_id, str(e)[:200])
 
     finally:
+        # Release content-hash lock so other workers can proceed
+        if _content_lock is not None:
+            try:
+                _content_lock.release()
+            except Exception:
+                pass  # Lock may have expired — that's fine
         await task_engine.dispose()
 
 
