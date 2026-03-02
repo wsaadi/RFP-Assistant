@@ -1,4 +1,4 @@
-"""Image analysis service using a local Vision LLM (LLaVA via Ollama) on DGX Spark.
+"""Image analysis service using a local Vision LLM (Llama 3.2 Vision via Ollama) on DGX Spark.
 
 Architecture (privacy-by-design):
 1. Images extracted from documents are sent to a LOCAL vision model (never to Mistral)
@@ -30,25 +30,30 @@ _VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", settings.ollama_vision_mod
 _VISION_TIMEOUT = int(os.environ.get("OLLAMA_VISION_TIMEOUT", str(settings.ollama_vision_timeout)))
 _VISION_CONCURRENCY = int(os.environ.get("OLLAMA_VISION_CONCURRENCY", str(settings.ollama_vision_concurrency)))
 
-# ── Vision analysis prompt ──
-# LLaVA works best with: English, single user message (no system), short direct instructions.
+# ── Vision analysis prompts ──
+# Llama 3.2 Vision supports system messages and handles French natively.
+_VISION_SYSTEM_PROMPT = """\
+Tu es un analyseur d'images de documents professionnels (appels d'offres, mémoires techniques).
+Tu réponds UNIQUEMENT avec un objet JSON valide, sans texte avant ni après."""
+
 _VISION_USER_PROMPT = """\
-Look at this image from a business document and respond ONLY with a JSON object. No other text.
+Analyse cette image et réponds uniquement avec un JSON au format suivant :
 
-{
-  "type": "<one of: diagram, chart, table, screenshot, photo, logo, schema, map, illustration, other>",
-  "description": "<2-3 sentence factual description of what you see>",
-  "key_information": ["<important visible data points, technologies, metrics>"],
-  "pii_detected": [{"type": "person", "value": "<full name>"}],
-  "ocr_text": "<all readable text in the image>",
-  "suggested_usage": "<what section this image fits: architecture, methodology, team, references, etc>",
+{{
+  "type": "<diagramme|graphique|tableau|capture_ecran|photo|logo|schema_technique|carte|illustration|autre>",
+  "description": "<description factuelle de ce que tu vois, 2-4 phrases>",
+  "key_information": ["<données clés visibles : chiffres, technologies, métriques>"],
+  "pii_detected": [{{"type": "person|email|phone|address", "value": "<valeur exacte lue>"}}],
+  "ocr_text": "<tout texte lisible dans l'image, transcrit fidèlement>",
+  "suggested_usage": "<section pertinente : architecture technique, méthodologie, équipe, références, etc>",
   "is_informative": true
-}
+}}
 
-Rules:
-- pii_detected: ONLY real person names, emails, phone numbers. NOT company/product names.
-- is_informative: false for decorative logos, separators, icons with no useful info.
-- Respond with ONLY the JSON object, nothing else."""
+Règles :
+- pii_detected : UNIQUEMENT noms de personnes, emails, téléphones, adresses. PAS les noms d'entreprises/produits.
+- is_informative : false si l'image est purement décorative (logo générique, séparateur, icône).
+- Décris ce que tu VOIS, pas ce que tu devines.
+- Réponds UNIQUEMENT avec le JSON."""
 
 
 class ImageAnalysisService:
@@ -104,10 +109,10 @@ class ImageAnalysisService:
         if section_title or page_context:
             ctx_parts = []
             if section_title:
-                ctx_parts.append(f"Document section: {section_title}")
+                ctx_parts.append(f"Section du document : {section_title}")
             if page_context:
-                ctx_parts.append(f"Surrounding text: {page_context[:500]}")
-            user_prompt += "\n\nContext:\n" + "\n".join(ctx_parts)
+                ctx_parts.append(f"Texte environnant : {page_context[:500]}")
+            user_prompt += "\n\nContexte :\n" + "\n".join(ctx_parts)
 
         # Call Ollama vision API with concurrency control
         sem = cls._get_semaphore()
@@ -177,39 +182,41 @@ class ImageAnalysisService:
         Ollama's vision API accepts images as base64-encoded strings in the
         ``images`` field of the message payload.
 
-        LLaVA does NOT support system messages properly — we use a single
-        user message containing both the instructions and the image.
-        If the first attempt returns no JSON (refusal), we retry once
-        with a minimal fallback prompt.
+        Llama 3.2 Vision supports system messages natively. If the first
+        attempt returns no usable JSON, we retry once with a simpler prompt.
         """
-        # First attempt with full prompt
-        result = await cls._call_ollama_once(image_b64, user_prompt)
+        result = await cls._call_ollama_once(image_b64, user_prompt, use_system=True)
         if result.get("type") != "autre" or result.get("description", "").startswith("Type:"):
             return result
 
-        # If the model refused or returned garbage, retry with a minimal prompt
+        # Retry with minimal prompt if model returned garbage/refusal
         logger.info("Vision model returned empty/refusal — retrying with minimal prompt")
-        fallback_prompt = (
-            "Describe this image in JSON format: "
-            '{"type":"diagram|chart|table|photo|logo|other",'
-            '"description":"what you see",'
-            '"ocr_text":"any text in the image",'
+        fallback = (
+            'Décris cette image en JSON : '
+            '{"type":"diagramme|tableau|photo|logo|autre",'
+            '"description":"ce que tu vois",'
+            '"ocr_text":"texte lisible",'
             '"is_informative":true}'
         )
-        return await cls._call_ollama_once(image_b64, fallback_prompt)
+        return await cls._call_ollama_once(image_b64, fallback, use_system=False)
 
     @classmethod
-    async def _call_ollama_once(cls, image_b64: str, user_prompt: str) -> Dict:
+    async def _call_ollama_once(
+        cls, image_b64: str, user_prompt: str, use_system: bool = True,
+    ) -> Dict:
         """Single call to the Ollama vision API."""
+        messages = []
+        if use_system:
+            messages.append({"role": "system", "content": _VISION_SYSTEM_PROMPT})
+        messages.append({
+            "role": "user",
+            "content": user_prompt,
+            "images": [image_b64],
+        })
+
         payload = {
             "model": _VISION_MODEL,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": user_prompt,
-                    "images": [image_b64],
-                },
-            ],
+            "messages": messages,
             "stream": False,
             "options": {
                 "temperature": 0.1,
@@ -227,17 +234,28 @@ class ImageAnalysisService:
         raw_content = data.get("message", {}).get("content", "")
         return cls._parse_vision_response(raw_content)
 
-    # Map English type names (from LLaVA) → French (used in the rest of the app)
+    # Normalize type values — accepts both French (preferred) and English (fallback)
     _TYPE_MAP = {
+        # French (expected from llama3.2-vision)
+        "diagramme": "diagramme",
+        "graphique": "graphique",
+        "tableau": "tableau",
+        "capture_ecran": "capture_ecran",
+        "capture_écran": "capture_ecran",
+        "photo": "photo",
+        "logo": "logo",
+        "schema_technique": "schema_technique",
+        "schéma_technique": "schema_technique",
+        "carte": "carte",
+        "illustration": "illustration",
+        "autre": "autre",
+        # English fallback (in case model responds in English)
         "diagram": "diagramme",
         "chart": "graphique",
         "table": "tableau",
         "screenshot": "capture_ecran",
-        "photo": "photo",
-        "logo": "logo",
         "schema": "schema_technique",
         "map": "carte",
-        "illustration": "illustration",
         "other": "autre",
     }
 
