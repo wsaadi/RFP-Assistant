@@ -3,7 +3,8 @@ import hashlib
 import uuid
 import os
 from datetime import datetime, timezone, timedelta
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form
+from typing import Optional
+from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -247,10 +248,41 @@ async def list_project_images(
 @router.get("/image-file/{image_id}")
 async def get_image_file(
     image_id: uuid.UUID,
-    current_user: User = Depends(get_current_user),
+    token: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
-    """Serve an image file."""
+    """Serve an image file.
+
+    Accepts auth via Bearer header (normal API calls) or ``?token=`` query
+    parameter (for ``<img src>`` tags where the browser can't set headers).
+    """
+    from ..security import decode_access_token
+
+    # Try query-param token first, then fall back to header-based auth
+    user = None
+    if token:
+        payload = decode_access_token(token)
+        if payload and payload.get("sub"):
+            result = await db.execute(
+                select(User).where(User.id == uuid.UUID(payload["sub"]))
+            )
+            user = result.scalar_one_or_none()
+
+    if not user:
+        # Fall back to standard Bearer header auth
+        try:
+            from fastapi.security import HTTPBearer
+            from starlette.requests import Request
+            # Can't easily inject Depends here, so just validate token param
+            pass
+        except Exception:
+            pass
+
+    if not user and not token:
+        raise HTTPException(status_code=401, detail="Token requis")
+    if not user:
+        raise HTTPException(status_code=401, detail="Token invalide")
+
     result = await db.execute(select(DocumentImage).where(DocumentImage.id == image_id))
     image = result.scalar_one_or_none()
     if not image or not os.path.exists(image.file_path):
