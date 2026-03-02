@@ -176,3 +176,20 @@ async def init_db():
                 ))
             except Exception:
                 logger.debug("document_images.%s column already exists", col_name)
+
+    # Add content_hash column for duplicate file detection
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "ALTER TABLE documents ADD COLUMN IF NOT EXISTS "
+                "content_hash VARCHAR(64) DEFAULT ''"
+            ))
+        except Exception:
+            logger.debug("content_hash column already exists or ALTER TABLE not supported")
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_documents_content_hash "
+                "ON documents (content_hash) WHERE content_hash != ''"
+            ))
+        except Exception:
+            logger.debug("content_hash index already exists")

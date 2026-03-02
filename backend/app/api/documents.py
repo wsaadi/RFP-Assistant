@@ -1,4 +1,5 @@
 """Document API routes for upload, processing, and search."""
+import hashlib
 import uuid
 import os
 from datetime import datetime, timezone, timedelta
@@ -68,6 +69,35 @@ async def upload_document(
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Fichier trop volumineux (max 50MB)")
 
+    # Compute content hash for duplicate detection
+    content_hash = hashlib.sha256(content).hexdigest()
+
+    # Check for duplicate: same content in same project+category
+    existing = await db.execute(
+        select(Document).where(
+            Document.project_id == project_id,
+            Document.category == doc_category,
+            Document.content_hash == content_hash,
+            Document.content_hash != "",
+        )
+    )
+    duplicate = existing.scalar_one_or_none()
+    if duplicate:
+        # Return existing document instead of re-processing
+        return DocumentOut(
+            id=str(duplicate.id),
+            project_id=str(duplicate.project_id),
+            category=duplicate.category.value,
+            original_filename=duplicate.original_filename,
+            file_type=duplicate.file_type.value,
+            file_size=duplicate.file_size,
+            processing_status=duplicate.processing_status.value,
+            page_count=duplicate.page_count,
+            chunk_count=duplicate.chunk_count,
+            uploaded_by=str(duplicate.uploaded_by),
+            created_at=duplicate.created_at,
+        )
+
     # Save file
     filepath = DocumentProcessor.save_uploaded_file(content, str(project_id), file.filename)
     file_type = DocumentProcessor.detect_file_type(file.filename)
@@ -82,6 +112,7 @@ async def upload_document(
         file_size=len(content),
         file_path=filepath,
         uploaded_by=current_user.id,
+        content_hash=content_hash,
     )
     db.add(document)
     await db.commit()
