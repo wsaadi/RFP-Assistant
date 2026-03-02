@@ -393,7 +393,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                           <mat-icon>visibility</mat-icon> Voir le contenu de remplissage
                         </mat-panel-title>
                       </mat-expansion-panel-header>
-                      <div class="fill-content-preview" [innerHTML]="renderMarkdown(rd.fill_content)"></div>
+                      <div class="fill-content-preview" [innerHTML]="getCachedMarkdown(rd.id, rd.fill_content)"></div>
                     </mat-expansion-panel>
                   </div>
                 </div>
@@ -418,10 +418,17 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                 <mat-icon *ngIf="!generatingStructure && genStatus?.status !== 'running'">auto_fix_high</mat-icon>
                 {{ redactionDocs.length > 0 ? 'Generer la structure (' + selectedRedactionCount() + '/' + redactionDocs.length + ')' : 'Generer la structure' }}
               </button>
-              <button mat-raised-button color="accent" (click)="prefillAll()"
+              <button mat-raised-button color="accent" (click)="generateSelectedChapters()"
+                [disabled]="bulkGenerating || selectedChapters.size === 0"
+                *ngIf="chapters.length > 0">
+                <mat-spinner *ngIf="bulkGenerating" diameter="18"></mat-spinner>
+                <mat-icon *ngIf="!bulkGenerating">auto_awesome</mat-icon>
+                {{ selectedChapters.size > 0 ? 'Generer IA (' + selectedChapters.size + ')' : 'Selectionner des chapitres' }}
+              </button>
+              <button mat-raised-button (click)="prefillAll()"
                 [disabled]="prefilling || prefillStatus?.status === 'running'">
                 <mat-spinner *ngIf="prefilling || prefillStatus?.status === 'running'" diameter="18"></mat-spinner>
-                <mat-icon *ngIf="!prefilling && prefillStatus?.status !== 'running'">auto_awesome</mat-icon>
+                <mat-icon *ngIf="!prefilling && prefillStatus?.status !== 'running'">content_copy</mat-icon>
                 {{ selectedChapters.size > 0 ? 'Pre-remplir (' + selectedChapters.size + ')' : 'Pre-remplir tout' }}
               </button>
               <span class="spacer"></span>
@@ -563,6 +570,24 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
             </mat-card>
 
+            <!-- Bulk AI generation progress panel -->
+            <mat-card *ngIf="bulkGenerating" class="gen-progress-card" style="border-left-color: #ff6f00;">
+              <div class="gen-progress-header">
+                <mat-spinner diameter="20" class="spin-icon"></mat-spinner>
+                <h3>Generation IA des chapitres selectionnes...</h3>
+                <span style="flex:1"></span>
+                <button mat-icon-button color="warn" (click)="cancelBulkGenerate()" matTooltip="Annuler les generations restantes">
+                  <mat-icon>close</mat-icon>
+                </button>
+              </div>
+              <mat-progress-bar mode="determinate" [value]="bulkGenProgress"></mat-progress-bar>
+              <div class="gen-progress-detail">
+                <span class="gen-step" style="color: #ff6f00;">{{ bulkGenDone }}/{{ bulkGenTotal }} chapitres</span>
+                <span class="gen-pct">{{ bulkGenProgress | number:'1.0-0' }}%</span>
+              </div>
+              <p class="gen-message">{{ bulkGenMessage }}</p>
+            </mat-card>
+
             <!-- Select all checkbox -->
             <div class="select-all-bar" *ngIf="chapters.length > 0">
               <mat-checkbox
@@ -595,7 +620,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       <span class="ch-numbering">{{ i + 1 }}.</span> {{ ch.title }}
                     </mat-panel-title>
                     <mat-panel-description>
-                      {{ chapterTypeLabel(ch.chapter_type) }} - {{ ch.content ? (ch.content.split(' ').length + ' mots') : 'Vide' }}
+                      {{ chapterTypeLabel(ch.chapter_type) }} - {{ ch.content ? (getWordCount(ch.content) + ' mots') : 'Vide' }}
                     </mat-panel-description>
                   </mat-expansion-panel-header>
 
@@ -650,8 +675,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     </div>
                   </div>
 
-                  <!-- Content preview -->
-                  <div *ngIf="ch.content" class="ch-content-preview" [innerHTML]="renderMarkdown(ch.content)"></div>
+                  <!-- Content preview (truncated for performance) -->
+                  <div *ngIf="ch.content" class="ch-content-preview" [innerHTML]="getCachedMarkdown(ch.id, ch.content)"></div>
 
                   <!-- Sub-chapters -->
                   <div *ngIf="ch.children?.length" class="sub-chapters">
@@ -665,7 +690,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                         <mat-chip [class]="'status-' + sub.status" size="small">{{ statusIcon(sub.status) }}</mat-chip>
                         <span class="ch-numbering">{{ i + 1 }}.{{ j + 1 }}</span>
                         <span>{{ sub.title }}</span>
-                        <span class="sub-meta">{{ sub.content ? (sub.content.split(' ').length + ' mots') : 'Vide' }}</span>
+                        <span class="sub-meta">{{ sub.content ? (getWordCount(sub.content) + ' mots') : 'Vide' }}</span>
                         <button mat-icon-button [routerLink]="['/project', projectId, 'chapter', sub.id]"
                           matTooltip="Editer">
                           <mat-icon>edit</mat-icon>
@@ -710,8 +735,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                           <button mat-button (click)="toggleAiPrompt(sub.id)">Annuler</button>
                         </div>
                       </div>
-                      <!-- Sub-chapter content preview -->
-                      <div *ngIf="sub.content" class="ch-content-preview sub-content-preview" [innerHTML]="renderMarkdown(sub.content)"></div>
+                      <!-- Sub-chapter content preview (truncated for performance) -->
+                      <div *ngIf="sub.content" class="ch-content-preview sub-content-preview" [innerHTML]="getCachedMarkdown(sub.id, sub.content)"></div>
                     </div>
                   </div>
                 </mat-expansion-panel>
@@ -1212,6 +1237,18 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   aiProgress: Record<string, { status: string; step: string; progress: number; message: string }> = {};
   private aiPollSubs: Record<string, Subscription> = {};
   aiPromptVisible: Record<string, boolean> = {};
+
+  // Bulk AI generation state
+  bulkGenerating = false;
+  bulkGenProgress = 0;
+  bulkGenDone = 0;
+  bulkGenTotal = 0;
+  bulkGenMessage = '';
+  private bulkGenCancelled = false;
+
+  // Performance: caches for template bindings
+  private markdownCache = new Map<string, string>();
+  private wordCountCache = new Map<string, number>();
   aiPromptText: Record<string, string> = {};
 
   // Project members
@@ -1322,6 +1359,9 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   loadAll(): void {
     this.loading = true;
+    // Clear caches on reload
+    this.markdownCache.clear();
+    this.wordCountCache.clear();
     this.api.getProject(this.projectId).subscribe({
       next: (p) => {
         this.project = p;
@@ -1684,6 +1724,104 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   renderMarkdown = renderMarkdown;
 
+  /** Cached markdown rendering: avoids re-rendering on every change detection cycle. */
+  getCachedMarkdown(id: string, content: string): string {
+    if (!content) return '';
+    const cached = this.markdownCache.get(id);
+    if (cached !== undefined) return cached;
+    // Truncate content preview to first 2000 chars for dashboard performance
+    const truncated = content.length > 2000 ? content.slice(0, 2000) + '\n\n*[...]*' : content;
+    const html = renderMarkdown(truncated);
+    this.markdownCache.set(id, html);
+    return html;
+  }
+
+  /** Cached word count to avoid split() on every change detection cycle. */
+  getWordCount(content: string): number {
+    if (!content) return 0;
+    const cached = this.wordCountCache.get(content);
+    if (cached !== undefined) return cached;
+    const count = content.split(/\s+/).filter(w => w.length > 0).length;
+    this.wordCountCache.set(content, count);
+    return count;
+  }
+
+  // ── Bulk AI generation for selected chapters ──
+
+  generateSelectedChapters(): void {
+    if (this.selectedChapters.size === 0) return;
+    const ids = Array.from(this.selectedChapters);
+    this.bulkGenerating = true;
+    this.bulkGenCancelled = false;
+    this.bulkGenTotal = ids.length;
+    this.bulkGenDone = 0;
+    this.bulkGenProgress = 0;
+    this.bulkGenMessage = 'Lancement de la generation...';
+
+    // Mark all selected as processing
+    for (const id of ids) {
+      this.aiProcessing[id] = true;
+      this.aiProgress[id] = { status: 'queued', step: 'queued', progress: 0, message: 'En file d\'attente...' };
+    }
+
+    const onChapterDone = () => {
+      this.bulkGenDone++;
+      this.bulkGenProgress = Math.round(100 * this.bulkGenDone / this.bulkGenTotal);
+      this.bulkGenMessage = `${this.bulkGenDone}/${this.bulkGenTotal} chapitres generes`;
+      if (this.bulkGenDone >= this.bulkGenTotal) {
+        this.bulkGenerating = false;
+        this.snackBar.open(`${this.bulkGenDone} chapitre(s) genere(s)`, 'OK', { duration: 5000 });
+        this.loadAll();
+      }
+    };
+
+    // Use controlled concurrency (max 3 parallel)
+    this._launchBulkWithConcurrency(ids, onChapterDone, 3);
+  }
+
+  private _launchBulkWithConcurrency(
+    chapterIds: string[], onChapterDone: () => void, maxConcurrent: number,
+  ): void {
+    let running = 0;
+    let index = 0;
+
+    const launchNext = () => {
+      while (running < maxConcurrent && index < chapterIds.length && !this.bulkGenCancelled) {
+        const id = chapterIds[index++];
+        const chapterTitle = this._findChapter(id)?.title || '';
+        this.bulkGenMessage = `Generation: ${chapterTitle || 'chapitre ' + index}...`;
+        running++;
+        this.api.generateChapterContent(id, 'generate', '').subscribe({
+          next: () => {
+            this._startAiPolling(id, () => {
+              running--;
+              // Clear markdown cache for this chapter (content changed)
+              this.markdownCache.delete(id);
+              this.wordCountCache.clear();
+              onChapterDone();
+              launchNext();
+            });
+          },
+          error: (err) => {
+            this.aiProcessing[id] = false;
+            delete this.aiProgress[id];
+            running--;
+            onChapterDone();
+            launchNext();
+          },
+        });
+      }
+    };
+
+    launchNext();
+  }
+
+  cancelBulkGenerate(): void {
+    this.bulkGenCancelled = true;
+    this.bulkGenerating = false;
+    this.snackBar.open('Generations restantes annulees', 'OK', { duration: 3000 });
+  }
+
   // ── Per-chapter AI actions ──
 
   toggleAiPrompt(chapterId: string): void {
@@ -1733,20 +1871,42 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       }
     };
 
-    // Launch each chapter generation in parallel
-    for (const id of chapterIds) {
-      this.api.generateChapterContent(id, action, customPrompt).subscribe({
-        next: () => {
-          this._startAiPolling(id, onDone);
-        },
-        error: (err) => {
-          this.aiProcessing[id] = false;
-          delete this.aiProgress[id];
-          this.snackBar.open(err.error?.detail || 'Erreur generation', 'OK', { duration: 5000 });
-          onDone();
-        },
-      });
-    }
+    // Launch with controlled concurrency (max 3 parallel API calls)
+    this._launchWithConcurrency(chapterIds, action, customPrompt, onDone, 3);
+  }
+
+  private _launchWithConcurrency(
+    chapterIds: string[], action: string, customPrompt: string,
+    onDone: () => void, maxConcurrent: number,
+  ): void {
+    let running = 0;
+    let index = 0;
+
+    const launchNext = () => {
+      while (running < maxConcurrent && index < chapterIds.length) {
+        const id = chapterIds[index++];
+        running++;
+        this.api.generateChapterContent(id, action, customPrompt).subscribe({
+          next: () => {
+            this._startAiPolling(id, () => {
+              running--;
+              onDone();
+              launchNext();
+            });
+          },
+          error: (err) => {
+            this.aiProcessing[id] = false;
+            delete this.aiProgress[id];
+            this.snackBar.open(err.error?.detail || 'Erreur generation', 'OK', { duration: 5000 });
+            running--;
+            onDone();
+            launchNext();
+          },
+        });
+      }
+    };
+
+    launchNext();
   }
 
   private _findChapter(chapterId: string): Chapter | null {
@@ -1763,7 +1923,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   private _startAiPolling(chapterId: string, onComplete?: () => void): void {
     this._stopAiPolling(chapterId);
-    this.aiPollSubs[chapterId] = timer(500, 1500).pipe(
+    // Use longer interval (3s) to reduce HTTP load with many chapters polling simultaneously
+    this.aiPollSubs[chapterId] = timer(500, 3000).pipe(
       switchMap(() => this.api.getChapterGenStatus(chapterId))
     ).subscribe({
       next: (status) => {
