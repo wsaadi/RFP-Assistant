@@ -58,7 +58,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           <button mat-raised-button [routerLink]="['/project', projectId, 'images']"
             matTooltip="Galerie d'images extraites">
             <mat-icon>photo_library</mat-icon> Images
-            <span *ngIf="stats?.images_count" class="image-badge">{{ stats.images_count }}</span>
+            <span *ngIf="stats?.images_count" class="image-badge">{{ stats!.images_count }}</span>
           </button>
           <button mat-raised-button color="accent" [routerLink]="['/project', projectId, 'preview']">
             <mat-icon>visibility</mat-icon> Aperçu
