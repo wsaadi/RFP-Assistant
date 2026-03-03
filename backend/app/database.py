@@ -192,6 +192,35 @@ async def init_db():
             except Exception:
                 logger.debug("document_images.%s column already exists", col_name)
 
+    # ── Image content_hash for deduplication ──
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "ALTER TABLE document_images ADD COLUMN IF NOT EXISTS "
+                "content_hash VARCHAR(64) DEFAULT ''"
+            ))
+        except Exception:
+            logger.debug("document_images.content_hash column already exists")
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_document_images_content_hash "
+                "ON document_images (content_hash) WHERE content_hash != ''"
+            ))
+        except Exception:
+            logger.debug("document_images content_hash index already exists")
+
+    # Backfill content_hash from stored_filename for existing images
+    # Filenames follow pattern: ..._<8-char-hex-hash>.<ext>
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "UPDATE document_images "
+                "SET content_hash = substring(stored_filename from '([a-f0-9]{8})\\.[a-z]+$') "
+                "WHERE content_hash = '' OR content_hash IS NULL"
+            ))
+        except Exception:
+            logger.debug("Backfill of document_images.content_hash skipped or failed")
+
     # Add content_hash column for duplicate file detection
     async with engine.begin() as conn:
         try:

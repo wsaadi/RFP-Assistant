@@ -356,6 +356,7 @@ async def _process_document_async(document_id: str, project_id: str):
                     tags=img_data.get("tags", []),
                     width=img_data.get("width", 0),
                     height=img_data.get("height", 0),
+                    content_hash=img_data.get("content_hash", ""),
                     # Gallery fields
                     image_category=img_data.get("image_category", "autre"),
                     selected=img_data.get("selected", False),

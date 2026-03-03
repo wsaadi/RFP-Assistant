@@ -31,6 +31,11 @@ class DocumentChunkOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
+class ImageOccurrence(BaseModel):
+    page_number: int
+    document_id: str
+
+
 class DocumentImageOut(BaseModel):
     id: str
     document_id: str
@@ -45,6 +50,10 @@ class DocumentImageOut(BaseModel):
     selected: bool = False
     analysis_status: str = "pending"
     image_type: str = ""
+    # Deduplication fields
+    occurrence_count: int = 1
+    occurrences: List[ImageOccurrence] = []
+    duplicate_ids: List[str] = []
 
     model_config = {"from_attributes": True}
 

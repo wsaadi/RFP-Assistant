@@ -118,6 +118,11 @@ export interface DocumentProgress {
   db_status?: string;
 }
 
+export interface ImageOccurrence {
+  page_number: number;
+  document_id: string;
+}
+
 export interface DocumentImage {
   id: string;
   document_id: string;
@@ -132,6 +137,9 @@ export interface DocumentImage {
   selected: boolean;
   analysis_status: string;
   image_type: string;
+  occurrence_count: number;
+  occurrences: ImageOccurrence[];
+  duplicate_ids: string[];
 }
 
 export interface ImageAnalysisStatus {

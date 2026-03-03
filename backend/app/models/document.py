@@ -123,6 +123,9 @@ class DocumentImage(Base):
     width: Mapped[int] = mapped_column(Integer, default=0)
     height: Mapped[int] = mapped_column(Integer, default=0)
 
+    # ── Content hash for deduplication ──
+    content_hash: Mapped[str] = mapped_column(String(64), default="", index=True)
+
     # ── User selection & categorization ──
     image_category: Mapped[str] = mapped_column(
         String(30), default="autre"
