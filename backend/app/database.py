@@ -208,3 +208,22 @@ async def init_db():
             ))
         except Exception:
             logger.debug("content_hash index already exists")
+
+    # ── Image provider configuration columns on ai_configs ──
+    image_provider_columns = {
+        "ner_provider": "VARCHAR(20) DEFAULT 'ollama'",
+        "ner_model": "VARCHAR(100) DEFAULT 'qwen2.5:14b'",
+        "vision_provider": "VARCHAR(20) DEFAULT 'ollama'",
+        "vision_model": "VARCHAR(100) DEFAULT 'llama3.2-vision:11b'",
+        "scaleway_api_key_encrypted": "TEXT DEFAULT ''",
+        "scaleway_base_url": "VARCHAR(500) DEFAULT 'https://api.scaleway.ai/v1'",
+    }
+    async with engine.begin() as conn:
+        for col_name, col_type in image_provider_columns.items():
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE ai_configs ADD COLUMN IF NOT EXISTS "
+                    f"{col_name} {col_type}"
+                ))
+            except Exception:
+                logger.debug("ai_configs.%s column already exists", col_name)

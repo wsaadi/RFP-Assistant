@@ -150,6 +150,20 @@ class AIConfig(Base):
     max_tokens: Mapped[int] = mapped_column(Integer, default=4096)
     ollama_base_url: Mapped[str] = mapped_column(String(500), default="http://host.docker.internal:11434")
     ollama_model: Mapped[str] = mapped_column(String(100), default="mistral:latest")
+
+    # ── Image processing providers ──
+    # Provider for NER anonymization: "ollama", "mistral", "scaleway"
+    ner_provider: Mapped[str] = mapped_column(String(20), default="ollama")
+    ner_model: Mapped[str] = mapped_column(String(100), default="qwen2.5:14b")
+    # Provider for image/vision analysis: "ollama", "mistral", "scaleway"
+    vision_provider: Mapped[str] = mapped_column(String(20), default="ollama")
+    vision_model: Mapped[str] = mapped_column(String(100), default="llama3.2-vision:11b")
+    # Scaleway Generative API settings
+    scaleway_api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=True, default="")
+    scaleway_base_url: Mapped[str] = mapped_column(
+        String(500), default="https://api.scaleway.ai/v1"
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )

@@ -275,6 +275,13 @@ export interface AIConfig {
   has_api_key?: boolean;
   ollama_base_url: string;
   ollama_model: string;
+  // Image processing providers
+  ner_provider: string;
+  ner_model: string;
+  vision_provider: string;
+  vision_model: string;
+  has_scaleway_api_key?: boolean;
+  scaleway_base_url: string;
 }
 
 export interface AIConfigUpdate {
@@ -285,6 +292,13 @@ export interface AIConfigUpdate {
   max_tokens: number;
   ollama_base_url: string;
   ollama_model: string;
+  // Image processing providers
+  ner_provider: string;
+  ner_model: string;
+  vision_provider: string;
+  vision_model: string;
+  scaleway_api_key: string;
+  scaleway_base_url: string;
 }
 
 // ── Anonymization ──

@@ -1,14 +1,16 @@
-"""Image analysis service using a local Vision LLM (Llama 3.2 Vision via Ollama) on DGX Spark.
+"""Image analysis service using configurable Vision LLM providers.
 
 Architecture (privacy-by-design):
-1. Images extracted from documents are sent to a LOCAL vision model (never to Mistral)
+1. Images extracted from documents are sent to the configured vision model
 2. The vision model generates structured metadata: description, type, key info, PII detection
 3. OCR text extracted from images is anonymized using the existing anonymization pipeline
 4. Mistral receives ONLY the anonymized metadata — never the original images
 5. Original images are inserted into the final Word document based on Mistral's placement markers
 
-This ensures that sensitive visual content (names, emails, screenshots with PII) never
-leaves the local infrastructure while still allowing intelligent image placement.
+Supported providers:
+- **Ollama** (local): Privacy-first — images never leave local infrastructure
+- **Mistral** (cloud): Uses Pixtral vision models via Mistral API
+- **Scaleway** (cloud): Uses Scaleway Generative APIs (OpenAI-compatible)
 """
 import asyncio
 import base64
@@ -21,17 +23,17 @@ from typing import Callable, Dict, List, Optional
 import httpx
 
 from ..config import settings
+from . import image_providers
 
 logger = logging.getLogger(__name__)
 
-# ── Ollama Vision configuration ──
+# ── Default Vision configuration (from environment, used when no DB config) ──
 _OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 _VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", settings.ollama_vision_model)
 _VISION_TIMEOUT = int(os.environ.get("OLLAMA_VISION_TIMEOUT", str(settings.ollama_vision_timeout)))
 _VISION_CONCURRENCY = int(os.environ.get("OLLAMA_VISION_CONCURRENCY", str(settings.ollama_vision_concurrency)))
 
 # ── Vision analysis prompts ──
-# Llama 3.2 Vision supports system messages and handles French natively.
 _VISION_SYSTEM_PROMPT = """\
 Tu es un analyseur d'images de documents professionnels (appels d'offres, mémoires techniques).
 Tu réponds UNIQUEMENT avec un objet JSON valide, sans texte avant ni après."""
@@ -57,21 +59,50 @@ Règles :
 
 
 class ImageAnalysisService:
-    """Analyze document images using a local Vision LLM via Ollama.
+    """Analyze document images using a configurable Vision LLM provider.
 
-    The vision model runs on the DGX Spark, ensuring images never leave
-    the local infrastructure. Only structured metadata is produced and
-    later shared with external AI models.
+    Supports Ollama (local), Mistral API, and Scaleway Generative API.
     """
 
     _semaphore: Optional[asyncio.Semaphore] = None
     _http_client: Optional[httpx.AsyncClient] = None
 
+    # ── Active provider configuration ──
+    _vision_config: Optional[image_providers.ProviderConfig] = None
+
+    @classmethod
+    def configure_vision(cls, config: image_providers.ProviderConfig):
+        """Set the vision provider configuration.
+
+        Resets the semaphore to apply new concurrency settings.
+        """
+        cls._vision_config = config
+        cls._semaphore = None  # Reset to pick up new concurrency
+        logger.info(
+            "Vision provider configured: %s / model=%s",
+            config.provider, config.model,
+        )
+
+    @classmethod
+    def _get_vision_config(cls) -> image_providers.ProviderConfig:
+        """Get the active vision config, falling back to env-var defaults."""
+        if cls._vision_config is not None:
+            return cls._vision_config
+        return image_providers.ProviderConfig(
+            provider="ollama",
+            model=_VISION_MODEL,
+            ollama_base_url=_OLLAMA_BASE_URL,
+            timeout=_VISION_TIMEOUT,
+            concurrency=_VISION_CONCURRENCY,
+        )
+
     @classmethod
     def _get_semaphore(cls) -> asyncio.Semaphore:
         """Lazy-init semaphore (must be created inside an event loop)."""
         if cls._semaphore is None:
-            cls._semaphore = asyncio.Semaphore(_VISION_CONCURRENCY)
+            cfg = cls._get_vision_config()
+            concurrency = cfg.concurrency if cfg.concurrency > 0 else _VISION_CONCURRENCY
+            cls._semaphore = asyncio.Semaphore(concurrency)
         return cls._semaphore
 
     @classmethod
@@ -100,7 +131,7 @@ class ImageAnalysisService:
         page_context: str = "",
         section_title: str = "",
     ) -> Dict:
-        """Analyze a single image using the local vision model.
+        """Analyze a single image using the configured vision provider.
 
         Args:
             file_path: Path to the image file on disk.
@@ -124,11 +155,11 @@ class ImageAnalysisService:
                 ctx_parts.append(f"Texte environnant : {page_context[:500]}")
             user_prompt += "\n\nContexte :\n" + "\n".join(ctx_parts)
 
-        # Call Ollama vision API with concurrency control
+        # Call vision API with concurrency control
         sem = cls._get_semaphore()
         async with sem:
             try:
-                result = await cls._call_ollama_vision(image_b64, user_prompt)
+                result = await cls._call_vision(image_b64, user_prompt)
                 return result
             except Exception as e:
                 logger.error("Vision analysis failed for %s: %s", file_path, e)
@@ -153,7 +184,11 @@ class ImageAnalysisService:
         if total == 0:
             return []
 
-        logger.info("Starting batch image analysis: %d images", total)
+        cfg = cls._get_vision_config()
+        logger.info(
+            "Starting batch image analysis: %d images (provider=%s, model=%s)",
+            total, cfg.provider, cfg.model,
+        )
         results = [None] * total
         done_count = 0
 
@@ -186,16 +221,28 @@ class ImageAnalysisService:
         return results
 
     @classmethod
-    async def _call_ollama_vision(cls, image_b64: str, user_prompt: str) -> Dict:
-        """Call the Ollama vision model API with an image.
+    async def _call_vision(cls, image_b64: str, user_prompt: str) -> Dict:
+        """Call the vision model via the configured provider.
 
-        Ollama's vision API accepts images as base64-encoded strings in the
-        ``images`` field of the message payload.
-
-        Llama 3.2 Vision supports system messages natively. If the first
-        attempt returns no usable JSON, we retry once with a simpler prompt.
+        Uses the image_providers abstraction layer. If the first attempt
+        returns no usable JSON, retries once with a simpler prompt.
         """
-        result = await cls._call_ollama_once(image_b64, user_prompt, use_system=True)
+        cfg = cls._get_vision_config()
+
+        raw_content = await image_providers.call_vision(
+            config=cfg,
+            system_prompt=_VISION_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            image_b64=image_b64,
+        )
+
+        if raw_content is None:
+            return cls._empty_analysis(
+                f"Le provider {cfg.provider} n'a pas retourné de réponse"
+            )
+
+        result = cls._parse_vision_response(raw_content)
+
         if result.get("type") != "autre" or result.get("description", "").startswith("Type:"):
             return result
 
@@ -208,60 +255,16 @@ class ImageAnalysisService:
             '"ocr_text":"texte lisible",'
             '"is_informative":true}'
         )
-        return await cls._call_ollama_once(image_b64, fallback, use_system=False)
 
-    # Max retries for transient Ollama errors (model swap, server disconnect)
-    _MAX_RETRIES = 2
-
-    @classmethod
-    async def _call_ollama_once(
-        cls, image_b64: str, user_prompt: str, use_system: bool = True,
-    ) -> Dict:
-        """Single call to the Ollama vision API with retry on transient errors.
-
-        Retries with exponential backoff when Ollama disconnects (common when
-        the GPU is swapping between NER and vision models).
-        """
-        messages = []
-        if use_system:
-            messages.append({"role": "system", "content": _VISION_SYSTEM_PROMPT})
-        messages.append({
-            "role": "user",
-            "content": user_prompt,
-            "images": [image_b64],
-        })
-
-        payload = {
-            "model": _VISION_MODEL,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 2048,
-            },
-        }
-
-        client = cls._get_http_client()
-        last_exc = None
-
-        for attempt in range(1 + cls._MAX_RETRIES):
-            try:
-                resp = await client.post(f"{_OLLAMA_BASE_URL}/api/chat", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                raw_content = data.get("message", {}).get("content", "")
-                return cls._parse_vision_response(raw_content)
-            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
-                last_exc = e
-                if attempt < cls._MAX_RETRIES:
-                    wait = 2 ** (attempt + 1)  # 2s, 4s
-                    logger.warning(
-                        "Vision call attempt %d/%d failed (%s), retrying in %ds",
-                        attempt + 1, 1 + cls._MAX_RETRIES, type(e).__name__, wait,
-                    )
-                    await asyncio.sleep(wait)
-
-        raise last_exc
+        raw_retry = await image_providers.call_vision(
+            config=cfg,
+            system_prompt="",
+            user_prompt=fallback,
+            image_b64=image_b64,
+        )
+        if raw_retry is None:
+            return result  # Return first attempt result
+        return cls._parse_vision_response(raw_retry)
 
     # Normalize type values — accepts both French (preferred) and English (fallback)
     _TYPE_MAP = {
@@ -392,37 +395,16 @@ class ImageAnalysisService:
 
     @classmethod
     async def check_vision_model_available(cls) -> Dict:
-        """Check if the vision model is available on Ollama."""
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
-                resp = await client.get(f"{_OLLAMA_BASE_URL}/api/tags")
-                resp.raise_for_status()
-                models = resp.json().get("models", [])
-                model_names = [m.get("name", "") for m in models]
+        """Check if the vision model is available on the configured provider."""
+        cfg = cls._get_vision_config()
+        result = await image_providers.check_provider_available(cfg)
 
-                # Check if our vision model is available
-                vision_available = any(
-                    _VISION_MODEL.split(":")[0] in name
-                    for name in model_names
-                )
-
-                return {
-                    "ollama_reachable": True,
-                    "vision_model": _VISION_MODEL,
-                    "vision_available": vision_available,
-                    "available_models": model_names,
-                }
-        except httpx.ConnectError:
-            return {
-                "ollama_reachable": False,
-                "vision_model": _VISION_MODEL,
-                "vision_available": False,
-                "failure_reason": f"Cannot connect to Ollama at {_OLLAMA_BASE_URL}",
-            }
-        except Exception as e:
-            return {
-                "ollama_reachable": False,
-                "vision_model": _VISION_MODEL,
-                "vision_available": False,
-                "failure_reason": str(e)[:200],
-            }
+        # Backward-compatible response format
+        return {
+            "vision_provider": cfg.provider,
+            "ollama_reachable": result.get("available", False) if cfg.provider == "ollama" else None,
+            "vision_model": cfg.model,
+            "vision_available": result.get("available", False),
+            "available_models": result.get("models_list", []),
+            "failure_reason": result.get("reason", ""),
+        }

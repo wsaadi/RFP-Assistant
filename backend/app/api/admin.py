@@ -11,6 +11,9 @@ from ..models.workspace import Workspace, WorkspaceMember
 from ..models.project import AIConfig
 from ..schemas.user import UserOut, UserCreate, UserUpdate
 from ..schemas.project import AIConfigUpdate, AIConfigOut
+from ..services.image_providers import ner_config_from_ai_config, vision_config_from_ai_config
+from ..services.anonymization_service import AnonymizationService
+from ..services.image_analysis_service import ImageAnalysisService
 from .deps import get_admin_user
 
 router = APIRouter(prefix="/admin", tags=["Administration"])
@@ -159,6 +162,13 @@ async def update_ai_config(
         config.max_tokens = request.max_tokens
         config.ollama_base_url = request.ollama_base_url
         config.ollama_model = request.ollama_model
+        # Image processing providers
+        config.ner_provider = request.ner_provider
+        config.ner_model = request.ner_model
+        config.vision_provider = request.vision_provider
+        config.vision_model = request.vision_model
+        config.scaleway_api_key_encrypted = request.scaleway_api_key  # TODO: encrypt in production
+        config.scaleway_base_url = request.scaleway_base_url
     else:
         config = AIConfig(
             workspace_id=workspace_id,
@@ -169,21 +179,23 @@ async def update_ai_config(
             max_tokens=request.max_tokens,
             ollama_base_url=request.ollama_base_url,
             ollama_model=request.ollama_model,
+            ner_provider=request.ner_provider,
+            ner_model=request.ner_model,
+            vision_provider=request.vision_provider,
+            vision_model=request.vision_model,
+            scaleway_api_key_encrypted=request.scaleway_api_key,
+            scaleway_base_url=request.scaleway_base_url,
         )
         db.add(config)
 
     await db.commit()
     await db.refresh(config)
 
-    return AIConfigOut(
-        provider=config.provider or "mistral",
-        model_name=config.model_name,
-        temperature=config.temperature,
-        max_tokens=config.max_tokens,
-        has_api_key=bool(config.mistral_api_key_encrypted),
-        ollama_base_url=config.ollama_base_url or "http://host.docker.internal:11434",
-        ollama_model=config.ollama_model or "mistral:latest",
-    )
+    # Apply the new config to the services immediately
+    AnonymizationService.configure_ner(ner_config_from_ai_config(config))
+    ImageAnalysisService.configure_vision(vision_config_from_ai_config(config))
+
+    return _config_to_out(config)
 
 
 @router.get("/ai-config/{workspace_id}", response_model=AIConfigOut)
@@ -207,8 +219,19 @@ async def get_ai_config(
             has_api_key=False,
             ollama_base_url="http://host.docker.internal:11434",
             ollama_model="mistral:latest",
+            ner_provider="ollama",
+            ner_model="qwen2.5:14b",
+            vision_provider="ollama",
+            vision_model="llama3.2-vision:11b",
+            has_scaleway_api_key=False,
+            scaleway_base_url="https://api.scaleway.ai/v1",
         )
 
+    return _config_to_out(config)
+
+
+def _config_to_out(config: AIConfig) -> AIConfigOut:
+    """Convert an AIConfig DB object to the output schema."""
     return AIConfigOut(
         provider=config.provider or "mistral",
         model_name=config.model_name,
@@ -217,4 +240,10 @@ async def get_ai_config(
         has_api_key=bool(config.mistral_api_key_encrypted),
         ollama_base_url=config.ollama_base_url or "http://host.docker.internal:11434",
         ollama_model=config.ollama_model or "mistral:latest",
+        ner_provider=config.ner_provider or "ollama",
+        ner_model=config.ner_model or "qwen2.5:14b",
+        vision_provider=config.vision_provider or "ollama",
+        vision_model=config.vision_model or "llama3.2-vision:11b",
+        has_scaleway_api_key=bool(config.scaleway_api_key_encrypted),
+        scaleway_base_url=config.scaleway_base_url or "https://api.scaleway.ai/v1",
     )

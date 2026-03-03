@@ -58,6 +58,7 @@ async def _run_chapter_generation(
     from ..services.ai_service import MistralAIService, create_ai_service
     from ..services.vector_service import VectorService
     from ..services.anonymization_service import AnonymizationService
+    from ..services.image_providers import ner_config_from_ai_config
 
     cid = str(chapter_id)
 
@@ -76,6 +77,10 @@ async def _run_chapter_generation(
             )
             config = config_result.scalar_one_or_none()
             ai_service = create_ai_service(config)
+
+            # Configure NER provider from workspace settings
+            if config:
+                AnonymizationService.configure_ner(ner_config_from_ai_config(config))
 
             result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
             chapter = result.scalar_one()

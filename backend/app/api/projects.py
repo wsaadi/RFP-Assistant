@@ -49,7 +49,12 @@ _NS_REANON = "reanon"
 
 
 async def _get_ai_service(workspace_id: uuid.UUID, db: AsyncSession) -> MistralAIService:
-    """Helper to get AI service from workspace config."""
+    """Helper to get AI service from workspace config.
+
+    Also configures the NER and vision providers from the workspace settings.
+    """
+    from ..services.image_providers import ner_config_from_ai_config, vision_config_from_ai_config
+
     result = await db.execute(
         select(AIConfig).where(AIConfig.workspace_id == workspace_id)
     )
@@ -65,6 +70,10 @@ async def _get_ai_service(workspace_id: uuid.UUID, db: AsyncSession) -> MistralA
             status_code=400,
             detail="Clé API Mistral non configurée. Configurez-la dans l'administration.",
         )
+
+    # Configure image providers from workspace settings
+    AnonymizationService.configure_ner(ner_config_from_ai_config(config))
+
     return create_ai_service(config)
 
 

@@ -20,6 +20,53 @@ from ..celery_app import celery
 logger = logging.getLogger(__name__)
 
 
+async def _configure_image_providers_for_project(project_id: str, TaskSession):
+    """Load the workspace AIConfig for a project and configure image providers.
+
+    This ensures the anonymization and image analysis services use the
+    correct provider (Ollama, Mistral, or Scaleway) as configured by the admin.
+    """
+    from sqlalchemy import select
+    from ..models.document import Document
+    from ..models.project import RFPProject, AIConfig
+    from ..services.image_providers import ner_config_from_ai_config, vision_config_from_ai_config
+    from ..services.anonymization_service import AnonymizationService
+    from ..services.image_analysis_service import ImageAnalysisService
+
+    try:
+        async with TaskSession() as db:
+            # Get workspace_id from the project
+            proj_result = await db.execute(
+                select(RFPProject.workspace_id).where(
+                    RFPProject.id == uuid.UUID(project_id)
+                )
+            )
+            row = proj_result.first()
+            if not row:
+                return
+            workspace_id = row[0]
+
+            # Load AI config for this workspace
+            config_result = await db.execute(
+                select(AIConfig).where(AIConfig.workspace_id == workspace_id)
+            )
+            config = config_result.scalar_one_or_none()
+            if config:
+                AnonymizationService.configure_ner(ner_config_from_ai_config(config))
+                ImageAnalysisService.configure_vision(vision_config_from_ai_config(config))
+                logger.info(
+                    "[project:%s] Configured providers — NER: %s/%s, Vision: %s/%s",
+                    project_id,
+                    config.ner_provider, config.ner_model,
+                    config.vision_provider, config.vision_model,
+                )
+    except Exception as e:
+        logger.warning(
+            "[project:%s] Could not load image provider config, using defaults: %s",
+            project_id, e,
+        )
+
+
 @celery.task(
     name="tasks.process_document",
     bind=True,
@@ -87,6 +134,9 @@ async def _process_document_async(document_id: str, project_id: str):
     task_engine, TaskSession = create_task_engine()
     t_start = time.monotonic()
     _content_lock = None  # Redis lock for content dedup
+
+    # Configure image providers from workspace settings
+    await _configure_image_providers_for_project(project_id, TaskSession)
 
     try:
         # ── Phase 1: Load document metadata + mark processing ──
@@ -494,6 +544,10 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
     from ..services.progress_service import set_progress
 
     task_engine, TaskSession = create_task_engine()
+
+    # Configure image providers from workspace settings
+    await _configure_image_providers_for_project(project_id, TaskSession)
+
     try:
         # Load images from DB
         async with TaskSession() as db:

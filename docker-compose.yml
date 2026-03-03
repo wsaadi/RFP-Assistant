@@ -74,6 +74,9 @@ services:
       - OLLAMA_NER_MODEL=${OLLAMA_NER_MODEL:-qwen2.5:14b}
       - OLLAMA_NER_TIMEOUT=120
       - OLLAMA_NER_CONCURRENCY=2
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-llama3.2-vision:11b}
+      - OLLAMA_VISION_TIMEOUT=120
+      - OLLAMA_VISION_CONCURRENCY=2
     volumes:
       - backend_data:/app/data
     ports:
@@ -138,6 +141,9 @@ services:
       - OLLAMA_NER_MODEL=${OLLAMA_NER_MODEL:-qwen2.5:14b}
       - OLLAMA_NER_TIMEOUT=120
       - OLLAMA_NER_CONCURRENCY=2
+      - OLLAMA_VISION_MODEL=${OLLAMA_VISION_MODEL:-llama3.2-vision:11b}
+      - OLLAMA_VISION_TIMEOUT=120
+      - OLLAMA_VISION_CONCURRENCY=2
     volumes:
       - backend_data:/app/data
     depends_on:

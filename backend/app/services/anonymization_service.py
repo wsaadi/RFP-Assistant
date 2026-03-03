@@ -31,6 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from ..models.project import AnonymizationMapping, EntityType
+from . import image_providers
 
 logger = logging.getLogger(__name__)
 
@@ -335,8 +336,9 @@ def _should_keep_entity(entity_text: str, label: str) -> bool:
 class AnonymizationService:
     """Service for anonymizing/pseudonymizing sensitive content.
 
-    Uses a local LLM (Qwen via Ollama) for context-aware NER detection,
-    with regex fallback for deterministic patterns (emails).
+    Uses a configurable LLM provider (Ollama, Mistral, or Scaleway) for
+    context-aware NER detection, with regex fallback for deterministic
+    patterns (emails, phone numbers).
     """
 
     _ollama_available: Optional[bool] = None
@@ -347,6 +349,38 @@ class AnonymizationService:
     _last_ner_produced_entities: Optional[bool] = None
     # Human-readable reason when NER fails/returns nothing
     _last_ner_failure_reason: Optional[str] = None
+
+    # ── Active provider configuration ──
+    # Set via configure_ner() or defaults to env-var-based Ollama config.
+    _ner_config: Optional['image_providers.ProviderConfig'] = None
+
+    @classmethod
+    def configure_ner(cls, config: 'image_providers.ProviderConfig'):
+        """Set the NER provider configuration.
+
+        Resets cached availability so the next call re-checks connectivity.
+        """
+        cls._ner_config = config
+        cls._ollama_available = None
+        cls._last_ner_failure_reason = None
+        logger.info(
+            "NER provider configured: %s / model=%s",
+            config.provider, config.model,
+        )
+
+    @classmethod
+    def _get_ner_config(cls) -> 'image_providers.ProviderConfig':
+        """Get the active NER config, falling back to env-var defaults."""
+        if cls._ner_config is not None:
+            return cls._ner_config
+        from .image_providers import ProviderConfig
+        return ProviderConfig(
+            provider="ollama",
+            model=_OLLAMA_MODEL,
+            ollama_base_url=_OLLAMA_BASE_URL,
+            timeout=_OLLAMA_TIMEOUT,
+            concurrency=_OLLAMA_CONCURRENCY,
+        )
 
     @classmethod
     async def _get_http_client(cls) -> httpx.AsyncClient:
@@ -360,7 +394,10 @@ class AnonymizationService:
 
     @classmethod
     async def _check_ollama(cls) -> bool:
-        """Check if Ollama is reachable and the model is available.
+        """Check if the NER provider is reachable and the model is available.
+
+        For Ollama: checks the /api/tags endpoint.
+        For Mistral/Scaleway: checks that an API key is configured.
 
         Only caches *success* permanently.  Failures are retried each time
         so that a temporary network issue doesn't permanently disable LLM NER
@@ -369,6 +406,21 @@ class AnonymizationService:
         if cls._ollama_available is True:
             return True
 
+        cfg = cls._get_ner_config()
+
+        if cfg.provider in ("mistral", "scaleway"):
+            # For API providers, just check that a key is configured
+            from .image_providers import check_provider_available
+            result = await check_provider_available(cfg)
+            if result.get("available"):
+                cls._ollama_available = True
+                cls._last_ner_failure_reason = None
+                logger.info("NER provider %s available (model: %s)", cfg.provider, cfg.model)
+            else:
+                cls._last_ner_failure_reason = result.get("reason", "Provider non disponible")
+            return cls._ollama_available is True
+
+        # Ollama check (original logic)
         try:
             client = await cls._get_http_client()
             resp = await client.get("/api/tags", timeout=10.0)
@@ -376,22 +428,23 @@ class AnonymizationService:
                 models = resp.json().get("models", [])
                 model_names = [m.get("name", "") for m in models]
                 # Check if our model (or a variant) is available
-                base_model = _OLLAMA_MODEL.split(":")[0]
+                ner_model = cfg.model
+                base_model = ner_model.split(":")[0]
                 available = any(base_model in name for name in model_names)
                 if available:
-                    logger.info("Ollama available at %s with model %s", _OLLAMA_BASE_URL, _OLLAMA_MODEL)
+                    logger.info("Ollama available at %s with model %s", _OLLAMA_BASE_URL, ner_model)
                     cls._ollama_available = True
                     cls._last_ner_failure_reason = None
                 else:
                     reason = (
-                        f"Ollama joignable mais le modèle '{_OLLAMA_MODEL}' n'est pas chargé. "
+                        f"Ollama joignable mais le modèle '{ner_model}' n'est pas chargé. "
                         f"Modèles disponibles: {model_names}. "
-                        f"Lancez 'ollama pull {_OLLAMA_MODEL}' sur le serveur Ollama."
+                        f"Lancez 'ollama pull {ner_model}' sur le serveur Ollama."
                     )
                     logger.warning(
                         "Ollama reachable but model '%s' not found. Available: %s. "
                         "Run 'ollama pull %s' on the host to download it.",
-                        _OLLAMA_MODEL, model_names, _OLLAMA_MODEL,
+                        ner_model, model_names, ner_model,
                     )
                     cls._last_ner_failure_reason = reason
                     # Don't cache — model might be pulled later
@@ -417,10 +470,12 @@ class AnonymizationService:
     @classmethod
     def get_ner_diagnostic(cls) -> dict:
         """Return diagnostic info about NER availability for user-facing endpoints."""
+        cfg = cls._get_ner_config()
         return {
+            "ner_provider": cfg.provider,
             "ollama_reachable": cls._ollama_available is True,
             "ollama_url": _OLLAMA_BASE_URL,
-            "ollama_model": _OLLAMA_MODEL,
+            "ollama_model": cfg.model,
             "last_ner_produced_entities": cls._last_ner_produced_entities,
             "failure_reason": cls._last_ner_failure_reason,
         }
@@ -494,8 +549,13 @@ class AnonymizationService:
         paying the system prompt cost only once per group instead of per chunk.
         With 4 chunks per group, this reduces LLM calls by ~75%.
 
+        Supports Ollama, Mistral, and Scaleway providers via the image_providers
+        abstraction layer.
+
         Returns a list of entity lists, one per input text.
         """
+        from . import image_providers
+
         results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
 
         if not any(t.strip() for t in texts):
@@ -510,49 +570,20 @@ class AnonymizationService:
                 parts.append(f"--- BLOC {i} ---\n{text}")
             user_content = "Textes à analyser :\n\n" + _CHUNK_SEPARATOR.join(parts)
 
-        client = await cls._get_http_client()
-
-        # NOTE: Do NOT use "format": "json" — it forces some models (Qwen,
-        # Gemma) to wrap output in a root JSON *object* (e.g. {"entities":
-        # [...]}) instead of the plain array the prompt asks for. The prompt
-        # already instructs the model to reply with a JSON array.
-        _NER_MAX_RETRIES = 2
-        payload = {
-            "model": _OLLAMA_MODEL,
-            "messages": [
-                {"role": "system", "content": _NER_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            "stream": False,
-            "options": {
-                "temperature": 0.0,
-                "num_predict": 4096,
-            },
-        }
+        cfg = cls._get_ner_config()
 
         try:
-            # Retry on transient network errors (Ollama model swap / disconnect)
-            raw_content = None
-            for attempt in range(1 + _NER_MAX_RETRIES):
-                try:
-                    resp = await client.post("/api/chat", json=payload)
-                    resp.raise_for_status()
-                    result = resp.json()
-                    raw_content = result.get("message", {}).get("content", "[]")
-                    break
-                except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as net_err:
-                    if attempt < _NER_MAX_RETRIES:
-                        wait = 2 ** (attempt + 1)
-                        logger.warning(
-                            "[NER-LLM] Attempt %d/%d failed (%s), retrying in %ds",
-                            attempt + 1, 1 + _NER_MAX_RETRIES,
-                            type(net_err).__name__, wait,
-                        )
-                        await asyncio.sleep(wait)
-                    else:
-                        raise
+            # Call the provider via the abstraction layer
+            raw_content = await image_providers.call_ner(
+                config=cfg,
+                system_prompt=_NER_SYSTEM_PROMPT,
+                user_content=user_content,
+            )
 
             if raw_content is None:
+                cls._last_ner_failure_reason = (
+                    f"Le provider {cfg.provider} n'a pas retourné de réponse"
+                )
                 return results
 
             logger.info(
@@ -569,7 +600,7 @@ class AnonymizationService:
                     len(raw_content), raw_content[:1000],
                 )
                 cls._last_ner_failure_reason = (
-                    f"Le modèle Ollama a répondu mais sans entités exploitables. "
+                    f"Le modèle {cfg.provider}/{cfg.model} a répondu mais sans entités exploitables. "
                     f"Réponse brute ({len(raw_content)} chars): {raw_content[:200]}"
                 )
                 return results
@@ -633,19 +664,19 @@ class AnonymizationService:
             return results
 
         except httpx.TimeoutException:
-            reason = f"Ollama NER timeout après {_OLLAMA_TIMEOUT}s sur {len(texts)} texte(s)"
+            reason = f"NER ({cfg.provider}) timeout après {cfg.timeout}s sur {len(texts)} texte(s)"
             logger.warning("[NER-LLM] %s", reason)
             cls._last_ner_failure_reason = reason
             cls._last_ner_produced_entities = False
             return results
         except httpx.HTTPStatusError as e:
-            reason = f"Ollama HTTP error: {e.response.status_code} — {e.response.text[:300]}"
+            reason = f"NER ({cfg.provider}) HTTP error: {e.response.status_code} — {e.response.text[:300]}"
             logger.warning("[NER-LLM] %s", reason)
             cls._last_ner_failure_reason = reason
             cls._last_ner_produced_entities = False
             return results
         except Exception as e:
-            reason = f"NER LLM call failed: {type(e).__name__}: {e}"
+            reason = f"NER ({cfg.provider}) call failed: {type(e).__name__}: {e}"
             logger.error("[NER-LLM] %s", reason, exc_info=True)
             cls._last_ner_failure_reason = reason
             cls._last_ner_produced_entities = False
@@ -667,14 +698,15 @@ class AnonymizationService:
            single LLM calls, reducing total calls by ~75%.
         3. Concurrency: groups are processed concurrently via semaphore.
 
-        Falls back to regex-only if Ollama is unavailable.
+        Falls back to regex-only if the NER provider is unavailable.
         """
         results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
         known = known_originals or set()
 
-        ollama_ok = await cls._check_ollama()
+        ner_ok = await cls._check_ollama()
 
-        if ollama_ok:
+        if ner_ok:
+            cfg = cls._get_ner_config()
             # ── Step 1: Identify which chunks need LLM analysis ──
             needs_llm: List[int] = []  # indices of chunks that need LLM
             skipped_count = 0
@@ -698,12 +730,13 @@ class AnonymizationService:
 
             total_groups = len(groups)
             logger.info(
-                "[batch_detect] Processing %d chunks in %d LLM calls (group size=%d, skipped=%d)",
-                len(needs_llm), total_groups, _CHUNKS_PER_GROUP, skipped_count,
+                "[batch_detect] Processing %d chunks in %d LLM calls (group size=%d, skipped=%d, provider=%s)",
+                len(needs_llm), total_groups, _CHUNKS_PER_GROUP, skipped_count, cfg.provider,
             )
 
             # ── Step 3: Process groups concurrently ──
-            semaphore = asyncio.Semaphore(_OLLAMA_CONCURRENCY)
+            concurrency = cfg.concurrency if cfg.concurrency > 0 else _OLLAMA_CONCURRENCY
+            semaphore = asyncio.Semaphore(concurrency)
             done_groups = 0
 
             async def _process_group(group_indices: List[int]):

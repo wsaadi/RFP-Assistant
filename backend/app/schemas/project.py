@@ -61,6 +61,13 @@ class AIConfigUpdate(BaseModel):
     max_tokens: int = Field(4096, ge=256, le=32000)
     ollama_base_url: str = "http://host.docker.internal:11434"
     ollama_model: str = "mistral:latest"
+    # Image processing providers
+    ner_provider: str = "ollama"  # "ollama", "mistral", "scaleway"
+    ner_model: str = "qwen2.5:14b"
+    vision_provider: str = "ollama"  # "ollama", "mistral", "scaleway"
+    vision_model: str = "llama3.2-vision:11b"
+    scaleway_api_key: str = ""
+    scaleway_base_url: str = "https://api.scaleway.ai/v1"
 
 
 class AIConfigOut(BaseModel):
@@ -71,6 +78,13 @@ class AIConfigOut(BaseModel):
     has_api_key: bool
     ollama_base_url: str = "http://host.docker.internal:11434"
     ollama_model: str = "mistral:latest"
+    # Image processing providers
+    ner_provider: str = "ollama"
+    ner_model: str = "qwen2.5:14b"
+    vision_provider: str = "ollama"
+    vision_model: str = "llama3.2-vision:11b"
+    has_scaleway_api_key: bool = False
+    scaleway_base_url: str = "https://api.scaleway.ai/v1"
 
     model_config = {"from_attributes": True}
 
