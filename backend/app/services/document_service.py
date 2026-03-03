@@ -158,8 +158,9 @@ class DocumentProcessor:
                     if width < 50 or height < 50:
                         continue
 
-                    # Generate filename
-                    img_hash = hashlib.md5(image_bytes).hexdigest()[:8]
+                    # Generate filename with content hash
+                    img_hash_full = hashlib.md5(image_bytes).hexdigest()
+                    img_hash = img_hash_full[:8]
                     filename = f"page{page_num + 1}_img{img_index + 1}_{img_hash}.{image_ext}"
                     filepath = os.path.join(images_dir, filename)
 
@@ -179,6 +180,7 @@ class DocumentProcessor:
                         "width": width,
                         "height": height,
                         "context": context[:500],
+                        "content_hash": img_hash_full,
                         "description": "",
                         "tags": [],
                     })
@@ -256,7 +258,8 @@ class DocumentProcessor:
                     if ext == "jpeg":
                         ext = "jpg"
 
-                    img_hash = hashlib.md5(image_data).hexdigest()[:8]
+                    img_hash_full = hashlib.md5(image_data).hexdigest()
+                    img_hash = img_hash_full[:8]
                     filename = f"docx_img{i + 1}_{img_hash}.{ext}"
                     filepath = os.path.join(images_dir, filename)
 
@@ -280,6 +283,7 @@ class DocumentProcessor:
                         "width": width,
                         "height": height,
                         "context": "",
+                        "content_hash": img_hash_full,
                         "description": "",
                         "tags": [],
                     })

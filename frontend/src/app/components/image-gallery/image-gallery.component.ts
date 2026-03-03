@@ -45,7 +45,9 @@ interface CategoryDef {
           </button>
           <div>
             <h1>Galerie d'images</h1>
-            <span class="subtitle">{{ project.name }} - {{ images.length }} images extraites</span>
+            <span class="subtitle">{{ project.name }} - {{ images.length }} images uniques
+              <span *ngIf="totalRawCount > images.length"> ({{ totalRawCount }} au total)</span>
+            </span>
           </div>
         </div>
         <div class="header-actions">
@@ -144,11 +146,16 @@ interface CategoryDef {
           <div class="image-thumb" (click)="toggleSelect(img, !img.selected)">
             <img [src]="getImageUrl(img.id)" [alt]="img.stored_filename"
               loading="lazy" (error)="onImageError($event)">
+            <span class="occurrence-badge" *ngIf="img.occurrence_count > 1"
+              [matTooltip]="getOccurrenceTooltip(img)">
+              x{{ img.occurrence_count }}
+            </span>
           </div>
           <div class="image-info">
             <div class="image-meta">
               <span class="image-dims">{{ img.width }}x{{ img.height }}</span>
-              <span class="image-page" *ngIf="img.page_number > 0">p.{{ img.page_number }}</span>
+              <span class="image-page" *ngIf="img.occurrence_count <= 1 && img.page_number > 0">p.{{ img.page_number }}</span>
+              <span class="image-page" *ngIf="img.occurrence_count > 1">{{ getPagesList(img) }}</span>
             </div>
             <div class="image-category-row">
               <mat-select class="cat-select"
@@ -244,10 +251,15 @@ interface CategoryDef {
     .image-thumb {
       width: 100%; height: 160px; display: flex; align-items: center;
       justify-content: center; background: #fafafa; cursor: pointer;
-      overflow: hidden;
+      overflow: hidden; position: relative;
     }
     .image-thumb img {
       max-width: 100%; max-height: 100%; object-fit: contain;
+    }
+    .occurrence-badge {
+      position: absolute; bottom: 4px; right: 4px;
+      background: #1976d2; color: white; font-size: 11px; font-weight: 600;
+      padding: 2px 6px; border-radius: 10px; line-height: 1.2;
     }
 
     .image-info { padding: 8px; }
@@ -299,6 +311,10 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
     return this.images.filter(i => i.selected).length;
   }
 
+  get totalRawCount(): number {
+    return this.images.reduce((sum, img) => sum + (img.occurrence_count || 1), 0);
+  }
+
   constructor(
     private route: ActivatedRoute,
     private api: ApiService,
@@ -341,6 +357,28 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
     (event.target as HTMLImageElement).src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text x="10" y="50" fill="grey">?</text></svg>';
   }
 
+  getOccurrenceTooltip(img: DocumentImage): string {
+    if (!img.occurrences?.length) return '';
+    const pages = img.occurrences
+      .map(o => o.page_number)
+      .filter(p => p > 0)
+      .sort((a, b) => a - b);
+    if (pages.length === 0) return `${img.occurrence_count} occurrences`;
+    return `${img.occurrence_count} occurrences (pages ${pages.join(', ')})`;
+  }
+
+  getPagesList(img: DocumentImage): string {
+    if (!img.occurrences?.length) return '';
+    const pages = [...new Set(
+      img.occurrences
+        .map(o => o.page_number)
+        .filter(p => p > 0)
+    )].sort((a, b) => a - b);
+    if (pages.length === 0) return '';
+    if (pages.length <= 4) return 'p.' + pages.join(', ');
+    return `p.${pages[0]}...${pages[pages.length - 1]}`;
+  }
+
   // ── Filtering ──
 
   setFilter(filter: string): void {
@@ -364,17 +402,18 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
 
   toggleSelect(img: DocumentImage, selected: boolean): void {
     img.selected = selected;
-    this.api.updateImage(img.id, { selected }).subscribe();
+    const ids = img.duplicate_ids?.length > 1 ? img.duplicate_ids : [img.id];
+    this.api.batchUpdateImages(this.projectId, ids, { selected }).subscribe();
   }
 
   selectAllVisible(): void {
-    const ids = this.filteredImages.map(i => i.id);
+    const ids = this.filteredImages.flatMap(i => i.duplicate_ids?.length ? i.duplicate_ids : [i.id]);
     this.filteredImages.forEach(i => i.selected = true);
     this.api.batchUpdateImages(this.projectId, ids, { selected: true }).subscribe();
   }
 
   deselectAllVisible(): void {
-    const ids = this.filteredImages.map(i => i.id);
+    const ids = this.filteredImages.flatMap(i => i.duplicate_ids?.length ? i.duplicate_ids : [i.id]);
     this.filteredImages.forEach(i => i.selected = false);
     this.api.batchUpdateImages(this.projectId, ids, { selected: false }).subscribe();
   }
@@ -383,17 +422,19 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
 
   changeCategory(img: DocumentImage, category: string): void {
     img.image_category = category;
-    this.api.updateImage(img.id, { image_category: category }).subscribe();
+    const ids = img.duplicate_ids?.length > 1 ? img.duplicate_ids : [img.id];
+    this.api.batchUpdateImages(this.projectId, ids, { image_category: category }).subscribe();
   }
 
   batchSetCategory(category: string): void {
-    const selectedIds = this.images.filter(i => i.selected).map(i => i.id);
-    if (selectedIds.length === 0) return;
+    const selected = this.images.filter(i => i.selected);
+    if (selected.length === 0) return;
 
-    this.images.filter(i => i.selected).forEach(i => i.image_category = category);
+    const allIds = selected.flatMap(i => i.duplicate_ids?.length ? i.duplicate_ids : [i.id]);
+    selected.forEach(i => i.image_category = category);
     this.applyFilter();
 
-    this.api.batchUpdateImages(this.projectId, selectedIds, { image_category: category }).subscribe({
+    this.api.batchUpdateImages(this.projectId, allIds, { image_category: category }).subscribe({
       next: (res) => this.snackBar.open(
         `${res.updated} images recategorisees`, 'OK', { duration: 2000 }
       ),
@@ -403,6 +444,7 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
   // ── Analysis ──
 
   analyzeSelected(): void {
+    // Only send representative IDs (no need to analyze same image twice)
     const selectedIds = this.images.filter(i => i.selected).map(i => i.id);
     if (selectedIds.length === 0) return;
 

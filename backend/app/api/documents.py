@@ -1,7 +1,9 @@
 """Document API routes for upload, processing, and search."""
 import hashlib
+import re
 import uuid
 import os
+from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
@@ -17,7 +19,7 @@ from ..models.document import (
     DocumentCategory, FileType, ProcessingStatus,
 )
 from ..schemas.document import (
-    DocumentOut, DocumentImageOut, SearchRequest, SearchResult,
+    DocumentOut, DocumentImageOut, ImageOccurrence, SearchRequest, SearchResult,
     ImageUpdateRequest, ImageBatchUpdateRequest, ImageAnalyzeRequest,
 )
 from ..services.document_service import DocumentProcessor
@@ -214,6 +216,70 @@ def _image_to_out(img: DocumentImage) -> DocumentImageOut:
     )
 
 
+def _get_content_hash(img: DocumentImage) -> str:
+    """Get the content hash for an image, falling back to filename extraction."""
+    if img.content_hash:
+        return img.content_hash
+    # Extract 8-char hash from stored_filename pattern: ..._<hash>.<ext>
+    match = re.search(r'_([a-f0-9]{8})\.\w+$', img.stored_filename)
+    return match.group(1) if match else ""
+
+
+def _pick_representative(group: list[DocumentImage]) -> DocumentImage:
+    """Pick the best representative image from a duplicate group."""
+    # Prefer analyzed images, then lowest page number
+    analyzed = [img for img in group if img.analysis_status == "completed"]
+    if analyzed:
+        return min(analyzed, key=lambda i: i.page_number)
+    return min(group, key=lambda i: i.page_number)
+
+
+def _consolidate_images(images: list[DocumentImage]) -> list[DocumentImageOut]:
+    """Group duplicate images by content hash and return consolidated list."""
+    groups: OrderedDict[str, list[DocumentImage]] = OrderedDict()
+    for img in images:
+        hash_key = _get_content_hash(img)
+        if not hash_key:
+            hash_key = str(img.id)  # unique fallback
+        if hash_key not in groups:
+            groups[hash_key] = []
+        groups[hash_key].append(img)
+
+    consolidated = []
+    for group in groups.values():
+        representative = _pick_representative(group)
+        out = _image_to_out(representative)
+
+        all_ids = [str(img.id) for img in group]
+        occurrences = [
+            ImageOccurrence(
+                page_number=img.page_number,
+                document_id=str(img.document_id),
+            )
+            for img in group
+        ]
+        # Deduplicate occurrences (same page + same doc)
+        seen = set()
+        unique_occurrences = []
+        for occ in occurrences:
+            key = (occ.page_number, occ.document_id)
+            if key not in seen:
+                seen.add(key)
+                unique_occurrences.append(occ)
+
+        out.occurrence_count = len(group)
+        out.occurrences = unique_occurrences
+        out.duplicate_ids = all_ids
+
+        # If any image in the group is selected, mark as selected
+        if any(img.selected for img in group):
+            out.selected = True
+
+        consolidated.append(out)
+
+    return consolidated
+
+
 @router.get("/{document_id}/images", response_model=list[DocumentImageOut])
 async def list_document_images(
     document_id: uuid.UUID,
@@ -235,14 +301,15 @@ async def list_project_images(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all images across all documents in a project."""
+    """List all images across all documents in a project, with duplicates consolidated."""
     result = await db.execute(
         select(DocumentImage)
         .join(Document, Document.id == DocumentImage.document_id)
         .where(Document.project_id == project_id)
         .order_by(Document.category, DocumentImage.page_number)
     )
-    return [_image_to_out(img) for img in result.scalars().all()]
+    all_images = list(result.scalars().all())
+    return _consolidate_images(all_images)
 
 
 @router.get("/image-file/{image_id}")
