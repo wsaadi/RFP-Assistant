@@ -14,6 +14,7 @@ import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatSelectModule } from '@angular/material/select';
 import { MatBadgeModule } from '@angular/material/badge';
 import { MatMenuModule } from '@angular/material/menu';
+import { MatDividerModule } from '@angular/material/divider';
 import { Subscription, interval } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
@@ -34,7 +35,7 @@ interface CategoryDef {
     MatCardModule, MatButtonModule, MatIconModule, MatChipsModule,
     MatCheckboxModule, MatProgressSpinnerModule, MatProgressBarModule,
     MatSnackBarModule, MatTooltipModule, MatSelectModule,
-    MatBadgeModule, MatMenuModule,
+    MatBadgeModule, MatMenuModule, MatDividerModule,
   ],
   template: `
     <div class="page-container" *ngIf="project">
@@ -132,53 +133,180 @@ interface CategoryDef {
         <p>Aucune image extraite. Chargez des documents contenant des images (PDF, DOCX) pour les voir ici.</p>
       </div>
 
-      <!-- Image grid -->
-      <div class="image-grid" *ngIf="!loading && filteredImages.length > 0">
-        <div class="image-card" *ngFor="let img of filteredImages"
-          [class.selected]="img.selected"
-          [class.analyzed]="img.analysis_status === 'completed'">
-          <div class="image-select">
-            <mat-checkbox
-              [checked]="img.selected"
-              (change)="toggleSelect(img, $event.checked)">
-            </mat-checkbox>
-          </div>
-          <div class="image-thumb" (click)="toggleSelect(img, !img.selected)">
-            <img [src]="getImageUrl(img.id)" [alt]="img.stored_filename"
-              loading="lazy" (error)="onImageError($event)">
-            <span class="occurrence-badge" *ngIf="img.occurrence_count > 1"
-              [matTooltip]="getOccurrenceTooltip(img)">
-              x{{ img.occurrence_count }}
-            </span>
-          </div>
-          <div class="image-info">
-            <div class="image-meta">
-              <span class="image-dims">{{ img.width }}x{{ img.height }}</span>
-              <span class="image-page" *ngIf="img.occurrence_count <= 1 && img.page_number > 0">p.{{ img.page_number }}</span>
-              <span class="image-page" *ngIf="img.occurrence_count > 1">{{ getPagesList(img) }}</span>
+      <!-- Main layout: grid + detail panel -->
+      <div class="gallery-layout" *ngIf="!loading && filteredImages.length > 0">
+
+        <!-- Image grid -->
+        <div class="image-grid" [class.with-detail]="!!selectedImage">
+          <div class="image-card" *ngFor="let img of filteredImages"
+            [class.selected]="img.selected"
+            [class.analyzed]="img.analysis_status === 'completed'"
+            [class.detail-active]="selectedImage?.id === img.id">
+            <div class="image-select">
+              <mat-checkbox
+                [checked]="img.selected"
+                (change)="toggleSelect(img, $event.checked)"
+                (click)="$event.stopPropagation()">
+              </mat-checkbox>
             </div>
-            <div class="image-category-row">
-              <mat-select class="cat-select"
-                [value]="img.image_category"
-                (selectionChange)="changeCategory(img, $event.value)">
-                <mat-option *ngFor="let cat of categories" [value]="cat.value">
-                  {{ cat.label }}
-                </mat-option>
-              </mat-select>
-            </div>
-            <div class="image-status">
-              <mat-icon *ngIf="img.analysis_status === 'completed'" class="status-done"
-                matTooltip="Analyse terminee">check_circle</mat-icon>
-              <mat-icon *ngIf="img.analysis_status === 'analyzing'" class="status-running"
-                matTooltip="En cours d'analyse...">hourglass_top</mat-icon>
-              <mat-icon *ngIf="img.analysis_status === 'failed'" class="status-error"
-                matTooltip="Analyse echouee">error</mat-icon>
-              <span *ngIf="img.analysis_status === 'completed' && img.image_type" class="analysis-type">
-                {{ img.image_type }}
+            <div class="image-thumb" (click)="openDetail(img)">
+              <img [src]="getImageUrl(img.id)" [alt]="img.stored_filename"
+                loading="lazy" (error)="onImageError($event)">
+              <span class="occurrence-badge" *ngIf="img.occurrence_count > 1"
+                [matTooltip]="getOccurrenceTooltip(img)">
+                x{{ img.occurrence_count }}
               </span>
+              <!-- Analysis indicator overlay -->
+              <span class="analysis-badge" *ngIf="img.analysis_status === 'completed'"
+                matTooltip="Cliquez pour voir l'analyse">
+                <mat-icon>visibility</mat-icon>
+              </span>
+            </div>
+            <div class="image-info">
+              <div class="image-meta">
+                <span class="image-dims">{{ img.width }}x{{ img.height }}</span>
+                <span class="image-page" *ngIf="img.occurrence_count <= 1 && img.page_number > 0">p.{{ img.page_number }}</span>
+                <span class="image-page" *ngIf="img.occurrence_count > 1">{{ getPagesList(img) }}</span>
+              </div>
+              <div class="image-category-row">
+                <mat-select class="cat-select"
+                  [value]="img.image_category"
+                  (selectionChange)="changeCategory(img, $event.value)"
+                  (click)="$event.stopPropagation()">
+                  <mat-option *ngFor="let cat of categories" [value]="cat.value">
+                    {{ cat.label }}
+                  </mat-option>
+                </mat-select>
+              </div>
+              <div class="image-status">
+                <mat-icon *ngIf="img.analysis_status === 'completed'" class="status-done"
+                  matTooltip="Analyse terminee">check_circle</mat-icon>
+                <mat-icon *ngIf="img.analysis_status === 'analyzing'" class="status-running"
+                  matTooltip="En cours d'analyse...">hourglass_top</mat-icon>
+                <mat-icon *ngIf="img.analysis_status === 'failed'" class="status-error"
+                  matTooltip="Analyse echouee">error</mat-icon>
+                <span *ngIf="img.analysis_status === 'completed' && img.image_type" class="analysis-type">
+                  {{ img.image_type }}
+                </span>
+              </div>
             </div>
           </div>
         </div>
+
+        <!-- Detail panel (slide-in from right) -->
+        <div class="detail-panel" *ngIf="selectedImage" [@.disabled]="true">
+          <div class="detail-header">
+            <h3>Resultat de l'analyse</h3>
+            <button mat-icon-button (click)="closeDetail()">
+              <mat-icon>close</mat-icon>
+            </button>
+          </div>
+
+          <div class="detail-content">
+            <!-- Image preview -->
+            <div class="detail-image">
+              <img [src]="getImageUrl(selectedImage.id)" [alt]="selectedImage.stored_filename">
+            </div>
+
+            <!-- No analysis -->
+            <div class="no-analysis" *ngIf="selectedImage.analysis_status !== 'completed'">
+              <mat-icon>info_outline</mat-icon>
+              <p *ngIf="selectedImage.analysis_status === 'pending'">Cette image n'a pas encore ete analysee. Selectionnez-la et cliquez sur "Analyser".</p>
+              <p *ngIf="selectedImage.analysis_status === 'analyzing'">Analyse en cours...</p>
+              <p *ngIf="selectedImage.analysis_status === 'failed'">L'analyse a echoue. Vous pouvez relancer l'analyse.</p>
+            </div>
+
+            <!-- Analysis results -->
+            <div class="analysis-results" *ngIf="selectedImage.analysis_status === 'completed'">
+
+              <!-- Type -->
+              <div class="result-section">
+                <div class="result-label">
+                  <mat-icon>label</mat-icon> Type
+                </div>
+                <div class="result-value type-badge">{{ selectedImage.image_type || 'autre' }}</div>
+              </div>
+
+              <mat-divider></mat-divider>
+
+              <!-- Description -->
+              <div class="result-section" *ngIf="selectedImage.description">
+                <div class="result-label">
+                  <mat-icon>description</mat-icon> Description
+                </div>
+                <div class="result-value result-text">{{ selectedImage.description }}</div>
+              </div>
+
+              <mat-divider *ngIf="selectedImage.description"></mat-divider>
+
+              <!-- Key information -->
+              <div class="result-section" *ngIf="selectedImage.key_information?.length > 0">
+                <div class="result-label">
+                  <mat-icon>key</mat-icon> Informations cles
+                </div>
+                <div class="result-value">
+                  <ul class="info-list">
+                    <li *ngFor="let info of selectedImage.key_information">{{ info }}</li>
+                  </ul>
+                </div>
+              </div>
+
+              <mat-divider *ngIf="selectedImage.key_information?.length > 0"></mat-divider>
+
+              <!-- OCR Text -->
+              <div class="result-section" *ngIf="selectedImage.ocr_text">
+                <div class="result-label">
+                  <mat-icon>text_fields</mat-icon> Texte extrait (OCR)
+                </div>
+                <div class="result-value ocr-text">{{ selectedImage.ocr_text }}</div>
+              </div>
+
+              <mat-divider *ngIf="selectedImage.ocr_text"></mat-divider>
+
+              <!-- PII Detected -->
+              <div class="result-section" *ngIf="selectedImage.pii_detected?.length > 0">
+                <div class="result-label">
+                  <mat-icon>security</mat-icon> Donnees personnelles detectees
+                </div>
+                <div class="result-value">
+                  <div class="pii-chips">
+                    <span class="pii-chip" *ngFor="let pii of selectedImage.pii_detected">
+                      <strong>{{ pii.type }}</strong>: {{ pii.value }}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <mat-divider *ngIf="selectedImage.pii_detected?.length > 0"></mat-divider>
+
+              <!-- Suggested Usage -->
+              <div class="result-section" *ngIf="selectedImage.suggested_usage">
+                <div class="result-label">
+                  <mat-icon>place</mat-icon> Usage suggere
+                </div>
+                <div class="result-value result-text">{{ selectedImage.suggested_usage }}</div>
+              </div>
+
+              <mat-divider *ngIf="selectedImage.suggested_usage"></mat-divider>
+
+              <!-- Metadata -->
+              <div class="result-section">
+                <div class="result-label">
+                  <mat-icon>info</mat-icon> Metadonnees
+                </div>
+                <div class="result-value meta-grid">
+                  <div><strong>Dimensions</strong> {{ selectedImage.width }} x {{ selectedImage.height }}</div>
+                  <div><strong>Page</strong> {{ selectedImage.page_number > 0 ? selectedImage.page_number : '-' }}</div>
+                  <div><strong>Categorie</strong> {{ selectedImage.image_category }}</div>
+                  <div *ngIf="selectedImage.occurrence_count > 1">
+                    <strong>Occurrences</strong> {{ selectedImage.occurrence_count }}
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
       </div>
     </div>
   `,
@@ -226,10 +354,20 @@ interface CategoryDef {
     .empty-state mat-icon { font-size: 64px; width: 64px; height: 64px; opacity: 0.4; }
     .empty-state p { margin-top: 12px; }
 
+    /* Main layout with optional detail panel */
+    .gallery-layout {
+      display: flex; gap: 16px;
+    }
+
     .image-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
       gap: 12px;
+      flex: 1;
+      transition: all 0.3s ease;
+    }
+    .image-grid.with-detail {
+      grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
     }
 
     .image-card {
@@ -237,11 +375,13 @@ interface CategoryDef {
       overflow: hidden; background: white;
       transition: border-color 0.2s, box-shadow 0.2s;
       position: relative;
+      cursor: pointer;
     }
     .image-card:hover { border-color: #90caf9; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
     .image-card.selected { border-color: #1976d2; box-shadow: 0 0 0 1px #1976d2; }
     .image-card.analyzed { border-color: #81c784; }
     .image-card.selected.analyzed { border-color: #1976d2; }
+    .image-card.detail-active { border-color: #ff9800; box-shadow: 0 0 0 2px #ff9800; }
 
     .image-select {
       position: absolute; top: 4px; left: 4px; z-index: 2;
@@ -261,6 +401,15 @@ interface CategoryDef {
       background: #1976d2; color: white; font-size: 11px; font-weight: 600;
       padding: 2px 6px; border-radius: 10px; line-height: 1.2;
     }
+    .analysis-badge {
+      position: absolute; top: 4px; right: 4px;
+      background: rgba(46, 125, 50, 0.85); color: white;
+      border-radius: 50%; width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      opacity: 0; transition: opacity 0.2s;
+    }
+    .analysis-badge mat-icon { font-size: 16px; width: 16px; height: 16px; }
+    .image-card:hover .analysis-badge { opacity: 1; }
 
     .image-info { padding: 8px; }
 
@@ -282,6 +431,107 @@ interface CategoryDef {
     .analysis-type { color: #666; font-style: italic; }
 
     @keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
+
+    /* ── Detail panel ── */
+    .detail-panel {
+      width: 420px;
+      min-width: 420px;
+      background: white;
+      border: 1px solid #e0e0e0;
+      border-radius: 12px;
+      box-shadow: -2px 0 12px rgba(0,0,0,0.08);
+      overflow-y: auto;
+      max-height: calc(100vh - 200px);
+      position: sticky;
+      top: 80px;
+    }
+
+    .detail-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 16px 20px 12px;
+      border-bottom: 1px solid #eee;
+      position: sticky; top: 0; background: white; z-index: 1;
+    }
+    .detail-header h3 {
+      margin: 0; font-size: 16px; color: #1B3A5C;
+      display: flex; align-items: center; gap: 8px;
+    }
+
+    .detail-content { padding: 0; }
+
+    .detail-image {
+      background: #f5f5f5;
+      display: flex; align-items: center; justify-content: center;
+      padding: 12px;
+      max-height: 280px;
+    }
+    .detail-image img {
+      max-width: 100%; max-height: 260px; object-fit: contain;
+      border-radius: 4px;
+    }
+
+    .no-analysis {
+      padding: 32px 20px; text-align: center; color: #999;
+    }
+    .no-analysis mat-icon {
+      font-size: 40px; width: 40px; height: 40px; opacity: 0.4;
+    }
+    .no-analysis p { margin-top: 8px; font-size: 14px; }
+
+    .analysis-results { padding: 0; }
+
+    .result-section { padding: 14px 20px; }
+
+    .result-label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; font-weight: 600; color: #1B3A5C;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      margin-bottom: 6px;
+    }
+    .result-label mat-icon {
+      font-size: 16px; width: 16px; height: 16px; color: #7a8fa6;
+    }
+
+    .result-value { font-size: 14px; color: #333; line-height: 1.5; }
+
+    .type-badge {
+      display: inline-block;
+      background: #e3f2fd; color: #1565c0;
+      padding: 4px 14px; border-radius: 16px;
+      font-weight: 600; font-size: 13px;
+    }
+
+    .result-text { white-space: pre-wrap; }
+
+    .info-list {
+      margin: 0; padding-left: 18px;
+    }
+    .info-list li { margin-bottom: 4px; }
+
+    .ocr-text {
+      background: #fafafa; border: 1px solid #eee;
+      border-radius: 6px; padding: 10px 12px;
+      font-family: 'Roboto Mono', monospace; font-size: 12px;
+      max-height: 200px; overflow-y: auto;
+      white-space: pre-wrap; word-break: break-word;
+    }
+
+    .pii-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .pii-chip {
+      background: #fff3e0; border: 1px solid #ffcc80;
+      border-radius: 6px; padding: 4px 10px;
+      font-size: 12px; color: #e65100;
+    }
+    .pii-chip strong { text-transform: uppercase; margin-right: 4px; }
+
+    .meta-grid {
+      display: grid; grid-template-columns: 1fr 1fr;
+      gap: 8px; font-size: 13px;
+    }
+    .meta-grid strong {
+      display: block; font-size: 11px; color: #999;
+      text-transform: uppercase; letter-spacing: 0.3px;
+    }
   `],
 })
 export class ImageGalleryComponent implements OnInit, OnDestroy {
@@ -293,6 +543,7 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
   analyzing = false;
   activeFilter = 'all';
   analysisStatus: ImageAnalysisStatus | null = null;
+  selectedImage: DocumentImage | null = null;
 
   private pollSub: Subscription | null = null;
 
@@ -341,6 +592,11 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
         this.images = imgs;
         this.applyFilter();
         this.loading = false;
+        // Update selected image if it was refreshed
+        if (this.selectedImage) {
+          const updated = imgs.find(i => i.id === this.selectedImage!.id);
+          this.selectedImage = updated || null;
+        }
       },
       error: () => {
         this.loading = false;
@@ -377,6 +633,20 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
     if (pages.length === 0) return '';
     if (pages.length <= 4) return 'p.' + pages.join(', ');
     return `p.${pages[0]}...${pages[pages.length - 1]}`;
+  }
+
+  // ── Detail panel ──
+
+  openDetail(img: DocumentImage): void {
+    if (this.selectedImage?.id === img.id) {
+      this.closeDetail();
+    } else {
+      this.selectedImage = img;
+    }
+  }
+
+  closeDetail(): void {
+    this.selectedImage = null;
   }
 
   // ── Filtering ──
@@ -444,7 +714,6 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
   // ── Analysis ──
 
   analyzeSelected(): void {
-    // Only send representative IDs (no need to analyze same image twice)
     const selectedIds = this.images.filter(i => i.selected).map(i => i.id);
     if (selectedIds.length === 0) return;
 
@@ -477,6 +746,11 @@ export class ImageGalleryComponent implements OnInit, OnDestroy {
             next: (imgs) => {
               this.images = imgs;
               this.applyFilter();
+              // Update detail panel if open
+              if (this.selectedImage) {
+                const updated = imgs.find(i => i.id === this.selectedImage!.id);
+                this.selectedImage = updated || null;
+              }
             },
           });
         }

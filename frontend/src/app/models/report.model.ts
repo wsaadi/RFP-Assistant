@@ -137,6 +137,13 @@ export interface DocumentImage {
   selected: boolean;
   analysis_status: string;
   image_type: string;
+  // Analysis results
+  key_information: string[];
+  pii_detected: { type: string; value: string }[];
+  ocr_text: string;
+  suggested_usage: string;
+  anonymized_description: string;
+  // Deduplication
   occurrence_count: number;
   occurrences: ImageOccurrence[];
   duplicate_ids: string[];

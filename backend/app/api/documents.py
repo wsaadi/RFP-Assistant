@@ -213,6 +213,11 @@ def _image_to_out(img: DocumentImage) -> DocumentImageOut:
         selected=bool(img.selected),
         analysis_status=img.analysis_status or "pending",
         image_type=img.image_type or "",
+        key_information=img.key_information or [],
+        pii_detected=img.pii_detected or [],
+        ocr_text=img.ocr_text or "",
+        suggested_usage=img.suggested_usage or "",
+        anonymized_description=img.anonymized_description or "",
     )
 
 
