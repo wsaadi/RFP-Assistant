@@ -2,6 +2,7 @@
 import io
 import os
 import re
+import shutil
 import uuid
 import asyncio
 import logging
@@ -3725,54 +3726,71 @@ async def remove_project_member(
 
 # ── Fill Excel endpoint ─────────────────────────────────────────────
 
-def _convert_xls_to_xlsx(file_path: str) -> str:
-    """Convert an old .xls file to .xlsx format and return the new file path.
-    Detection is based on file content (OLE2 magic bytes), not extension."""
-    # Check actual file content to detect old .xls (OLE2) format
+def _ensure_xlsx_path(file_path: str) -> str:
+    """Ensure the file at file_path can be opened by openpyxl.
+
+    Handles two cases:
+    1. True .xls file (OLE2 format): convert to .xlsx using xlrd
+    2. .xlsx content with .xls extension: create a copy with .xlsx extension
+       (openpyxl rejects files based on extension before reading content)
+
+    Returns a path to a valid .xlsx file.
+    """
     with open(file_path, "rb") as f:
         magic = f.read(4)
-    if magic != b'\xd0\xcf\x11\xe0':
-        # Not an OLE2/.xls file — already xlsx or other format, return as-is
-        return file_path
 
-    import xlrd
-    from openpyxl import Workbook
+    has_xls_extension = file_path.lower().endswith('.xls') and not file_path.lower().endswith('.xlsx')
 
-    xls_book = xlrd.open_workbook(file_path)
-    wb = Workbook()
-    wb.remove(wb.active)
+    if magic == b'\xd0\xcf\x11\xe0':
+        # True OLE2/.xls file — convert via xlrd
+        import xlrd
+        from openpyxl import Workbook
 
-    for sheet_index in range(xls_book.nsheets):
-        xls_sheet = xls_book.sheet_by_index(sheet_index)
-        ws = wb.create_sheet(title=xls_sheet.name)
-        for row_idx in range(xls_sheet.nrows):
-            for col_idx in range(xls_sheet.ncols):
-                cell_value = xls_sheet.cell_value(row_idx, col_idx)
-                cell_type = xls_sheet.cell_type(row_idx, col_idx)
-                if cell_type == xlrd.XL_CELL_DATE:
-                    try:
-                        date_tuple = xlrd.xldate_as_tuple(cell_value, xls_book.datemode)
-                        from datetime import datetime
-                        cell_value = datetime(*date_tuple)
-                    except Exception:
-                        pass
-                elif cell_type == xlrd.XL_CELL_BOOLEAN:
-                    cell_value = bool(cell_value)
-                elif cell_type == xlrd.XL_CELL_EMPTY:
-                    continue
-                ws.cell(row=row_idx + 1, column=col_idx + 1, value=cell_value)
+        xls_book = xlrd.open_workbook(file_path)
+        wb = Workbook()
+        wb.remove(wb.active)
 
-    xlsx_path = file_path + "x"  # .xls -> .xlsx
-    wb.save(xlsx_path)
-    wb.close()
-    return xlsx_path
+        for sheet_index in range(xls_book.nsheets):
+            xls_sheet = xls_book.sheet_by_index(sheet_index)
+            ws = wb.create_sheet(title=xls_sheet.name)
+            for row_idx in range(xls_sheet.nrows):
+                for col_idx in range(xls_sheet.ncols):
+                    cell_value = xls_sheet.cell_value(row_idx, col_idx)
+                    cell_type = xls_sheet.cell_type(row_idx, col_idx)
+                    if cell_type == xlrd.XL_CELL_DATE:
+                        try:
+                            date_tuple = xlrd.xldate_as_tuple(cell_value, xls_book.datemode)
+                            from datetime import datetime
+                            cell_value = datetime(*date_tuple)
+                        except Exception:
+                            pass
+                    elif cell_type == xlrd.XL_CELL_BOOLEAN:
+                        cell_value = bool(cell_value)
+                    elif cell_type == xlrd.XL_CELL_EMPTY:
+                        continue
+                    ws.cell(row=row_idx + 1, column=col_idx + 1, value=cell_value)
+
+        xlsx_path = file_path + "x"
+        wb.save(xlsx_path)
+        wb.close()
+        return xlsx_path
+
+    if has_xls_extension:
+        # File has .xls extension but is actually xlsx content (ZIP/PK format).
+        # openpyxl validates the extension, so copy/link with .xlsx extension.
+        xlsx_path = file_path + "x"
+        if not os.path.exists(xlsx_path):
+            shutil.copy2(file_path, xlsx_path)
+        return xlsx_path
+
+    return file_path
 
 
 def _read_excel_structure(file_path: str) -> str:
     """Read an Excel file and return a textual representation of its structure with cell references.
     Skips fully empty rows and only marks empty cells adjacent to filled cells to reduce noise."""
     from openpyxl import load_workbook
-    file_path = _convert_xls_to_xlsx(file_path)
+    file_path = _ensure_xlsx_path(file_path)
     wb = load_workbook(file_path, data_only=True)
     parts = []
     for sheet_name in wb.sheetnames:
@@ -3800,7 +3818,7 @@ def _fill_excel_with_data(file_path: str, fill_data: list) -> bytes:
     """Open an Excel file, fill cells from AI-generated data, return modified bytes."""
     from openpyxl import load_workbook
     import re as _re
-    file_path = _convert_xls_to_xlsx(file_path)
+    file_path = _ensure_xlsx_path(file_path)
     wb = load_workbook(file_path)
 
     for entry in fill_data:
