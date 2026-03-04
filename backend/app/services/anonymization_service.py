@@ -34,20 +34,15 @@ from ..models.project import AnonymizationMapping, EntityType
 
 logger = logging.getLogger(__name__)
 
-# ── Ollama configuration ──
-# Ollama runs on the DGX Spark — Docker containers reach it via
-# host.docker.internal (Mac host forwards port 11434 to DGX via socat).
+# ── Default Ollama configuration (used when no AIConfig is loaded) ──
 _OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 _OLLAMA_MODEL = os.environ.get("OLLAMA_NER_MODEL", "qwen2.5:14b")
 _OLLAMA_TIMEOUT = int(os.environ.get("OLLAMA_NER_TIMEOUT", "120"))
-# Maximum concurrent requests to Ollama (avoid overloading)
 _OLLAMA_CONCURRENCY = int(os.environ.get("OLLAMA_NER_CONCURRENCY", "2"))
-# Number of chunks grouped into a single LLM call.
-# 4 chunks × ~300 words = ~1200 words ≈ 1600 tokens — well within model capacity.
-# Reduces total LLM calls by ~75% since the system prompt is only sent once per group.
 _CHUNKS_PER_GROUP = int(os.environ.get("OLLAMA_NER_CHUNKS_PER_GROUP", "4"))
-# Separator between grouped chunks in the prompt
 _CHUNK_SEPARATOR = "\n\n---\n\n"
+
+from .llm_provider import ProviderConfig, call_llm_chat, check_provider_available
 
 # ── NER Prompt ──
 # This prompt is the core of the anonymization quality. It tells the LLM
@@ -339,88 +334,111 @@ class AnonymizationService:
     with regex fallback for deterministic patterns (emails).
     """
 
-    _ollama_available: Optional[bool] = None
+    _provider_available: Optional[bool] = None
     _http_client: Optional[httpx.AsyncClient] = None
+    # Active provider configuration (set via configure(), defaults to Ollama)
+    _provider_config: Optional[ProviderConfig] = None
     # Track the *last* NER run outcome so callers can report it to the user.
-    # None = not run yet, True = last run produced entities, False = last run
-    # returned nothing (Ollama might be up but model returned empty).
     _last_ner_produced_entities: Optional[bool] = None
-    # Human-readable reason when NER fails/returns nothing
     _last_ner_failure_reason: Optional[str] = None
 
     @classmethod
+    def configure(cls, provider_config: ProviderConfig):
+        """Set the NER provider configuration for subsequent calls.
+
+        Called by Celery tasks after loading AIConfig from the DB.
+        """
+        cls._provider_config = provider_config
+        cls._provider_available = None  # Force re-check
+        cls._http_client = None  # Reset client for new provider
+        logger.info(
+            "[NER] Configured provider=%s model=%s",
+            provider_config.provider, provider_config.model,
+        )
+
+    @classmethod
+    def _get_provider_config(cls) -> ProviderConfig:
+        """Get current provider config, falling back to env-var defaults."""
+        if cls._provider_config is not None:
+            return cls._provider_config
+        return ProviderConfig(
+            provider="ollama",
+            base_url=_OLLAMA_BASE_URL,
+            model=_OLLAMA_MODEL,
+            timeout=_OLLAMA_TIMEOUT,
+            concurrency=_OLLAMA_CONCURRENCY,
+        )
+
+    @classmethod
     async def _get_http_client(cls) -> httpx.AsyncClient:
-        """Get or create a reusable async HTTP client for Ollama."""
+        """Get or create a reusable async HTTP client."""
         if cls._http_client is None or cls._http_client.is_closed:
-            cls._http_client = httpx.AsyncClient(
-                base_url=_OLLAMA_BASE_URL,
-                timeout=httpx.Timeout(_OLLAMA_TIMEOUT, connect=10.0),
-            )
+            config = cls._get_provider_config()
+            if config.is_openai_compatible:
+                cls._http_client = httpx.AsyncClient(
+                    timeout=httpx.Timeout(config.timeout, connect=10.0),
+                )
+            else:
+                cls._http_client = httpx.AsyncClient(
+                    base_url=config.base_url,
+                    timeout=httpx.Timeout(config.timeout, connect=10.0),
+                )
         return cls._http_client
 
     @classmethod
-    async def _check_ollama(cls) -> bool:
-        """Check if Ollama is reachable and the model is available.
+    async def _check_provider(cls) -> bool:
+        """Check if the NER provider is reachable and the model is available.
 
-        Only caches *success* permanently.  Failures are retried each time
-        so that a temporary network issue doesn't permanently disable LLM NER
-        for the lifetime of the process.
+        Only caches *success* permanently. Failures are retried each time.
         """
-        if cls._ollama_available is True:
+        if cls._provider_available is True:
             return True
 
+        config = cls._get_provider_config()
+
         try:
-            client = await cls._get_http_client()
-            resp = await client.get("/api/tags", timeout=10.0)
-            if resp.status_code == 200:
-                models = resp.json().get("models", [])
-                model_names = [m.get("name", "") for m in models]
-                # Check if our model (or a variant) is available
-                base_model = _OLLAMA_MODEL.split(":")[0]
-                available = any(base_model in name for name in model_names)
-                if available:
-                    logger.info("Ollama available at %s with model %s", _OLLAMA_BASE_URL, _OLLAMA_MODEL)
-                    cls._ollama_available = True
+            result = await check_provider_available(config)
+            if result.get("reachable") and result.get("model_available"):
+                logger.info(
+                    "NER provider available: %s with model %s",
+                    config.provider, config.model,
+                )
+                cls._provider_available = True
+                cls._last_ner_failure_reason = None
+            elif result.get("reachable"):
+                reason = (
+                    f"Fournisseur {config.provider} joignable mais le modèle "
+                    f"'{config.model}' n'est pas disponible."
+                )
+                logger.warning("[NER] %s", reason)
+                cls._last_ner_failure_reason = reason
+                # For API providers, model listing may not match exactly — try anyway
+                if config.is_openai_compatible:
+                    cls._provider_available = True
                     cls._last_ner_failure_reason = None
-                else:
-                    reason = (
-                        f"Ollama joignable mais le modèle '{_OLLAMA_MODEL}' n'est pas chargé. "
-                        f"Modèles disponibles: {model_names}. "
-                        f"Lancez 'ollama pull {_OLLAMA_MODEL}' sur le serveur Ollama."
-                    )
-                    logger.warning(
-                        "Ollama reachable but model '%s' not found. Available: %s. "
-                        "Run 'ollama pull %s' on the host to download it.",
-                        _OLLAMA_MODEL, model_names, _OLLAMA_MODEL,
-                    )
-                    cls._last_ner_failure_reason = reason
-                    # Don't cache — model might be pulled later
             else:
-                reason = f"Ollama a retourné le status HTTP {resp.status_code}"
-                logger.warning("Ollama returned status %d", resp.status_code)
+                reason = result.get("failure_reason", "Fournisseur non joignable")
+                logger.warning("[NER] Provider unavailable: %s", reason)
                 cls._last_ner_failure_reason = reason
         except Exception as e:
-            reason = (
-                f"Ollama non joignable à {_OLLAMA_BASE_URL}: {e}. "
-                f"Vérifiez que le serveur Ollama est démarré et accessible depuis les containers Docker."
-            )
-            logger.warning(
-                "Ollama not reachable at %s: %s. "
-                "Falling back to regex-only anonymization for this batch. "
-                "Will retry on next request.",
-                _OLLAMA_BASE_URL, e,
-            )
+            reason = f"Erreur de vérification du fournisseur NER: {e}"
+            logger.warning("[NER] %s", reason)
             cls._last_ner_failure_reason = reason
 
-        return cls._ollama_available is True
+        return cls._provider_available is True
+
+    # Keep backward compat alias
+    _check_ollama = _check_provider
 
     @classmethod
     def get_ner_diagnostic(cls) -> dict:
         """Return diagnostic info about NER availability for user-facing endpoints."""
+        config = cls._get_provider_config()
         return {
-            "ollama_reachable": cls._ollama_available is True,
-            "ollama_url": _OLLAMA_BASE_URL,
-            "ollama_model": _OLLAMA_MODEL,
+            "provider": config.provider,
+            "ollama_reachable": cls._provider_available is True,
+            "ollama_url": config.base_url,
+            "ollama_model": config.model,
             "last_ner_produced_entities": cls._last_ner_produced_entities,
             "failure_reason": cls._last_ner_failure_reason,
         }
@@ -428,10 +446,9 @@ class AnonymizationService:
     @classmethod
     def is_ner_available(cls) -> bool:
         """Check if NER is available (sync wrapper for backward compatibility)."""
-        # Optimistic: if we haven't checked yet, assume it might be available
-        if cls._ollama_available is None:
+        if cls._provider_available is None:
             return True
-        return cls._ollama_available
+        return cls._provider_available
 
     # ── Regex for extracting "interesting" words (potential proper nouns) ──
     _CAPITALIZED_WORD_RE = re.compile(r'\b[A-ZÀ-ÖÙ-Ý][a-zà-öù-ÿ]{2,}(?:\s+[A-ZÀ-ÖÙ-Ý][a-zà-öù-ÿ]{2,})*\b')
@@ -510,49 +527,22 @@ class AnonymizationService:
                 parts.append(f"--- BLOC {i} ---\n{text}")
             user_content = "Textes à analyser :\n\n" + _CHUNK_SEPARATOR.join(parts)
 
-        client = await cls._get_http_client()
+        config = cls._get_provider_config()
 
-        # NOTE: Do NOT use "format": "json" — it forces some models (Qwen,
-        # Gemma) to wrap output in a root JSON *object* (e.g. {"entities":
-        # [...]}) instead of the plain array the prompt asks for. The prompt
-        # already instructs the model to reply with a JSON array.
-        _NER_MAX_RETRIES = 2
-        payload = {
-            "model": _OLLAMA_MODEL,
-            "messages": [
-                {"role": "system", "content": _NER_SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            "stream": False,
-            "options": {
-                "temperature": 0.0,
-                "num_predict": 4096,
-            },
-        }
+        messages = [
+            {"role": "system", "content": _NER_SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ]
 
         try:
-            # Retry on transient network errors (Ollama model swap / disconnect)
-            raw_content = None
-            for attempt in range(1 + _NER_MAX_RETRIES):
-                try:
-                    resp = await client.post("/api/chat", json=payload)
-                    resp.raise_for_status()
-                    result = resp.json()
-                    raw_content = result.get("message", {}).get("content", "[]")
-                    break
-                except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as net_err:
-                    if attempt < _NER_MAX_RETRIES:
-                        wait = 2 ** (attempt + 1)
-                        logger.warning(
-                            "[NER-LLM] Attempt %d/%d failed (%s), retrying in %ds",
-                            attempt + 1, 1 + _NER_MAX_RETRIES,
-                            type(net_err).__name__, wait,
-                        )
-                        await asyncio.sleep(wait)
-                    else:
-                        raise
+            client = await cls._get_http_client()
+            raw_content = await call_llm_chat(
+                config, messages,
+                temperature=0.0, max_tokens=4096,
+                client=client,
+            )
 
-            if raw_content is None:
+            if not raw_content:
                 return results
 
             logger.info(
@@ -569,7 +559,7 @@ class AnonymizationService:
                     len(raw_content), raw_content[:1000],
                 )
                 cls._last_ner_failure_reason = (
-                    f"Le modèle Ollama a répondu mais sans entités exploitables. "
+                    f"Le modèle {config.provider}/{config.model} a répondu mais sans entités exploitables. "
                     f"Réponse brute ({len(raw_content)} chars): {raw_content[:200]}"
                 )
                 return results
@@ -633,13 +623,13 @@ class AnonymizationService:
             return results
 
         except httpx.TimeoutException:
-            reason = f"Ollama NER timeout après {_OLLAMA_TIMEOUT}s sur {len(texts)} texte(s)"
+            reason = f"NER timeout après {config.timeout}s sur {len(texts)} texte(s) ({config.provider}/{config.model})"
             logger.warning("[NER-LLM] %s", reason)
             cls._last_ner_failure_reason = reason
             cls._last_ner_produced_entities = False
             return results
         except httpx.HTTPStatusError as e:
-            reason = f"Ollama HTTP error: {e.response.status_code} — {e.response.text[:300]}"
+            reason = f"NER HTTP error ({config.provider}): {e.response.status_code} — {e.response.text[:300]}"
             logger.warning("[NER-LLM] %s", reason)
             cls._last_ner_failure_reason = reason
             cls._last_ner_produced_entities = False
@@ -672,9 +662,9 @@ class AnonymizationService:
         results: List[List[Tuple[str, str, int, int]]] = [[] for _ in texts]
         known = known_originals or set()
 
-        ollama_ok = await cls._check_ollama()
+        provider_ok = await cls._check_provider()
 
-        if ollama_ok:
+        if provider_ok:
             # ── Step 1: Identify which chunks need LLM analysis ──
             needs_llm: List[int] = []  # indices of chunks that need LLM
             skipped_count = 0
@@ -703,7 +693,7 @@ class AnonymizationService:
             )
 
             # ── Step 3: Process groups concurrently ──
-            semaphore = asyncio.Semaphore(_OLLAMA_CONCURRENCY)
+            semaphore = asyncio.Semaphore(cls._get_provider_config().concurrency)
             done_groups = 0
 
             async def _process_group(group_indices: List[int]):
@@ -743,11 +733,12 @@ class AnonymizationService:
                 )
                 cls._last_ner_produced_entities = False
         else:
+            config = cls._get_provider_config()
             logger.warning(
-                "[batch_detect] Ollama unavailable — using regex-only fallback. "
-                "NER entities (company names, person names, etc.) will NOT be detected. "
+                "[batch_detect] NER provider %s unavailable — using regex-only fallback. "
+                "NER entities (person names, etc.) will NOT be detected. "
                 "Reason: %s",
-                cls._last_ner_failure_reason,
+                config.provider, cls._last_ner_failure_reason,
             )
             cls._last_ner_produced_entities = False
             if progress_callback:
@@ -774,8 +765,8 @@ class AnonymizationService:
         """
         entities = []
 
-        ollama_ok = await cls._check_ollama()
-        if ollama_ok:
+        provider_ok = await cls._check_provider()
+        if provider_ok:
             try:
                 entities.extend(await cls._detect_entities_llm(text))
             except Exception as e:

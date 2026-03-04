@@ -58,6 +58,7 @@ async def _run_chapter_generation(
     from ..services.ai_service import MistralAIService, create_ai_service
     from ..services.vector_service import VectorService
     from ..services.anonymization_service import AnonymizationService
+    from ..services.llm_provider import ProviderConfig
 
     cid = str(chapter_id)
 
@@ -76,6 +77,20 @@ async def _run_chapter_generation(
             )
             config = config_result.scalar_one_or_none()
             ai_service = create_ai_service(config)
+
+            # Configure NER provider from AIConfig
+            if config:
+                _n_key = ""
+                if config.ner_provider == "mistral":
+                    _n_key = config.mistral_api_key_encrypted or ""
+                elif config.ner_provider == "scaleway":
+                    _n_key = config.scaleway_api_key_encrypted or ""
+                AnonymizationService.configure(ProviderConfig(
+                    provider=config.ner_provider or "ollama",
+                    base_url=config.ollama_base_url if (config.ner_provider or "ollama") == "ollama" else "",
+                    api_key=_n_key,
+                    model=config.ner_model or "qwen2.5:14b",
+                ))
 
             result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
             chapter = result.scalar_one()

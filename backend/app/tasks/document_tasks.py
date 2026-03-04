@@ -83,6 +83,8 @@ async def _process_document_async(document_id: str, project_id: str):
     from ..services.vector_service import VectorService
     from ..services.anonymization_service import AnonymizationService
     from ..services.progress_service import ProgressTracker
+    from ..models.project import AIConfig, RFPProject
+    from ..services.llm_provider import ProviderConfig
 
     task_engine, TaskSession = create_task_engine()
     t_start = time.monotonic()
@@ -220,6 +222,33 @@ async def _process_document_async(document_id: str, project_id: str):
             "[doc:%s] Extraction done: %d chars, %d chunks, %d images",
             document_id, len(text), len(chunks), len(images_data),
         )
+
+        # ── Load NER provider config from AIConfig ──
+        try:
+            async with TaskSession() as db:
+                proj_result = await db.execute(
+                    select(RFPProject).where(RFPProject.id == uuid.UUID(project_id))
+                )
+                project = proj_result.scalar_one_or_none()
+                if project:
+                    ai_cfg_result = await db.execute(
+                        select(AIConfig).where(AIConfig.workspace_id == project.workspace_id)
+                    )
+                    ai_config = ai_cfg_result.scalar_one_or_none()
+                    if ai_config:
+                        _api_key = ""
+                        if ai_config.ner_provider == "mistral":
+                            _api_key = ai_config.mistral_api_key_encrypted or ""
+                        elif ai_config.ner_provider == "scaleway":
+                            _api_key = ai_config.scaleway_api_key_encrypted or ""
+                        AnonymizationService.configure(ProviderConfig(
+                            provider=ai_config.ner_provider or "ollama",
+                            base_url=ai_config.ollama_base_url if ai_config.ner_provider == "ollama" else "",
+                            api_key=_api_key,
+                            model=ai_config.ner_model or "qwen2.5:14b",
+                        ))
+        except Exception as cfg_err:
+            logger.warning("[doc:%s] Failed to load NER config — using defaults: %s", document_id, cfg_err)
 
         # ── Phase 3a: Anonymize chunks ──
         # If anonymization fails, we fall back to saving raw text as-is
@@ -513,12 +542,51 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
     from ..services.image_analysis_service import ImageAnalysisService
     from ..services.anonymization_service import AnonymizationService
     from ..services.progress_service import set_progress
+    from ..models.project import AIConfig, RFPProject
+    from ..services.llm_provider import ProviderConfig
 
     # Reset service state so the new event loop gets fresh asyncio primitives.
     ImageAnalysisService._reset()
 
     task_engine, TaskSession = create_task_engine()
     try:
+        # ── Load vision + NER provider config from AIConfig ──
+        async with TaskSession() as db:
+            proj_result = await db.execute(
+                select(RFPProject).where(RFPProject.id == uuid.UUID(project_id))
+            )
+            project = proj_result.scalar_one_or_none()
+            if project:
+                ai_cfg_result = await db.execute(
+                    select(AIConfig).where(AIConfig.workspace_id == project.workspace_id)
+                )
+                ai_config = ai_cfg_result.scalar_one_or_none()
+                if ai_config:
+                    # Vision provider
+                    _v_key = ""
+                    if ai_config.vision_provider == "mistral":
+                        _v_key = ai_config.mistral_api_key_encrypted or ""
+                    elif ai_config.vision_provider == "scaleway":
+                        _v_key = ai_config.scaleway_api_key_encrypted or ""
+                    ImageAnalysisService.configure(ProviderConfig(
+                        provider=ai_config.vision_provider or "ollama",
+                        base_url=ai_config.ollama_base_url if ai_config.vision_provider == "ollama" else "",
+                        api_key=_v_key,
+                        model=ai_config.vision_model or "llama3.2-vision:11b",
+                    ))
+                    # NER provider (used for OCR anonymization)
+                    _n_key = ""
+                    if ai_config.ner_provider == "mistral":
+                        _n_key = ai_config.mistral_api_key_encrypted or ""
+                    elif ai_config.ner_provider == "scaleway":
+                        _n_key = ai_config.scaleway_api_key_encrypted or ""
+                    AnonymizationService.configure(ProviderConfig(
+                        provider=ai_config.ner_provider or "ollama",
+                        base_url=ai_config.ollama_base_url if ai_config.ner_provider == "ollama" else "",
+                        api_key=_n_key,
+                        model=ai_config.ner_model or "qwen2.5:14b",
+                    ))
+
         # Load images from DB
         async with TaskSession() as db:
             result = await db.execute(
