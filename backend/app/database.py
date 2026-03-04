@@ -1,5 +1,6 @@
 """Database configuration and session management."""
 import logging
+from contextlib import asynccontextmanager
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
@@ -67,6 +68,25 @@ def create_task_engine():
     )
 
     return task_engine, task_session_factory
+
+
+@asynccontextmanager
+async def task_session():
+    """Async context manager for Celery task DB sessions.
+
+    Creates a short-lived engine + session that is safe to use inside
+    ``asyncio.run()`` (i.e. a fresh event loop).  The engine is disposed
+    automatically on exit::
+
+        async with task_session() as db:
+            result = await db.execute(...)
+    """
+    task_engine, session_factory = create_task_engine()
+    try:
+        async with session_factory() as db:
+            yield db
+    finally:
+        await task_engine.dispose()
 
 
 async def get_db():
