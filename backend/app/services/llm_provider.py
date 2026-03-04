@@ -44,7 +44,7 @@ class ProviderConfig:
     ):
         self.provider = provider
         self.base_url = base_url or PROVIDER_DEFAULTS.get(provider, {}).get("base_url", "")
-        self.api_key = api_key
+        self.api_key = api_key.strip() if api_key else ""
         self.model = model
         self.timeout = timeout
         self.concurrency = concurrency
@@ -199,6 +199,12 @@ async def _call_openai_compatible(
     }
 
     resp = await client.post(url, json=payload, headers=headers)
+    if resp.status_code in (401, 403):
+        key_hint = f"{config.api_key[:4]}...{config.api_key[-4:]}" if len(config.api_key) > 8 else "(empty/short)"
+        logger.error(
+            "Auth failed (%d) for %s provider=%s model=%s key=%s",
+            resp.status_code, url, config.provider, config.model, key_hint,
+        )
     resp.raise_for_status()
     data = resp.json()
 
