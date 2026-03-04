@@ -211,10 +211,10 @@ import { AIConfigUpdate } from '../../models/report.model';
           <mat-form-field appearance="outline" class="full-width" *ngIf="config.ner_provider === 'scaleway'">
             <mat-label>Modèle NER (Scaleway)</mat-label>
             <mat-select [(ngModel)]="config.ner_model">
-              <mat-option value="mistral-large-latest">Mistral Large (recommandé)</mat-option>
-              <mat-option value="mistral-small-latest">Mistral Small</mat-option>
+              <mat-option value="mistral-large-3-675b-instruct-2512">Mistral Large 3 675B (recommandé)</mat-option>
+              <mat-option value="mistral-small-3.2-24b-instruct-2506">Mistral Small 3.2 24B</mat-option>
+              <mat-option value="mistral-small-3.1-24b-instruct-2503">Mistral Small 3.1 24B</mat-option>
               <mat-option value="llama-3.3-70b-instruct">Llama 3.3 70B Instruct</mat-option>
-              <mat-option value="llama-3.1-8b-instruct">Llama 3.1 8B Instruct</mat-option>
               <mat-option value="qwen2.5-coder-32b-instruct">Qwen 2.5 Coder 32B</mat-option>
             </mat-select>
           </mat-form-field>
@@ -296,8 +296,9 @@ import { AIConfigUpdate } from '../../models/report.model';
           <mat-form-field appearance="outline" class="full-width" *ngIf="config.vision_provider === 'scaleway'">
             <mat-label>Modèle Vision (Scaleway)</mat-label>
             <mat-select [(ngModel)]="config.vision_model">
-              <mat-option value="pixtral-12b-2409">Pixtral 12B (recommandé)</mat-option>
-              <mat-option value="llama-3.2-11b-vision-instruct">Llama 3.2 11B Vision</mat-option>
+              <mat-option value="mistral-small-3.2-24b-instruct-2506">Mistral Small 3.2 24B Vision (recommandé)</mat-option>
+              <mat-option value="mistral-small-3.1-24b-instruct-2503">Mistral Small 3.1 24B Vision</mat-option>
+              <mat-option value="pixtral-12b-2409">Pixtral 12B (legacy)</mat-option>
             </mat-select>
           </mat-form-field>
         </div>
