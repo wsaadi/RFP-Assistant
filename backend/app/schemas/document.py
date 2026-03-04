@@ -50,6 +50,12 @@ class DocumentImageOut(BaseModel):
     selected: bool = False
     analysis_status: str = "pending"
     image_type: str = ""
+    # Analysis results
+    key_information: list = []
+    pii_detected: list = []
+    ocr_text: str = ""
+    suggested_usage: str = ""
+    anonymized_description: str = ""
     # Deduplication fields
     occurrence_count: int = 1
     occurrences: List[ImageOccurrence] = []
