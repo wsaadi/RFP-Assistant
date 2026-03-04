@@ -1,37 +1,40 @@
-"""Image analysis service using a local Vision LLM (Llama 3.2 Vision via Ollama) on DGX Spark.
+"""Image analysis service using a configurable Vision LLM provider.
 
-Architecture (privacy-by-design):
-1. Images extracted from documents are sent to a LOCAL vision model (never to Mistral)
+Supports three providers:
+- **ollama** (default): Local Ollama server — images stay on-premises
+- **mistral**: Mistral AI cloud API (Pixtral vision models)
+- **scaleway**: Scaleway Generative APIs (EU-hosted, OpenAI-compatible)
+
+Architecture (privacy-by-design when using Ollama):
+1. Images extracted from documents are sent to the configured vision model
 2. The vision model generates structured metadata: description, type, key info, PII detection
 3. OCR text extracted from images is anonymized using the existing anonymization pipeline
-4. Mistral receives ONLY the anonymized metadata — never the original images
-5. Original images are inserted into the final Word document based on Mistral's placement markers
-
-This ensures that sensitive visual content (names, emails, screenshots with PII) never
-leaves the local infrastructure while still allowing intelligent image placement.
+4. The generation model receives ONLY the anonymized metadata — never the original images
+5. Original images are inserted into the final Word document based on placement markers
 """
 import asyncio
 import base64
 import json
 import logging
 import os
+import re
 import uuid
 from typing import Callable, Dict, List, Optional
 
 import httpx
 
 from ..config import settings
+from .llm_provider import ProviderConfig, call_llm_vision, check_provider_available
 
 logger = logging.getLogger(__name__)
 
-# ── Ollama Vision configuration ──
+# ── Default configuration (from env vars, used when no AIConfig is loaded) ──
 _OLLAMA_BASE_URL = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
 _VISION_MODEL = os.environ.get("OLLAMA_VISION_MODEL", settings.ollama_vision_model)
 _VISION_TIMEOUT = int(os.environ.get("OLLAMA_VISION_TIMEOUT", str(settings.ollama_vision_timeout)))
 _VISION_CONCURRENCY = int(os.environ.get("OLLAMA_VISION_CONCURRENCY", str(settings.ollama_vision_concurrency)))
 
 # ── Vision analysis prompts ──
-# Llama 3.2 Vision supports system messages and handles French natively.
 _VISION_SYSTEM_PROMPT = """\
 Tu es un analyseur d'images de documents professionnels (appels d'offres, mémoires techniques).
 Tu réponds UNIQUEMENT avec un objet JSON valide, sans texte avant ni après."""
@@ -57,29 +60,51 @@ Règles :
 
 
 class ImageAnalysisService:
-    """Analyze document images using a local Vision LLM via Ollama.
-
-    The vision model runs on the DGX Spark, ensuring images never leave
-    the local infrastructure. Only structured metadata is produced and
-    later shared with external AI models.
-    """
+    """Analyze document images using a configurable Vision LLM provider."""
 
     _semaphore: Optional[asyncio.Semaphore] = None
     _http_client: Optional[httpx.AsyncClient] = None
+    _provider_config: Optional[ProviderConfig] = None
+
+    @classmethod
+    def configure(cls, provider_config: ProviderConfig):
+        """Set the vision provider configuration for subsequent calls."""
+        cls._provider_config = provider_config
+        cls._http_client = None  # Reset client for new provider
+        cls._semaphore = None  # Reset semaphore for new concurrency
+        logger.info(
+            "[Vision] Configured provider=%s model=%s",
+            provider_config.provider, provider_config.model,
+        )
+
+    @classmethod
+    def _get_provider_config(cls) -> ProviderConfig:
+        """Get current provider config, falling back to env-var defaults."""
+        if cls._provider_config is not None:
+            return cls._provider_config
+        return ProviderConfig(
+            provider="ollama",
+            base_url=_OLLAMA_BASE_URL,
+            model=_VISION_MODEL,
+            timeout=_VISION_TIMEOUT,
+            concurrency=_VISION_CONCURRENCY,
+        )
 
     @classmethod
     def _get_semaphore(cls) -> asyncio.Semaphore:
         """Lazy-init semaphore (must be created inside an event loop)."""
         if cls._semaphore is None:
-            cls._semaphore = asyncio.Semaphore(_VISION_CONCURRENCY)
+            config = cls._get_provider_config()
+            cls._semaphore = asyncio.Semaphore(config.concurrency)
         return cls._semaphore
 
     @classmethod
     def _get_http_client(cls) -> httpx.AsyncClient:
-        """Get or create a reusable async HTTP client for Ollama vision."""
+        """Get or create a reusable async HTTP client."""
         if cls._http_client is None or cls._http_client.is_closed:
+            config = cls._get_provider_config()
             cls._http_client = httpx.AsyncClient(
-                timeout=httpx.Timeout(_VISION_TIMEOUT, connect=30),
+                timeout=httpx.Timeout(config.timeout, connect=30),
             )
         return cls._http_client
 
@@ -111,21 +136,11 @@ class ImageAnalysisService:
         page_context: str = "",
         section_title: str = "",
     ) -> Dict:
-        """Analyze a single image using the local vision model.
-
-        Args:
-            file_path: Path to the image file on disk.
-            page_context: Surrounding text from the document page.
-            section_title: Section/heading the image appears under.
-
-        Returns:
-            Structured analysis dict with description, type, PII, etc.
-        """
+        """Analyze a single image using the configured vision model."""
         image_b64 = cls._image_to_base64(file_path)
         if not image_b64:
             return cls._empty_analysis("Impossible de lire le fichier image")
 
-        # Build the user prompt with context appended
         user_prompt = _VISION_USER_PROMPT
         if section_title or page_context:
             ctx_parts = []
@@ -135,11 +150,10 @@ class ImageAnalysisService:
                 ctx_parts.append(f"Texte environnant : {page_context[:500]}")
             user_prompt += "\n\nContexte :\n" + "\n".join(ctx_parts)
 
-        # Call Ollama vision API with concurrency control
         sem = cls._get_semaphore()
         async with sem:
             try:
-                result = await cls._call_ollama_vision(image_b64, user_prompt)
+                result = await cls._call_vision(image_b64, user_prompt)
                 return result
             except Exception as e:
                 logger.error("Vision analysis failed for %s: %s", file_path, e)
@@ -151,15 +165,7 @@ class ImageAnalysisService:
         images_data: List[Dict],
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[Dict]:
-        """Analyze multiple images concurrently with progress tracking.
-
-        Args:
-            images_data: List of dicts with keys: file_path, context, section_title
-            progress_callback: Optional callback(done, total) for progress reporting.
-
-        Returns:
-            List of analysis results in the same order as input.
-        """
+        """Analyze multiple images concurrently with progress tracking."""
         total = len(images_data)
         if total == 0:
             return []
@@ -180,14 +186,12 @@ class ImageAnalysisService:
             if progress_callback:
                 progress_callback(done_count, total)
 
-        # Launch all analyses concurrently (semaphore controls parallelism)
         tasks = [
             asyncio.create_task(_analyze_one(i, img))
             for i, img in enumerate(images_data)
         ]
         await asyncio.gather(*tasks, return_exceptions=True)
 
-        # Replace any None results (from exceptions) with empty analysis
         for i in range(total):
             if results[i] is None:
                 results[i] = cls._empty_analysis("Analyse échouée")
@@ -197,16 +201,24 @@ class ImageAnalysisService:
         return results
 
     @classmethod
-    async def _call_ollama_vision(cls, image_b64: str, user_prompt: str) -> Dict:
-        """Call the Ollama vision model API with an image.
+    async def _call_vision(cls, image_b64: str, user_prompt: str) -> Dict:
+        """Call the vision model with an image.
 
-        Ollama's vision API accepts images as base64-encoded strings in the
-        ``images`` field of the message payload.
-
-        Llama 3.2 Vision supports system messages natively. If the first
-        attempt returns no usable JSON, we retry once with a simpler prompt.
+        Uses the llm_provider abstraction to handle Ollama / Mistral / Scaleway.
+        If the first attempt returns no usable JSON, retries with a simpler prompt.
         """
-        result = await cls._call_ollama_once(image_b64, user_prompt, use_system=True)
+        config = cls._get_provider_config()
+        client = cls._get_http_client()
+
+        raw_content = await call_llm_vision(
+            config, image_b64,
+            system_prompt=_VISION_SYSTEM_PROMPT,
+            user_prompt=user_prompt,
+            temperature=0.1, max_tokens=2048,
+            client=client, use_system=True,
+        )
+        result = cls._parse_vision_response(raw_content)
+
         if result.get("type") != "autre" or result.get("description", "").startswith("Type:"):
             return result
 
@@ -219,64 +231,17 @@ class ImageAnalysisService:
             '"ocr_text":"texte lisible",'
             '"is_informative":true}'
         )
-        return await cls._call_ollama_once(image_b64, fallback, use_system=False)
-
-    # Max retries for transient Ollama errors (model swap, server disconnect)
-    _MAX_RETRIES = 2
-
-    @classmethod
-    async def _call_ollama_once(
-        cls, image_b64: str, user_prompt: str, use_system: bool = True,
-    ) -> Dict:
-        """Single call to the Ollama vision API with retry on transient errors.
-
-        Retries with exponential backoff when Ollama disconnects (common when
-        the GPU is swapping between NER and vision models).
-        """
-        messages = []
-        if use_system:
-            messages.append({"role": "system", "content": _VISION_SYSTEM_PROMPT})
-        messages.append({
-            "role": "user",
-            "content": user_prompt,
-            "images": [image_b64],
-        })
-
-        payload = {
-            "model": _VISION_MODEL,
-            "messages": messages,
-            "stream": False,
-            "options": {
-                "temperature": 0.1,
-                "num_predict": 2048,
-            },
-        }
-
-        client = cls._get_http_client()
-        last_exc = None
-
-        for attempt in range(1 + cls._MAX_RETRIES):
-            try:
-                resp = await client.post(f"{_OLLAMA_BASE_URL}/api/chat", json=payload)
-                resp.raise_for_status()
-                data = resp.json()
-                raw_content = data.get("message", {}).get("content", "")
-                return cls._parse_vision_response(raw_content)
-            except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
-                last_exc = e
-                if attempt < cls._MAX_RETRIES:
-                    wait = 2 ** (attempt + 1)  # 2s, 4s
-                    logger.warning(
-                        "Vision call attempt %d/%d failed (%s), retrying in %ds",
-                        attempt + 1, 1 + cls._MAX_RETRIES, type(e).__name__, wait,
-                    )
-                    await asyncio.sleep(wait)
-
-        raise last_exc
+        raw_content = await call_llm_vision(
+            config, image_b64,
+            system_prompt="",
+            user_prompt=fallback,
+            temperature=0.1, max_tokens=2048,
+            client=client, use_system=False,
+        )
+        return cls._parse_vision_response(raw_content)
 
     # Normalize type values — accepts both French (preferred) and English (fallback)
     _TYPE_MAP = {
-        # French (expected from llama3.2-vision)
         "diagramme": "diagramme",
         "graphique": "graphique",
         "tableau": "tableau",
@@ -289,7 +254,7 @@ class ImageAnalysisService:
         "carte": "carte",
         "illustration": "illustration",
         "autre": "autre",
-        # English fallback (in case model responds in English)
+        # English fallback
         "diagram": "diagramme",
         "chart": "graphique",
         "table": "tableau",
@@ -302,7 +267,6 @@ class ImageAnalysisService:
     @classmethod
     def _parse_vision_response(cls, raw: str) -> Dict:
         """Parse the JSON response from the vision model."""
-        # Strip markdown fences if present
         text = raw.strip()
         if text.startswith("```"):
             text = text.removeprefix("```json").removeprefix("```")
@@ -312,8 +276,6 @@ class ImageAnalysisService:
         try:
             result = json.loads(text)
         except json.JSONDecodeError:
-            # Try to extract JSON object from the response
-            import re
             match = re.search(r'\{[\s\S]*\}', text)
             if match:
                 try:
@@ -325,10 +287,8 @@ class ImageAnalysisService:
                 logger.warning("No JSON found in vision response. Raw: %s", text[:300])
                 return cls._empty_analysis("Réponse non-JSON du modèle vision")
 
-        # Normalize the type from English to French
         raw_type = str(result.get("type", "other")).lower().strip()
         norm_type = cls._TYPE_MAP.get(raw_type, raw_type)
-        # Fallback: if the model returned a French type already, keep it
         valid_fr_types = set(cls._TYPE_MAP.values())
         if norm_type not in valid_fr_types:
             norm_type = "autre"
@@ -358,20 +318,14 @@ class ImageAnalysisService:
 
     @classmethod
     def build_anonymized_description(cls, analysis: Dict, anonymized_ocr: str = "") -> str:
-        """Build an anonymized description from the analysis result.
-
-        This is the text that Mistral will receive instead of the actual image.
-        PII detected in the image is replaced with type markers.
-        """
+        """Build an anonymized description from the analysis result."""
         parts = []
-
         img_type = analysis.get("type", "autre")
         description = analysis.get("description", "")
         key_info = analysis.get("key_information", [])
         pii_list = analysis.get("pii_detected", [])
         suggested = analysis.get("suggested_usage", "")
 
-        # Replace PII in description
         anonymized_desc = description
         for pii in pii_list:
             pii_value = pii.get("value", "")
@@ -384,7 +338,6 @@ class ImageAnalysisService:
         if anonymized_desc:
             parts.append(f"Description: {anonymized_desc}")
         if key_info:
-            # Also anonymize key information
             clean_info = []
             for info in key_info:
                 clean = info
@@ -403,37 +356,17 @@ class ImageAnalysisService:
 
     @classmethod
     async def check_vision_model_available(cls) -> Dict:
-        """Check if the vision model is available on Ollama."""
-        try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10, connect=5)) as client:
-                resp = await client.get(f"{_OLLAMA_BASE_URL}/api/tags")
-                resp.raise_for_status()
-                models = resp.json().get("models", [])
-                model_names = [m.get("name", "") for m in models]
+        """Check if the vision model is available on the configured provider."""
+        config = cls._get_provider_config()
+        result = await check_provider_available(config)
 
-                # Check if our vision model is available
-                vision_available = any(
-                    _VISION_MODEL.split(":")[0] in name
-                    for name in model_names
-                )
-
-                return {
-                    "ollama_reachable": True,
-                    "vision_model": _VISION_MODEL,
-                    "vision_available": vision_available,
-                    "available_models": model_names,
-                }
-        except httpx.ConnectError:
-            return {
-                "ollama_reachable": False,
-                "vision_model": _VISION_MODEL,
-                "vision_available": False,
-                "failure_reason": f"Cannot connect to Ollama at {_OLLAMA_BASE_URL}",
-            }
-        except Exception as e:
-            return {
-                "ollama_reachable": False,
-                "vision_model": _VISION_MODEL,
-                "vision_available": False,
-                "failure_reason": str(e)[:200],
-            }
+        return {
+            "provider": config.provider,
+            "ollama_reachable": result.get("reachable", False),
+            "vision_model": config.model,
+            "vision_available": result.get("model_available", False) or (
+                config.is_openai_compatible and result.get("reachable", False)
+            ),
+            "available_models": result.get("available_models", []),
+            "failure_reason": result.get("failure_reason"),
+        }
