@@ -309,11 +309,17 @@ import { AIConfigUpdate } from '../../models/report.model';
       <!-- SECTION 4: Scaleway API Key (if needed)     -->
       <!-- ═══════════════════════════════════════════ -->
       <mat-card class="config-card" *ngIf="config.ner_provider === 'scaleway' || config.vision_provider === 'scaleway'">
-        <h3><mat-icon>vpn_key</mat-icon> Clé API Scaleway</h3>
-        <p class="provider-hint">Nécessaire pour utiliser les Generative APIs de Scaleway.</p>
+        <h3><mat-icon>vpn_key</mat-icon> Authentification Scaleway</h3>
+        <p class="provider-hint">Nécessaire pour utiliser les Generative APIs de Scaleway. Vous trouverez ces informations dans la console IAM Scaleway.</p>
         <div class="form-section">
           <mat-form-field appearance="outline" class="full-width">
-            <mat-label>Clé API Scaleway (Secret Key)</mat-label>
+            <mat-label>Project ID Scaleway</mat-label>
+            <input matInput [(ngModel)]="config.scaleway_project_id" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx">
+            <mat-icon matSuffix>folder</mat-icon>
+            <mat-hint>L'ID du projet Scaleway (visible dans Settings > Project du dashboard)</mat-hint>
+          </mat-form-field>
+          <mat-form-field appearance="outline" class="full-width">
+            <mat-label>Secret Key Scaleway</mat-label>
             <input matInput [(ngModel)]="config.scaleway_api_key" type="password" placeholder="SCW...">
             <mat-icon matSuffix>vpn_key</mat-icon>
             <mat-hint>Votre Secret Key Scaleway (SCW...)</mat-hint>
@@ -420,6 +426,7 @@ export class AdminSettingsComponent implements OnInit {
     vision_provider: 'ollama',
     vision_model: 'llama3.2-vision:11b',
     scaleway_api_key: '',
+    scaleway_project_id: '',
   };
 
   constructor(
@@ -451,6 +458,7 @@ export class AdminSettingsComponent implements OnInit {
           vision_provider: cfg.vision_provider || 'ollama',
           vision_model: cfg.vision_model || 'llama3.2-vision:11b',
           scaleway_api_key: cfg.scaleway_api_key || '',
+          scaleway_project_id: cfg.scaleway_project_id || '',
         };
       },
       error: () => {

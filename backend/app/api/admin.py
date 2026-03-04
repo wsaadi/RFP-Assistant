@@ -168,6 +168,7 @@ async def update_ai_config(
         config.vision_model = request.vision_model
         if request.scaleway_api_key:
             config.scaleway_api_key_encrypted = request.scaleway_api_key
+        config.scaleway_project_id = request.scaleway_project_id
     else:
         config = AIConfig(
             workspace_id=workspace_id,
@@ -183,6 +184,7 @@ async def update_ai_config(
             vision_provider=request.vision_provider,
             vision_model=request.vision_model,
             scaleway_api_key_encrypted=request.scaleway_api_key,
+            scaleway_project_id=request.scaleway_project_id,
         )
         db.add(config)
 
@@ -207,6 +209,7 @@ def _config_to_out(config: AIConfig) -> AIConfigOut:
         vision_provider=config.vision_provider or "ollama",
         vision_model=config.vision_model or "llama3.2-vision:11b",
         has_scaleway_key=bool(config.scaleway_api_key_encrypted),
+        scaleway_project_id=config.scaleway_project_id or "",
     )
 
 

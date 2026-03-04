@@ -295,6 +295,7 @@ export interface AIConfig {
   vision_provider: string;
   vision_model: string;
   has_scaleway_key?: boolean;
+  scaleway_project_id?: string;
 }
 
 export interface AIConfigUpdate {
@@ -310,6 +311,7 @@ export interface AIConfigUpdate {
   vision_provider: string;
   vision_model: string;
   scaleway_api_key: string;
+  scaleway_project_id: string;
 }
 
 // ── Anonymization ──

@@ -161,6 +161,7 @@ class AIConfig(Base):
 
     # Scaleway Generative APIs key (shared for NER + Vision when provider is "scaleway")
     scaleway_api_key_encrypted: Mapped[str] = mapped_column(Text, nullable=True, default="")
+    scaleway_project_id: Mapped[str] = mapped_column(String(100), nullable=True, default="")
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)

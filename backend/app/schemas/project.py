@@ -67,8 +67,9 @@ class AIConfigUpdate(BaseModel):
     # Vision (image analysis) provider
     vision_provider: str = "ollama"  # "ollama", "mistral", "scaleway"
     vision_model: str = "llama3.2-vision:11b"
-    # Scaleway API key
+    # Scaleway API key + project ID
     scaleway_api_key: str = ""
+    scaleway_project_id: str = ""
 
 
 class AIConfigOut(BaseModel):
@@ -85,6 +86,7 @@ class AIConfigOut(BaseModel):
     vision_provider: str = "ollama"
     vision_model: str = "llama3.2-vision:11b"
     has_scaleway_key: bool = False
+    scaleway_project_id: str = ""
 
     model_config = {"from_attributes": True}
 

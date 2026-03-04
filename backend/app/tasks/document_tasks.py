@@ -246,6 +246,7 @@ async def _process_document_async(document_id: str, project_id: str):
                             base_url=ai_config.ollama_base_url if ai_config.ner_provider == "ollama" else "",
                             api_key=_api_key,
                             model=ai_config.ner_model or "qwen2.5:14b",
+                            scaleway_project_id=ai_config.scaleway_project_id or "",
                         ))
         except Exception as cfg_err:
             logger.warning("[doc:%s] Failed to load NER config — using defaults: %s", document_id, cfg_err)
@@ -568,11 +569,13 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
                         _v_key = ai_config.mistral_api_key_encrypted or ""
                     elif ai_config.vision_provider == "scaleway":
                         _v_key = ai_config.scaleway_api_key_encrypted or ""
+                    _scw_pid = ai_config.scaleway_project_id or ""
                     ImageAnalysisService.configure(ProviderConfig(
                         provider=ai_config.vision_provider or "ollama",
                         base_url=ai_config.ollama_base_url if ai_config.vision_provider == "ollama" else "",
                         api_key=_v_key,
                         model=ai_config.vision_model or "llama3.2-vision:11b",
+                        scaleway_project_id=_scw_pid,
                     ))
                     # NER provider (used for OCR anonymization)
                     _n_key = ""
@@ -585,6 +588,7 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
                         base_url=ai_config.ollama_base_url if ai_config.ner_provider == "ollama" else "",
                         api_key=_n_key,
                         model=ai_config.ner_model or "qwen2.5:14b",
+                        scaleway_project_id=_scw_pid,
                     ))
 
         # Load images from DB
