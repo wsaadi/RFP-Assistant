@@ -42,9 +42,9 @@ def fill_deliverables_task(self, project_id: str, workspace_id: str):
 
 
 @celery.task(name="tasks.compliance_analysis", bind=True, max_retries=1)
-def compliance_analysis_task(self, project_id: str, workspace_id: str):
+def compliance_analysis_task(self, project_id: str, workspace_id: str, target_scope: str = "all"):
     from ..api.projects import _run_compliance_analysis
-    asyncio.run(_run_compliance_analysis(uuid.UUID(project_id), uuid.UUID(workspace_id)))
+    asyncio.run(_run_compliance_analysis(uuid.UUID(project_id), uuid.UUID(workspace_id), target_scope))
 
 
 @celery.task(name="tasks.generate_recommendation", bind=True, max_retries=1)

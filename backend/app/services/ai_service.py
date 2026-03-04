@@ -355,12 +355,17 @@ Analyse minutieusement les deux documents et identifie:
 3. Les exigences modifiées
 4. Les exigences inchangées
 
+Pour CHAQUE exigence identifiée, indique la SOURCE EXACTE dans le(s) document(s):
+- "source_old": la référence dans l'ancien AO (nom du document, article ou section, ex: "CCTP art.5.2", "RC §3.1")
+- "source_new": la référence dans le nouvel AO (même format)
+Cela permet de tracer précisément l'origine de chaque écart.
+
 Réponds EXACTEMENT au format JSON suivant (sans markdown):
 {
-  "new_requirements": [{"title": "...", "description": "...", "priority": "high|medium|low"}],
-  "removed_requirements": [{"title": "...", "description": "..."}],
-  "modified_requirements": [{"title": "...", "old_description": "...", "new_description": "...", "impact": "..."}],
-  "unchanged_requirements": [{"title": "...", "description": "..."}],
+  "new_requirements": [{"title": "...", "description": "...", "priority": "high|medium|low", "source_new": "document et article/section du nouvel AO"}],
+  "removed_requirements": [{"title": "...", "description": "...", "source_old": "document et article/section de l'ancien AO"}],
+  "modified_requirements": [{"title": "...", "old_description": "...", "new_description": "...", "impact": "...", "source_old": "ref ancien AO", "source_new": "ref nouvel AO"}],
+  "unchanged_requirements": [{"title": "...", "description": "...", "source_old": "ref ancien AO", "source_new": "ref nouvel AO"}],
   "summary": "..."
 }"""
 
