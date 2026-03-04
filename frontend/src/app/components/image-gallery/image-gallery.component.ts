@@ -240,7 +240,7 @@ interface CategoryDef {
               <mat-divider *ngIf="selectedImage.description"></mat-divider>
 
               <!-- Key information -->
-              <div class="result-section" *ngIf="selectedImage.key_information?.length > 0">
+              <div class="result-section" *ngIf="selectedImage.key_information && selectedImage.key_information.length > 0">
                 <div class="result-label">
                   <mat-icon>key</mat-icon> Informations cles
                 </div>
@@ -251,7 +251,7 @@ interface CategoryDef {
                 </div>
               </div>
 
-              <mat-divider *ngIf="selectedImage.key_information?.length > 0"></mat-divider>
+              <mat-divider *ngIf="selectedImage.key_information && selectedImage.key_information.length > 0"></mat-divider>
 
               <!-- OCR Text -->
               <div class="result-section" *ngIf="selectedImage.ocr_text">
@@ -264,7 +264,7 @@ interface CategoryDef {
               <mat-divider *ngIf="selectedImage.ocr_text"></mat-divider>
 
               <!-- PII Detected -->
-              <div class="result-section" *ngIf="selectedImage.pii_detected?.length > 0">
+              <div class="result-section" *ngIf="selectedImage.pii_detected && selectedImage.pii_detected.length > 0">
                 <div class="result-label">
                   <mat-icon>security</mat-icon> Donnees personnelles detectees
                 </div>
@@ -277,7 +277,7 @@ interface CategoryDef {
                 </div>
               </div>
 
-              <mat-divider *ngIf="selectedImage.pii_detected?.length > 0"></mat-divider>
+              <mat-divider *ngIf="selectedImage.pii_detected && selectedImage.pii_detected.length > 0"></mat-divider>
 
               <!-- Suggested Usage -->
               <div class="result-section" *ngIf="selectedImage.suggested_usage">
