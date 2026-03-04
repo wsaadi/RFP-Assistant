@@ -3725,10 +3725,51 @@ async def remove_project_member(
 
 # ── Fill Excel endpoint ─────────────────────────────────────────────
 
+def _convert_xls_to_xlsx(file_path: str) -> str:
+    """Convert an old .xls file to .xlsx format and return the new file path.
+    If the file is already .xlsx, return it as-is."""
+    if not file_path.lower().endswith('.xls'):
+        return file_path
+    import xlrd
+    from openpyxl import Workbook
+
+    xls_book = xlrd.open_workbook(file_path)
+    wb = Workbook()
+    # Remove default sheet created by Workbook()
+    wb.remove(wb.active)
+
+    for sheet_index in range(xls_book.nsheets):
+        xls_sheet = xls_book.sheet_by_index(sheet_index)
+        ws = wb.create_sheet(title=xls_sheet.name)
+        for row_idx in range(xls_sheet.nrows):
+            for col_idx in range(xls_sheet.ncols):
+                cell_value = xls_sheet.cell_value(row_idx, col_idx)
+                cell_type = xls_sheet.cell_type(row_idx, col_idx)
+                # Convert xlrd types appropriately
+                if cell_type == xlrd.XL_CELL_DATE:
+                    try:
+                        date_tuple = xlrd.xldate_as_tuple(cell_value, xls_book.datemode)
+                        from datetime import datetime
+                        cell_value = datetime(*date_tuple)
+                    except Exception:
+                        pass
+                elif cell_type == xlrd.XL_CELL_BOOLEAN:
+                    cell_value = bool(cell_value)
+                elif cell_type == xlrd.XL_CELL_EMPTY:
+                    continue
+                ws.cell(row=row_idx + 1, column=col_idx + 1, value=cell_value)
+
+    xlsx_path = file_path + "x"  # .xls -> .xlsx
+    wb.save(xlsx_path)
+    wb.close()
+    return xlsx_path
+
+
 def _read_excel_structure(file_path: str) -> str:
     """Read an Excel file and return a textual representation of its structure with cell references.
     Skips fully empty rows and only marks empty cells adjacent to filled cells to reduce noise."""
     from openpyxl import load_workbook
+    file_path = _convert_xls_to_xlsx(file_path)
     wb = load_workbook(file_path, data_only=True)
     parts = []
     for sheet_name in wb.sheetnames:
@@ -3756,6 +3797,7 @@ def _fill_excel_with_data(file_path: str, fill_data: list) -> bytes:
     """Open an Excel file, fill cells from AI-generated data, return modified bytes."""
     from openpyxl import load_workbook
     import re as _re
+    file_path = _convert_xls_to_xlsx(file_path)
     wb = load_workbook(file_path)
 
     for entry in fill_data:

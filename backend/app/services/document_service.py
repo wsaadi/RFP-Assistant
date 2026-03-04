@@ -295,6 +295,42 @@ class DocumentProcessor:
         return images
 
     @staticmethod
+    def _convert_xls_bytes_to_xlsx(file_content: bytes) -> bytes:
+        """Convert old .xls format bytes to .xlsx format bytes using xlrd."""
+        import xlrd
+        from openpyxl import Workbook
+
+        xls_book = xlrd.open_workbook(file_contents=file_content)
+        wb = Workbook()
+        wb.remove(wb.active)
+
+        for sheet_index in range(xls_book.nsheets):
+            xls_sheet = xls_book.sheet_by_index(sheet_index)
+            ws = wb.create_sheet(title=xls_sheet.name)
+            for row_idx in range(xls_sheet.nrows):
+                for col_idx in range(xls_sheet.ncols):
+                    cell_value = xls_sheet.cell_value(row_idx, col_idx)
+                    cell_type = xls_sheet.cell_type(row_idx, col_idx)
+                    if cell_type == xlrd.XL_CELL_DATE:
+                        try:
+                            date_tuple = xlrd.xldate_as_tuple(cell_value, xls_book.datemode)
+                            from datetime import datetime
+                            cell_value = datetime(*date_tuple)
+                        except Exception:
+                            pass
+                    elif cell_type == xlrd.XL_CELL_BOOLEAN:
+                        cell_value = bool(cell_value)
+                    elif cell_type == xlrd.XL_CELL_EMPTY:
+                        continue
+                    ws.cell(row=row_idx + 1, column=col_idx + 1, value=cell_value)
+
+        output = io.BytesIO()
+        wb.save(output)
+        wb.close()
+        output.seek(0)
+        return output.read()
+
+    @staticmethod
     def extract_text_from_excel(file_content: bytes) -> tuple:
         """Extract text from Excel file, returning full text and per-sheet pages_data.
 
@@ -302,6 +338,9 @@ class DocumentProcessor:
             Tuple of (full_text, pages_data) where pages_data treats each sheet
             as a page with the sheet name as section_title.
         """
+        # Detect old .xls format by checking file signature (BIFF/OLE2 magic bytes)
+        if file_content[:8] != b'PK' and file_content[:4] == b'\xd0\xcf\x11\xe0':
+            file_content = DocumentProcessor._convert_xls_bytes_to_xlsx(file_content)
         wb = load_workbook(io.BytesIO(file_content), data_only=True)
         text_parts = []
         pages_data = []
