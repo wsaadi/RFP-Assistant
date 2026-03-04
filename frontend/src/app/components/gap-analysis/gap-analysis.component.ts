@@ -9,6 +9,7 @@ import { MatProgressBarModule } from '@angular/material/progress-bar';
 import { MatChipsModule } from '@angular/material/chips';
 import { MatExpansionModule } from '@angular/material/expansion';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
@@ -17,7 +18,7 @@ import { GapAnalysis } from '../../models/report.model';
 @Component({
   selector: 'app-gap-analysis',
   standalone: true,
-  imports: [CommonModule, RouterLink, MatCardModule, MatButtonModule, MatIconModule, MatProgressSpinnerModule, MatProgressBarModule, MatChipsModule, MatExpansionModule, MatSnackBarModule],
+  imports: [CommonModule, RouterLink, MatCardModule, MatButtonModule, MatIconModule, MatProgressSpinnerModule, MatProgressBarModule, MatChipsModule, MatExpansionModule, MatSnackBarModule, MatTooltipModule],
   template: `
     <div class="page-container">
       <div class="page-header">
@@ -73,6 +74,11 @@ import { GapAnalysis } from '../../models/report.model';
                   <mat-chip [class]="'priority-' + req.priority">{{ req.priority }}</mat-chip>
                 </mat-expansion-panel-header>
                 <p>{{ req.description }}</p>
+                <div class="source-tags" *ngIf="req.source_new">
+                  <span class="source-tag source-new" matTooltip="Source dans le nouvel AO">
+                    <mat-icon>description</mat-icon> Nouvel AO: {{ req.source_new }}
+                  </span>
+                </div>
               </mat-expansion-panel>
             </mat-accordion>
           </mat-card>
@@ -82,6 +88,11 @@ import { GapAnalysis } from '../../models/report.model';
             <div *ngFor="let req of analysis.removed_requirements" class="req-item">
               <strong>{{ req.title }}</strong>
               <p>{{ req.description }}</p>
+              <div class="source-tags" *ngIf="req.source_old">
+                <span class="source-tag source-old" matTooltip="Source dans l'ancien AO">
+                  <mat-icon>description</mat-icon> Ancien AO: {{ req.source_old }}
+                </span>
+              </div>
             </div>
           </mat-card>
 
@@ -95,6 +106,14 @@ import { GapAnalysis } from '../../models/report.model';
                 <p><strong>Avant:</strong> {{ req.old_description }}</p>
                 <p><strong>Après:</strong> {{ req.new_description }}</p>
                 <p><strong>Impact:</strong> {{ req.impact }}</p>
+                <div class="source-tags" *ngIf="req.source_old || req.source_new">
+                  <span class="source-tag source-old" *ngIf="req.source_old" matTooltip="Source dans l'ancien AO">
+                    <mat-icon>description</mat-icon> Ancien AO: {{ req.source_old }}
+                  </span>
+                  <span class="source-tag source-new" *ngIf="req.source_new" matTooltip="Source dans le nouvel AO">
+                    <mat-icon>description</mat-icon> Nouvel AO: {{ req.source_new }}
+                  </span>
+                </div>
               </mat-expansion-panel>
             </mat-accordion>
           </mat-card>
@@ -103,6 +122,14 @@ import { GapAnalysis } from '../../models/report.model';
             <h3><mat-icon>check</mat-icon> Inchangées ({{ analysis.unchanged_requirements?.length || 0 }})</h3>
             <div *ngFor="let req of analysis.unchanged_requirements" class="req-item">
               <strong>{{ req.title }}</strong>
+              <div class="source-tags" *ngIf="req.source_old || req.source_new">
+                <span class="source-tag source-old" *ngIf="req.source_old" matTooltip="Source dans l'ancien AO">
+                  <mat-icon>description</mat-icon> {{ req.source_old }}
+                </span>
+                <span class="source-tag source-new" *ngIf="req.source_new" matTooltip="Source dans le nouvel AO">
+                  <mat-icon>description</mat-icon> {{ req.source_new }}
+                </span>
+              </div>
             </div>
           </mat-card>
         </div>
@@ -143,6 +170,11 @@ import { GapAnalysis } from '../../models/report.model';
     .error-card { padding: 24px; display: flex; align-items: center; gap: 12px; color: #c62828; }
     .analysis-timestamp { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #888; margin-bottom: 16px; }
     .analysis-timestamp mat-icon { font-size: 18px; width: 18px; height: 18px; }
+    .source-tags { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+    .source-tag { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; padding: 3px 10px; border-radius: 12px; }
+    .source-tag mat-icon { font-size: 14px; width: 14px; height: 14px; }
+    .source-old { background: #fff3e0; color: #e65100; }
+    .source-new { background: #e3f2fd; color: #1565c0; }
   `],
 })
 export class GapAnalysisComponent implements OnInit, OnDestroy {

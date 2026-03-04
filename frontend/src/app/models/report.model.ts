@@ -190,10 +190,10 @@ export interface ChapterNote {
 // ── Analysis ──
 export interface GapAnalysis {
   id?: string;
-  new_requirements: { title: string; description: string; priority: string }[];
-  removed_requirements: { title: string; description: string }[];
-  modified_requirements: { title: string; old_description: string; new_description: string; impact: string }[];
-  unchanged_requirements: { title: string; description: string }[];
+  new_requirements: { title: string; description: string; priority: string; source_new?: string }[];
+  removed_requirements: { title: string; description: string; source_old?: string }[];
+  modified_requirements: { title: string; old_description: string; new_description: string; impact: string; source_old?: string; source_new?: string }[];
+  unchanged_requirements: { title: string; description: string; source_old?: string; source_new?: string }[];
   summary: string;
   created_at?: string;
 }

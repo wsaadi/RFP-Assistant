@@ -11,6 +11,8 @@ import { MatListModule } from '@angular/material/list';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { MatDividerModule } from '@angular/material/divider';
+import { MatSelectModule } from '@angular/material/select';
+import { FormsModule } from '@angular/forms';
 import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
@@ -34,13 +36,27 @@ interface RecGenProgress {
     CommonModule, RouterLink,
     MatCardModule, MatButtonModule, MatIconModule, MatProgressSpinnerModule,
     MatProgressBarModule, MatChipsModule, MatListModule, MatSnackBarModule,
-    MatTooltipModule, MatDividerModule,
+    MatTooltipModule, MatDividerModule, MatSelectModule, FormsModule,
   ],
   template: `
     <div class="page-container">
       <div class="page-header">
         <button mat-icon-button [routerLink]="['/project', projectId]"><mat-icon>arrow_back</mat-icon></button>
         <h1>Analyse de conformite et exhaustivite</h1>
+        <mat-form-field class="scope-select" appearance="outline" subscriptSizing="dynamic">
+          <mat-label>Documents a analyser</mat-label>
+          <mat-select [(ngModel)]="targetScope" [disabled]="analyzing">
+            <mat-option value="all">
+              <mat-icon>select_all</mat-icon> Tout (memoire + documents)
+            </mat-option>
+            <mat-option value="memoire_only">
+              <mat-icon>edit_document</mat-icon> Memoire technique uniquement
+            </mat-option>
+            <mat-option value="documents_only">
+              <mat-icon>upload_file</mat-icon> Documents uploades uniquement
+            </mat-option>
+          </mat-select>
+        </mat-form-field>
         <button mat-raised-button color="primary" (click)="runAnalysis()" [disabled]="analyzing">
           <mat-spinner *ngIf="analyzing" diameter="18"></mat-spinner>
           <mat-icon *ngIf="!analyzing">fact_check</mat-icon>
@@ -294,6 +310,8 @@ interface RecGenProgress {
     .page-container { max-width: 1000px; margin: 0 auto; }
     .page-header { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; }
     .page-header h1 { flex: 1; margin: 0; color: #1B3A5C; font-size: 20px; }
+    .scope-select { width: 280px; font-size: 13px; }
+    .scope-select mat-icon { font-size: 18px; width: 18px; height: 18px; margin-right: 6px; vertical-align: middle; }
     .loading-container { display: flex; align-items: center; gap: 12px; padding: 24px; color: #666; }
     .analysis-timestamp { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #888; margin-bottom: 16px; }
     .analysis-timestamp mat-icon { font-size: 18px; width: 18px; height: 18px; }
@@ -380,6 +398,7 @@ export class ComplianceComponent implements OnInit, OnDestroy {
   analyzing = false;
   loadingExisting = false;
   error = '';
+  targetScope = 'all';
   renderMarkdown = renderMarkdown;
   analysisProgress: { status: string; step: string; progress: number; message: string } | null = null;
   exportingPdf = false;
@@ -450,7 +469,7 @@ export class ComplianceComponent implements OnInit, OnDestroy {
     this.recDone = {};
     this.recPreviews = {};
     this.analysisProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement...' };
-    this.api.analyzeCompliance(this.projectId).subscribe({
+    this.api.analyzeCompliance(this.projectId, this.targetScope).subscribe({
       next: () => this.startPolling(),
       error: (err) => {
         this.error = err.error?.detail || 'Erreur';

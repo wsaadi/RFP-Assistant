@@ -614,7 +614,7 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
                     analysis[key] = await AnonymizationService.deanonymize_text(analysis[key], project_id, db)
             for req_list_key in ["new_requirements", "removed_requirements", "modified_requirements", "unchanged_requirements"]:
                 for req in analysis.get(req_list_key, []):
-                    for field in ["title", "description", "old_description", "new_description", "impact"]:
+                    for field in ["title", "description", "old_description", "new_description", "impact", "source_old", "source_new"]:
                         if field in req and req[field]:
                             req[field] = await AnonymizationService.deanonymize_text(req[field], project_id, db)
 
@@ -1996,12 +1996,23 @@ async def get_compliance_analysis(
 @router.post("/{project_id}/compliance-analysis")
 async def analyze_compliance(
     project_id: uuid.UUID,
+    request: dict = {},
 
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Launch compliance analysis as a background task (returns immediately)."""
+    """Launch compliance analysis as a background task (returns immediately).
+
+    Optional body parameter:
+        target_scope: "all" (default) | "memoire_only" | "documents_only"
+            - "all": analyze both mémoire technique chapters AND uploaded response documents
+            - "memoire_only": analyze only the mémoire technique (generated chapters)
+            - "documents_only": analyze only uploaded 'Notre réponse' documents
+    """
     pid = str(project_id)
+    target_scope = request.get("target_scope", "all") if isinstance(request, dict) else "all"
+    if target_scope not in ("all", "memoire_only", "documents_only"):
+        target_scope = "all"
 
     existing = get_or_idle(_NS_COMPLIANCE, pid)
     if existing and existing.get("status") == "running":
@@ -2032,7 +2043,18 @@ async def analyze_compliance(
     )
     has_new_response_docs = nr_result.scalar_one_or_none() is not None
 
-    if not has_chapters and not has_new_response_docs:
+    # Validate scope against available content
+    if target_scope == "memoire_only" and not has_chapters:
+        raise HTTPException(
+            status_code=400,
+            detail="Aucun chapitre rédigé dans le mémoire technique.",
+        )
+    if target_scope == "documents_only" and not has_new_response_docs:
+        raise HTTPException(
+            status_code=400,
+            detail="Aucun document 'Notre réponse' chargé.",
+        )
+    if target_scope == "all" and not has_chapters and not has_new_response_docs:
         raise HTTPException(
             status_code=400,
             detail="Aucun contenu à analyser. Rédigez les chapitres du mémoire technique ou chargez des documents 'Notre réponse'.",
@@ -2044,7 +2066,7 @@ async def analyze_compliance(
     })
 
     from ..tasks.project_tasks import compliance_analysis_task
-    compliance_analysis_task.delay(str(project_id), str(project.workspace_id))
+    compliance_analysis_task.delay(str(project_id), str(project.workspace_id), target_scope)
 
     return {"success": True, "message": "Analyse de conformite lancee en arriere-plan"}
 
@@ -2059,13 +2081,19 @@ async def get_compliance_analysis_status(
     return get_or_idle(_NS_COMPLIANCE, pid)
 
 
-async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
+async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID, target_scope: str = "all"):
     """Background task for compliance analysis.
 
     DB connections are released during the slow AI call to minimize pool pressure.
+
+    Args:
+        target_scope: "all" | "memoire_only" | "documents_only"
+            Controls which response content to analyze.
     """
     from ..database import async_session
     pid = str(project_id)
+    include_chapters = target_scope in ("all", "memoire_only")
+    include_uploaded = target_scope in ("all", "documents_only")
 
     def _update(step: str, progress: int, message: str):
         set_progress(_NS_COMPLIANCE, pid, {
@@ -2078,34 +2106,38 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
         async with async_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # ── 1a. Load the mémoire technique (generated chapters) ──
-            # This is the PRIMARY response content – always included when available.
-            _update("loading", 5, "Chargement du memoire technique (chapitres)...")
-            chapters_result = await db.execute(
-                select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
-            )
-            chapters = chapters_result.scalars().all()
-            chapters_with_content = [c for c in chapters if (c.content or "").strip()]
+            anon_chapters = ""
+            anon_uploaded_response = ""
 
-            chapter_parts = []
-            if chapters_with_content:
-                chapter_parts.append("\n\n=== DOCUMENT: Memoire Technique (redige avec l'outil) ===\n")
-                for c in chapters_with_content:
-                    text = (c.anonymized_content or c.content or "").strip()
-                    anon_ch_title = await AnonymizationService.apply_existing_mappings(
-                        c.title, project_id, db
-                    )
-                    chapter_parts.append(f"\n--- {anon_ch_title} ---\n")
-                    chapter_parts.append(text)
-            anon_chapters = "\n\n".join(chapter_parts)
+            # ── 1a. Load the mémoire technique (generated chapters) ──
+            if include_chapters:
+                _update("loading", 5, "Chargement du memoire technique (chapitres)...")
+                chapters_result = await db.execute(
+                    select(Chapter).where(Chapter.project_id == project_id).order_by(Chapter.order)
+                )
+                chapters = chapters_result.scalars().all()
+                chapters_with_content = [c for c in chapters if (c.content or "").strip()]
+
+                chapter_parts = []
+                if chapters_with_content:
+                    chapter_parts.append("\n\n=== DOCUMENT: Memoire Technique (redige avec l'outil) ===\n")
+                    for c in chapters_with_content:
+                        text = (c.anonymized_content or c.content or "").strip()
+                        anon_ch_title = await AnonymizationService.apply_existing_mappings(
+                            c.title, project_id, db
+                        )
+                        chapter_parts.append(f"\n--- {anon_ch_title} ---\n")
+                        chapter_parts.append(text)
+                anon_chapters = "\n\n".join(chapter_parts)
 
             # ── 1b. Load uploaded NEW_RESPONSE documents (if any) ──
-            _update("loading", 10, "Chargement des documents reponse uploades...")
-            anon_uploaded_response = await _get_all_chunks_anonymized_by_category(
-                db, project_id, DocumentCategory.NEW_RESPONSE
-            )
+            if include_uploaded:
+                _update("loading", 10, "Chargement des documents reponse uploades...")
+                anon_uploaded_response = await _get_all_chunks_anonymized_by_category(
+                    db, project_id, DocumentCategory.NEW_RESPONSE
+                )
 
-            # Combine: chapters first (primary), then uploaded docs (complementary)
+            # Combine based on scope
             response_parts = []
             if anon_chapters.strip():
                 response_parts.append(anon_chapters)
@@ -2113,10 +2145,16 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
                 response_parts.append(anon_uploaded_response)
             anon_response = "\n\n".join(response_parts)
 
+            scope_label = {
+                "memoire_only": "le memoire technique",
+                "documents_only": "les documents reponse uploades",
+                "all": "le memoire technique et les documents reponse",
+            }.get(target_scope, "la reponse")
+
             if not anon_response.strip():
                 set_progress(_NS_COMPLIANCE, pid, {
                     "status": "error", "step": "error", "progress": 0,
-                    "message": "Aucun contenu a analyser. Redigez les chapitres du memoire technique ou chargez des documents 'Notre reponse'.",
+                    "message": f"Aucun contenu a analyser dans {scope_label}.",
                 })
                 return
 

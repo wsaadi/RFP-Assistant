@@ -327,8 +327,8 @@ export class ApiService {
     return this.http.get<{ analysis: ComplianceAnalysis | null }>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`);
   }
 
-  analyzeCompliance(projectId: string): Observable<any> {
-    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`, {});
+  analyzeCompliance(projectId: string, targetScope: string = 'all'): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/compliance-analysis`, { target_scope: targetScope });
   }
 
   getComplianceAnalysisStatus(projectId: string): Observable<{ status: string; step: string; progress: number; message: string }> {
