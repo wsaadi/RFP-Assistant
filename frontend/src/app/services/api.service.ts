@@ -495,6 +495,10 @@ export class ApiService {
     return this.http.post(`${this.baseUrl}/export/${projectId}/preview-chat-cancel`, {});
   }
 
+  documentQA(projectId: string, question: string): Observable<{ answer: string; sources: { document_name: string; category: string; category_label: string; page_number: number; score: number; excerpt: string }[] }> {
+    return this.http.post<any>(`${this.baseUrl}/export/${projectId}/document-qa`, { question });
+  }
+
   // ── Admin ──
   getUsers(): Observable<UserInfo[]> {
     return this.http.get<UserInfo[]>(`${this.baseUrl}/admin/users`);

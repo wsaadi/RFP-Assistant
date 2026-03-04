@@ -216,6 +216,8 @@ interface ChatMessage {
     .chapter-content th { background: linear-gradient(135deg, #e3f2fd, #bbdefb); color: #1B3A5C; font-weight: 600; font-size: 13.5px; text-transform: uppercase; letter-spacing: 0.3px; }
     .chapter-content tr:nth-child(even) td { background: #f8f9fa; }
     .chapter-content tr:hover td { background: #e8f4fd; }
+    .chapter-content .inserted-image { margin: 20px 0; text-align: center; }
+    .chapter-content .inserted-image img { max-width: 100%; height: auto; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
     .empty-content { color: #999; font-style: italic; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
 
@@ -435,5 +437,5 @@ export class PreviewComponent implements OnInit, OnDestroy {
     }
   }
 
-  renderMarkdown = renderMarkdown;
+  renderMarkdown = (text: string) => renderMarkdown(text, (id: string) => this.api.getImageUrl(id));
 }
