@@ -3728,7 +3728,7 @@ async def remove_project_member(
 def _convert_xls_to_xlsx(file_path: str) -> str:
     """Convert an old .xls file to .xlsx format and return the new file path.
     If the file is already .xlsx, return it as-is."""
-    if not file_path.lower().endswith('.xls'):
+    if not file_path.lower().endswith('.xls') or file_path.lower().endswith('.xlsx'):
         return file_path
     import xlrd
     from openpyxl import Workbook
