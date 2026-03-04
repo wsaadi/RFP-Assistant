@@ -568,7 +568,7 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
 
     DB connections are released during the slow AI call to minimize pool pressure.
     """
-    from ..database import async_session
+    from ..database import task_session
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
@@ -579,7 +579,7 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
 
     try:
         # ── Phase 1: Load config + anonymize (short DB session) ──
-        async with async_session() as db:
+        async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
             _update("searching", 10, "Chargement intégral des documents d'appel d'offres...")
@@ -608,7 +608,7 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
 
         # ── Phase 3: Deanonymize + save (short DB session) ──
         _update("deanonymizing", 75, "Deanonymisation des resultats...")
-        async with async_session() as db:
+        async with task_session() as db:
             for key in ["summary"]:
                 if key in analysis and isinstance(analysis[key], str):
                     analysis[key] = await AnonymizationService.deanonymize_text(analysis[key], project_id, db)
@@ -821,7 +821,7 @@ def _make_stream_progress_callback(pid: str, step: str, start_pct: int, end_pct:
 
 async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UUID):
     """Background task for the full structure generation pipeline."""
-    from ..database import async_session
+    from ..database import task_session
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
@@ -834,7 +834,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
 
     try:
         # ── Phase 1: Load data from DB (short-lived session) ──
-        async with async_session() as db:
+        async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
             # Load project AI context and anonymize it (may contain client/company names)
@@ -891,7 +891,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         # Only generate chapters for "redaction" type documents (text to write)
         # "completion" type documents (Excel/PDF to fill in) are handled separately
         resp_docs = []
-        async with async_session() as db:
+        async with task_session() as db:
             result = await db.execute(
                 select(ResponseDocument)
                 .where(ResponseDocument.project_id == project_id)
@@ -1034,7 +1034,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             # ── Phase 3c: Batch insert chapters (single commit) ──
             _update("saving", 88, "Enregistrement des chapitres en base...")
 
-            async with async_session() as db:
+            async with task_session() as db:
                 valid_types = {t.value for t in ChapterType}
 
                 def _build_chapters_flat(items, parent_id, resp_doc_id):
@@ -1097,7 +1097,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
 
             _update("saving", 88, "Enregistrement des chapitres en base...")
 
-            async with async_session() as db:
+            async with task_session() as db:
                 valid_types = {t.value for t in ChapterType}
 
                 def _build_legacy_chapters(items, parent_id=None):
@@ -1230,7 +1230,7 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
     so partial results are preserved if something fails.
     DB connections are released during slow AI calls to minimize pool pressure.
     """
-    from ..database import async_session
+    from ..database import task_session
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str, prefilled_count: int = 0):
@@ -1244,7 +1244,7 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
 
     try:
         # Short DB session to load config + chapter list
-        async with async_session() as db:
+        async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
             # Load project settings + anonymize AI context
@@ -1303,7 +1303,7 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
         # Full context mode: load ALL old response content once (already anonymized)
         full_old_response = ""
         if proj_context_mode == "full":
-            async with async_session() as db:
+            async with task_session() as db:
                 full_old_response = await _get_full_text_anonymized_by_category(
                     db, project_id, DocumentCategory.OLD_RESPONSE
                 )
@@ -1343,7 +1343,7 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                     old_content = "\n\n".join([c["content"] for c in old_response_chunks])
 
                     # Short DB session for anonymization
-                    async with async_session() as db:
+                    async with task_session() as db:
                         anon_content = await AnonymizationService.anonymize_text(old_content, project_id, db)
 
                 # AI call (no DB connection held) — all fields anonymized
@@ -1362,7 +1362,7 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                     {"document": c["document_name"], "page": c["page_number"], "score": c["score"]}
                     for c in old_response_chunks[:3]
                 ] if old_response_chunks else []
-                async with async_session() as db:
+                async with task_session() as db:
                     deanon = await AnonymizationService.deanonymize_text(content, project_id, db)
                     chap_result = await db.execute(select(Chapter).where(Chapter.id == ch_data["id"]))
                     chapter = chap_result.scalar_one()
@@ -1451,7 +1451,7 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
 
     DB connections are released during the slow AI call to minimize pool pressure.
     """
-    from ..database import async_session
+    from ..database import task_session
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
@@ -1462,7 +1462,7 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
 
     try:
         # ── Phase 1: Load anonymized chunks (short DB session) ──
-        async with async_session() as db:
+        async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
             _update("loading", 10, "Chargement du contenu de l'AO...")
@@ -1511,7 +1511,7 @@ async def _run_detect_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUI
         # ── Phase 3: Save results (short DB session) ──
         _update("saving", 85, f"{len(deliverables)} livrable(s) detecte(s), enregistrement...")
 
-        async with async_session() as db:
+        async with task_session() as db:
             # Remove old response documents (re-detection replaces previous)
             old_docs = await db.execute(
                 select(ResponseDocument).where(ResponseDocument.project_id == project_id)
@@ -1811,7 +1811,7 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
 
     DB connections are released during the slow AI calls to minimize pool pressure.
     """
-    from ..database import async_session
+    from ..database import task_session
     pid = str(project_id)
 
     def _update(step: str, progress: int, message: str):
@@ -1822,7 +1822,7 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
 
     try:
         # ── Phase 1: Load all data (short DB session) ──
-        async with async_session() as db:
+        async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
             # Load project AI context and anonymize it
@@ -1937,7 +1937,7 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
         # ── Phase 3: Deanonymize + save (short DB session) ──
         _update("saving", 96, "Deanonymisation et enregistrement...")
         filled_count = 0
-        async with async_session() as db:
+        async with task_session() as db:
             for doc_id, raw_content in results:
                 deanon = await AnonymizationService.deanonymize_text(raw_content, project_id, db)
                 doc_result = await db.execute(
@@ -2090,7 +2090,7 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
         target_scope: "all" | "memoire_only" | "documents_only"
             Controls which response content to analyze.
     """
-    from ..database import async_session
+    from ..database import task_session
     pid = str(project_id)
     include_chapters = target_scope in ("all", "memoire_only")
     include_uploaded = target_scope in ("all", "documents_only")
@@ -2103,7 +2103,7 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
 
     try:
         # ── Phase 1: Load data + anonymize (short DB session) ──
-        async with async_session() as db:
+        async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
             anon_chapters = ""
@@ -2189,7 +2189,7 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
 
         # ── Phase 3: Deanonymize + save (short DB session) ──
         _update("deanonymizing", 75, "Deanonymisation des resultats...")
-        async with async_session() as db:
+        async with task_session() as db:
             for req in analysis.get("covered_requirements", []):
                 for key in ("requirement", "comment", "source_rfp", "source_response"):
                     if key in req and req[key]:
@@ -2367,7 +2367,7 @@ async def _run_rec_generation(
     Concurrency is controlled by Celery worker --concurrency setting.
     DB connections are released during the slow AI call.
     """
-    from ..database import async_session
+    from ..database import task_session
 
     def _update(step: str, progress: int, message: str, **extra):
         set_progress(_NS_REC, task_id, {
@@ -2382,7 +2382,7 @@ async def _run_rec_generation(
         _update("starting", 5, "Demarrage...")
 
         # ── Phase 1: Load data + anonymize (short DB session) ──
-        async with async_session() as db:
+        async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
             project_result = await db.execute(
@@ -2504,7 +2504,7 @@ Contexte de rédaction (informations sur notre société et notre approche):
         _update("deanonymizing", 80, "Deanonymisation...",
                 chapter_id=resolved_chapter_id, chapter_title=chapter_title)
 
-        async with async_session() as db:
+        async with task_session() as db:
             content = await AnonymizationService.deanonymize_text(content, project_id, db)
 
             if inject and resolved_chapter_id:
@@ -3144,7 +3144,7 @@ async def get_ner_diagnostic(
 
 async def _run_reanonymize(project_id: uuid.UUID):
     """Background task: re-anonymize all document chunks and chapter content."""
-    from ..database import async_session
+    from ..database import task_session
     from ..services.anonymization_service import AnonymizationService
 
     pid = str(project_id)
@@ -3163,7 +3163,7 @@ async def _run_reanonymize(project_id: uuid.UUID):
         # ── Phase 1: NER detection on document chunks ──
         _update("loading", 5, "Chargement des chunks...")
 
-        async with async_session() as db:
+        async with task_session() as db:
             chunks_result = await db.execute(
                 select(DocumentChunk)
                 .join(Document, Document.id == DocumentChunk.document_id)
@@ -3183,7 +3183,7 @@ async def _run_reanonymize(project_id: uuid.UUID):
                 pct = 10 + int(70 * current / total)
                 _update("ner", pct, f"Detection NER : {current}/{total} chunks analyses", current, total)
 
-            async with async_session() as db:
+            async with task_session() as db:
                 # Count mappings before
                 before_count_result = await db.execute(
                     select(func.count(AnonymizationMapping.id))
@@ -3221,7 +3221,7 @@ async def _run_reanonymize(project_id: uuid.UUID):
         # ── Phase 2: Apply all active mappings to chapters ──
         _update("chapters", 85, "Application des mappings aux chapitres...")
 
-        async with async_session() as db:
+        async with task_session() as db:
             all_mappings_result = await db.execute(
                 select(AnonymizationMapping)
                 .where(AnonymizationMapping.project_id == project_id)
