@@ -153,7 +153,10 @@ async def update_ai_config(
 
     if config:
         config.provider = request.provider
-        config.mistral_api_key_encrypted = request.mistral_api_key  # TODO: encrypt in production
+        # Only update API keys when a non-empty value is provided,
+        # so reloading the settings page doesn't wipe stored keys.
+        if request.mistral_api_key:
+            config.mistral_api_key_encrypted = request.mistral_api_key
         config.model_name = request.model_name
         config.temperature = request.temperature
         config.max_tokens = request.max_tokens
@@ -163,7 +166,8 @@ async def update_ai_config(
         config.ner_model = request.ner_model
         config.vision_provider = request.vision_provider
         config.vision_model = request.vision_model
-        config.scaleway_api_key_encrypted = request.scaleway_api_key
+        if request.scaleway_api_key:
+            config.scaleway_api_key_encrypted = request.scaleway_api_key
     else:
         config = AIConfig(
             workspace_id=workspace_id,
