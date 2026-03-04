@@ -899,7 +899,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       <div *ngIf="msg.sources?.length" class="qa-sources">
                         <div class="qa-sources-header" (click)="msg._sourcesOpen = !msg._sourcesOpen">
                           <mat-icon>{{ msg._sourcesOpen ? 'expand_less' : 'expand_more' }}</mat-icon>
-                          <span>{{ msg.sources.length }} source(s) consultee(s)</span>
+                          <span>{{ msg.sources?.length }} source(s) consultee(s)</span>
                         </div>
                         <div *ngIf="msg._sourcesOpen" class="qa-sources-list">
                           <div *ngFor="let src of msg.sources" class="qa-source-item">
