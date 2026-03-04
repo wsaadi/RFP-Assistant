@@ -338,8 +338,9 @@ class DocumentProcessor:
             Tuple of (full_text, pages_data) where pages_data treats each sheet
             as a page with the sheet name as section_title.
         """
-        # Detect old .xls format by checking file signature (BIFF/OLE2 magic bytes)
-        if file_content[:8] != b'PK' and file_content[:4] == b'\xd0\xcf\x11\xe0':
+        # Detect old .xls format by checking file signature (OLE2 magic bytes)
+        # .xlsx files start with PK (ZIP), .xls files start with OLE2 compound doc header
+        if file_content[:4] == b'\xd0\xcf\x11\xe0':
             file_content = DocumentProcessor._convert_xls_bytes_to_xlsx(file_content)
         wb = load_workbook(io.BytesIO(file_content), data_only=True)
         text_parts = []
