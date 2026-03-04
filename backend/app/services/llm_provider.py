@@ -45,11 +45,7 @@ class ProviderConfig:
     ):
         self.provider = provider
         self.scaleway_project_id = scaleway_project_id.strip() if scaleway_project_id else ""
-        # For Scaleway: inject project ID into the URL when provided
-        if not base_url and provider == "scaleway" and self.scaleway_project_id:
-            self.base_url = f"https://api.scaleway.ai/{self.scaleway_project_id}/v1"
-        else:
-            self.base_url = base_url or PROVIDER_DEFAULTS.get(provider, {}).get("base_url", "")
+        self.base_url = base_url or PROVIDER_DEFAULTS.get(provider, {}).get("base_url", "")
         self.api_key = api_key.strip() if api_key else ""
         self.model = model
         self.timeout = timeout
