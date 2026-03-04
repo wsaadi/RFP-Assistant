@@ -2,8 +2,18 @@
  * Lightweight markdown-to-HTML renderer for AI-generated chapter content.
  *
  * Handles: headings, bold, italic, inline code, bullet/numbered lists with
- * nesting, horizontal rules, markdown tables, and paragraphs.
+ * nesting, horizontal rules, markdown tables, [INSERT_IMAGE] markers,
+ * and paragraphs.
  */
+
+/** Regex matching [INSERT_IMAGE:id] or [INSERT_IMAGE:id:layout] markers */
+const IMAGE_MARKER_RE = /^\s*\[INSERT_IMAGE:([^\]:]+)(?::([^\]]+))?\]\s*$/;
+
+/** Supported image layout modes */
+export type ImageLayout = 'center' | 'wrap-right' | 'wrap-left' | 'full-width' | 'inline';
+
+/** Function that resolves an image ID to its URL. Return empty string to skip. */
+export type ImageUrlResolver = (imageId: string) => string;
 
 const ESC_MAP: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;' };
 
@@ -41,7 +51,22 @@ function isTableRow(line: string): boolean {
   return trimmed.includes('|') && (trimmed.match(/\|/g) || []).length >= 2;
 }
 
-export function renderMarkdown(text: string): string {
+/**
+ * Render an [INSERT_IMAGE] marker as an HTML figure with layout class.
+ */
+function renderImageMarker(imageId: string, layout: ImageLayout, resolveUrl?: ImageUrlResolver): string {
+  const url = resolveUrl ? resolveUrl(imageId) : '';
+  if (!url) {
+    return `<div class="image-placeholder"><span>Image: ${esc(imageId)}</span></div>`;
+  }
+  return (
+    `<figure class="doc-image doc-image-${layout}">` +
+    `<img src="${url}" alt="Image" loading="lazy">` +
+    `</figure>`
+  );
+}
+
+export function renderMarkdown(text: string, imageUrlResolver?: ImageUrlResolver): string {
   if (!text) return '';
 
   const lines = text.split('\n');
@@ -63,6 +88,18 @@ export function renderMarkdown(text: string): string {
     const raw = lines[i];
     const trimmed = raw.trimEnd();
     const stripped = trimmed.trim();
+
+    // ── Image marker [INSERT_IMAGE:id] or [INSERT_IMAGE:id:layout] ──
+    const imgMatch = stripped.match(IMAGE_MARKER_RE);
+    if (imgMatch) {
+      closeParagraph();
+      closeAllLists();
+      const imgId = imgMatch[1].trim();
+      const layout = (imgMatch[2]?.trim() || 'center') as ImageLayout;
+      out.push(renderImageMarker(imgId, layout, imageUrlResolver));
+      i++;
+      continue;
+    }
 
     // ── Horizontal rule ──
     if (/^-{3,}$|^\*{3,}$|^_{3,}$/.test(stripped)) {

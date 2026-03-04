@@ -11,13 +11,17 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml.ns import qn, nsdecls
 from docx.oxml import parse_xml
+from PIL import Image as PILImage
 
 from ..config import settings
 
 logger = logging.getLogger(__name__)
 
-# Regex to match [INSERT_IMAGE:some_id] markers in generated content
-_IMAGE_MARKER_RE = re.compile(r'^\s*\[INSERT_IMAGE:([^\]]+)\]\s*$')
+# Regex to match [INSERT_IMAGE:id] or [INSERT_IMAGE:id:layout] markers
+_IMAGE_MARKER_RE = re.compile(r'^\s*\[INSERT_IMAGE:([^\]:]+)(?::([^\]]+))?\]\s*$')
+
+# Valid layout modes for image insertion
+_VALID_LAYOUTS = {'center', 'wrap-right', 'wrap-left', 'full-width', 'inline'}
 
 
 class RFPWordService:
@@ -257,29 +261,171 @@ class RFPWordService:
 
         doc.add_paragraph()  # spacing after table
 
+    @staticmethod
+    def _get_image_dimensions(filepath: str, max_width_inches: float) -> tuple:
+        """Get image dimensions scaled to fit within max_width while preserving aspect ratio."""
+        try:
+            with PILImage.open(filepath) as img:
+                w_px, h_px = img.size
+            aspect = h_px / w_px if w_px > 0 else 1
+            width = Inches(max_width_inches)
+            height = Inches(max_width_inches * aspect)
+            return width, height
+        except Exception:
+            return Inches(max_width_inches), None
+
     @classmethod
-    def _insert_image_in_doc(cls, doc: Document, filepath: str, description: str = ""):
-        """Insert a centered image with optional caption into the Word document."""
+    def _insert_image_in_doc(cls, doc: Document, filepath: str, description: str = "",
+                              layout: str = "center"):
+        """Insert an image with professional layout into the Word document.
+
+        Supported layouts:
+        - center: Centered image (default, 4.5in wide)
+        - full-width: Full page width image
+        - wrap-right: Image floated right with text wrapping
+        - wrap-left: Image floated left with text wrapping
+        - inline: Small inline image within text flow
+        """
         if not filepath or not os.path.exists(filepath):
             logger.warning("Image file not found: %s", filepath)
             return
 
-        try:
-            doc.add_paragraph()
-            p = doc.add_paragraph()
-            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            run = p.add_run()
-            run.add_picture(filepath, width=Inches(4.5))
+        if layout not in _VALID_LAYOUTS:
+            layout = "center"
 
-            if description:
-                caption = doc.add_paragraph()
-                caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                run = caption.add_run(f"Figure : {description}")
-                run.italic = True
-                run.font.size = Pt(9)
-                run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+        try:
+            if layout == "full-width":
+                cls._insert_image_full_width(doc, filepath, description)
+            elif layout in ("wrap-right", "wrap-left"):
+                cls._insert_image_wrapped(doc, filepath, description, layout)
+            elif layout == "inline":
+                cls._insert_image_inline(doc, filepath, description)
+            else:
+                cls._insert_image_centered(doc, filepath, description)
         except Exception as e:
-            logger.error("Error inserting image %s: %s", filepath, e)
+            logger.error("Error inserting image %s (layout=%s): %s", filepath, layout, e)
+
+    @classmethod
+    def _insert_image_centered(cls, doc: Document, filepath: str, description: str):
+        """Insert a centered image — classic professional layout."""
+        doc.add_paragraph()
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p.add_run()
+        run.add_picture(filepath, width=Inches(4.5))
+
+        if description:
+            caption = doc.add_paragraph()
+            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = caption.add_run(f"Figure : {description}")
+            run.italic = True
+            run.font.size = Pt(9)
+            run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+
+    @classmethod
+    def _insert_image_full_width(cls, doc: Document, filepath: str, description: str):
+        """Insert a full-width image spanning the page."""
+        # Calculate available width from page margins
+        section = doc.sections[-1]
+        avail_width = section.page_width - section.left_margin - section.right_margin
+        avail_inches = avail_width / 914400  # EMU to inches
+
+        doc.add_paragraph()
+        p = doc.add_paragraph()
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = p.add_run()
+        width, _ = cls._get_image_dimensions(filepath, avail_inches)
+        run.add_picture(filepath, width=width)
+
+        if description:
+            caption = doc.add_paragraph()
+            caption.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            run = caption.add_run(f"Figure : {description}")
+            run.italic = True
+            run.font.size = Pt(9)
+            run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+
+    @classmethod
+    def _insert_image_wrapped(cls, doc: Document, filepath: str, description: str,
+                               layout: str):
+        """Insert an image with text wrapping (float left or right).
+
+        Uses Word's wp:anchor XML to position the image with tight text wrapping.
+        """
+        wrap_width_inches = 2.8
+        width_emu = int(wrap_width_inches * 914400)
+        img_width, img_height = cls._get_image_dimensions(filepath, wrap_width_inches)
+        height_emu = int(img_height) if img_height else int(width_emu * 0.75)
+
+        # Use a table-based approach for reliable wrapping (1 row, 2 cols)
+        section = doc.sections[-1]
+        avail_width = section.page_width - section.left_margin - section.right_margin
+        avail_inches = avail_width / 914400
+
+        text_col_width = Inches(avail_inches - wrap_width_inches - 0.3)
+        img_col_width = Inches(wrap_width_inches + 0.1)
+
+        table = doc.add_table(rows=1, cols=2)
+        table.alignment = WD_TABLE_ALIGNMENT.CENTER
+        table.autofit = False
+
+        # Remove table borders for a clean layout
+        tbl = table._tbl
+        tblPr = tbl.tblPr if tbl.tblPr is not None else parse_xml(f'<w:tblPr {nsdecls("w")}/>')
+        borders = parse_xml(
+            f'<w:tblBorders {nsdecls("w")}>'
+            f'  <w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+            f'  <w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+            f'  <w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+            f'  <w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+            f'  <w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+            f'  <w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+            f'</w:tblBorders>'
+        )
+        tblPr.append(borders)
+
+        if layout == "wrap-left":
+            img_cell = table.cell(0, 0)
+            text_cell = table.cell(0, 1)
+            table.columns[0].width = img_col_width
+            table.columns[1].width = text_col_width
+        else:
+            text_cell = table.cell(0, 0)
+            img_cell = table.cell(0, 1)
+            table.columns[0].width = text_col_width
+            table.columns[1].width = img_col_width
+
+        # Insert image in image cell
+        img_para = img_cell.paragraphs[0]
+        img_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        run = img_para.add_run()
+        run.add_picture(filepath, width=Inches(wrap_width_inches))
+
+        # Add caption under image if provided
+        if description:
+            caption_para = img_cell.add_paragraph()
+            caption_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            cap_run = caption_para.add_run(description)
+            cap_run.italic = True
+            cap_run.font.size = Pt(8)
+            cap_run.font.color.rgb = RGBColor(0x55, 0x55, 0x55)
+
+        # Text cell gets a placeholder that will flow with surrounding content
+        text_cell.paragraphs[0].text = ""
+
+        # Set vertical alignment to top for both cells
+        for cell in [img_cell, text_cell]:
+            tc = cell._tc
+            tcPr = tc.get_or_add_tcPr()
+            vAlign = parse_xml(f'<w:vAlign {nsdecls("w")} w:val="top"/>')
+            tcPr.append(vAlign)
+
+    @classmethod
+    def _insert_image_inline(cls, doc: Document, filepath: str, description: str):
+        """Insert a small inline image (icon/logo size)."""
+        p = doc.add_paragraph()
+        run = p.add_run()
+        run.add_picture(filepath, height=Inches(0.5))
 
     @classmethod
     def add_chapter_content(cls, doc: Document, title: str, content: str,
@@ -343,16 +489,18 @@ class RFPWordService:
                 i += 1
                 continue
 
-            # [INSERT_IMAGE:id] marker — insert actual image from lookup
+            # [INSERT_IMAGE:id] or [INSERT_IMAGE:id:layout] marker
             img_match = _IMAGE_MARKER_RE.match(stripped)
             if img_match:
                 img_id = img_match.group(1).strip()
+                img_layout = (img_match.group(2) or "center").strip()
                 if image_lookup and img_id in image_lookup:
                     img_info = image_lookup[img_id]
                     cls._insert_image_in_doc(
                         doc,
                         img_info.get("file_path", ""),
                         img_info.get("description", ""),
+                        layout=img_layout,
                     )
                 else:
                     logger.warning("Image marker [INSERT_IMAGE:%s] not found in lookup", img_id)

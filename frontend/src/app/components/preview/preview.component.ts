@@ -14,7 +14,7 @@ import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
-import { renderMarkdown } from '../../services/markdown.service';
+import { renderMarkdown, ImageUrlResolver } from '../../services/markdown.service';
 import { DocumentPreview, PreviewChapter } from '../../models/report.model';
 
 interface ChatMessage {
@@ -90,12 +90,12 @@ interface ChatMessage {
           <ng-container *ngFor="let ch of currentPreview.chapters">
             <div class="page">
               <h2 class="chapter-title">{{ ch.numbering }} {{ ch.title }}</h2>
-              <div class="chapter-content" *ngIf="ch.content" [innerHTML]="renderMarkdown(ch.content)"></div>
+              <div class="chapter-content" *ngIf="ch.content" [innerHTML]="renderContent(ch.content)"></div>
               <p *ngIf="!ch.content" class="empty-content">[Section a completer]</p>
 
               <ng-container *ngFor="let sub of ch.children">
                 <h3 class="sub-title">{{ sub.numbering }} {{ sub.title }}</h3>
-                <div class="chapter-content" *ngIf="sub.content" [innerHTML]="renderMarkdown(sub.content)"></div>
+                <div class="chapter-content" *ngIf="sub.content" [innerHTML]="renderContent(sub.content)"></div>
                 <p *ngIf="!sub.content" class="empty-content">[Section a completer]</p>
               </ng-container>
             </div>
@@ -190,7 +190,7 @@ interface ChatMessage {
     .toc-sub { padding-left: 28px; font-size: 14px; color: #555; }
     .chapter-title { color: #1B3A5C; font-size: 20px; border-bottom: 2px solid #2C5F8A; padding-bottom: 8px; margin-bottom: 16px; }
     .sub-title { color: #2C5F8A; font-size: 17px; margin-top: 28px; margin-bottom: 12px; padding-bottom: 4px; border-bottom: 1px solid #e0e0e0; }
-    .chapter-content { line-height: 1.8; font-size: 14.5px; color: #2c3e50; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; }
+    .chapter-content { line-height: 1.8; font-size: 14.5px; color: #2c3e50; font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; overflow: hidden; }
     .chapter-content p { margin: 0 0 16px 0; line-height: 1.8; text-align: justify; }
     .chapter-content h2 { font-size: 19px; font-weight: 700; color: #1B3A5C; margin: 32px 0 14px 0; padding-bottom: 8px; border-bottom: 2px solid #1976d2; letter-spacing: 0.3px; }
     .chapter-content h3 { font-size: 16.5px; font-weight: 700; color: #1B3A5C; margin: 28px 0 12px 0; padding-bottom: 6px; border-bottom: 1px solid #bbdefb; padding-left: 12px; border-left: 3px solid #1976d2; }
@@ -216,6 +216,21 @@ interface ChatMessage {
     .chapter-content th { background: linear-gradient(135deg, #e3f2fd, #bbdefb); color: #1B3A5C; font-weight: 600; font-size: 13.5px; text-transform: uppercase; letter-spacing: 0.3px; }
     .chapter-content tr:nth-child(even) td { background: #f8f9fa; }
     .chapter-content tr:hover td { background: #e8f4fd; }
+    /* Document images */
+    .chapter-content .doc-image { margin: 20px 0; }
+    .chapter-content .doc-image img { max-width: 100%; height: auto; border-radius: 4px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+    .chapter-content .doc-image-center { text-align: center; }
+    .chapter-content .doc-image-center img { max-width: 80%; }
+    .chapter-content .doc-image-full-width { text-align: center; }
+    .chapter-content .doc-image-full-width img { max-width: 100%; width: 100%; }
+    .chapter-content .doc-image-wrap-right { float: right; margin: 0 0 16px 24px; max-width: 45%; clear: right; }
+    .chapter-content .doc-image-wrap-right img { max-width: 100%; }
+    .chapter-content .doc-image-wrap-left { float: left; margin: 0 24px 16px 0; max-width: 45%; clear: left; }
+    .chapter-content .doc-image-wrap-left img { max-width: 100%; }
+    .chapter-content .doc-image-inline { display: inline-block; margin: 0 8px; vertical-align: middle; }
+    .chapter-content .doc-image-inline img { max-height: 1.5em; width: auto; box-shadow: none; }
+    .chapter-content .image-placeholder { text-align: center; padding: 24px; margin: 16px 0; background: #f5f5f5; border: 2px dashed #ccc; border-radius: 8px; color: #999; font-style: italic; }
+
     .empty-content { color: #999; font-style: italic; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
 
@@ -254,7 +269,7 @@ interface ChatMessage {
     .chat-input:focus { border-color: #1B3A5C; }
     .chat-input:disabled { background: #f5f5f5; }
 
-    @media print { .no-print { display: none !important; } .page { border: none; page-break-after: always; } .preview-layout { display: block; } }
+    @media print { .no-print { display: none !important; } .page { border: none; page-break-after: always; } .preview-layout { display: block; } .doc-image { page-break-inside: avoid; } .doc-image img { box-shadow: none !important; } }
   `],
 })
 export class PreviewComponent implements OnInit, OnDestroy {
@@ -435,5 +450,12 @@ export class PreviewComponent implements OnInit, OnDestroy {
     }
   }
 
-  renderMarkdown = renderMarkdown;
+  /** Resolve image IDs to URLs for the preview renderer */
+  private imageUrlResolver: ImageUrlResolver = (imageId: string) => {
+    return this.api.getImageUrl(imageId);
+  };
+
+  renderContent = (text: string): string => {
+    return renderMarkdown(text, this.imageUrlResolver);
+  };
 }
