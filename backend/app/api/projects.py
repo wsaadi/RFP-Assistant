@@ -3727,15 +3727,19 @@ async def remove_project_member(
 
 def _convert_xls_to_xlsx(file_path: str) -> str:
     """Convert an old .xls file to .xlsx format and return the new file path.
-    If the file is already .xlsx, return it as-is."""
-    if not file_path.lower().endswith('.xls') or file_path.lower().endswith('.xlsx'):
+    Detection is based on file content (OLE2 magic bytes), not extension."""
+    # Check actual file content to detect old .xls (OLE2) format
+    with open(file_path, "rb") as f:
+        magic = f.read(4)
+    if magic != b'\xd0\xcf\x11\xe0':
+        # Not an OLE2/.xls file — already xlsx or other format, return as-is
         return file_path
+
     import xlrd
     from openpyxl import Workbook
 
     xls_book = xlrd.open_workbook(file_path)
     wb = Workbook()
-    # Remove default sheet created by Workbook()
     wb.remove(wb.active)
 
     for sheet_index in range(xls_book.nsheets):
@@ -3745,7 +3749,6 @@ def _convert_xls_to_xlsx(file_path: str) -> str:
             for col_idx in range(xls_sheet.ncols):
                 cell_value = xls_sheet.cell_value(row_idx, col_idx)
                 cell_type = xls_sheet.cell_type(row_idx, col_idx)
-                # Convert xlrd types appropriately
                 if cell_type == xlrd.XL_CELL_DATE:
                     try:
                         date_tuple = xlrd.xldate_as_tuple(cell_value, xls_book.datemode)
