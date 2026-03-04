@@ -90,6 +90,7 @@ async def _run_chapter_generation(
                     base_url=config.ollama_base_url if (config.ner_provider or "ollama") == "ollama" else "",
                     api_key=_n_key,
                     model=config.ner_model or "qwen2.5:14b",
+                    scaleway_project_id=config.scaleway_project_id or "",
                 ))
 
             result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))

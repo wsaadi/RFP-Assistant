@@ -245,6 +245,7 @@ async def init_db():
         "vision_provider": "VARCHAR(20) DEFAULT 'ollama'",
         "vision_model": "VARCHAR(100) DEFAULT 'llama3.2-vision:11b'",
         "scaleway_api_key_encrypted": "TEXT DEFAULT ''",
+        "scaleway_project_id": "VARCHAR(100) DEFAULT ''",
     }
     async with engine.begin() as conn:
         for col_name, col_type in ai_config_columns.items():
