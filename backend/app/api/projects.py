@@ -2184,6 +2184,7 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
 
         analysis = await ai_service.analyze_compliance(
             anon_response, anon_rfp, on_progress=_compliance_progress_cb,
+            target_scope=target_scope,
         )
 
         # ── Phase 3: Deanonymize + save (short DB session) ──
