@@ -83,6 +83,17 @@ class ImageAnalysisService:
             )
         return cls._http_client
 
+    @classmethod
+    def _reset(cls):
+        """Reset cached state for a fresh event loop.
+
+        Must be called at the start of each Celery task to avoid reusing
+        asyncio primitives (Semaphore, HTTP client) from a previous
+        (now-closed) event loop created by ``asyncio.run()``.
+        """
+        cls._semaphore = None
+        cls._http_client = None
+
     @staticmethod
     def _image_to_base64(file_path: str) -> Optional[str]:
         """Read an image file and return its base64-encoded content."""

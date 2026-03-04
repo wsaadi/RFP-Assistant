@@ -59,10 +59,11 @@ celery.conf.update(
     worker_prefetch_multiplier=1,
 
     # ── Redis broker hardening ──
-    # Visibility timeout must exceed task_time_limit so that Redis doesn't
-    # redeliver a message while a task is still running.
+    # Visibility timeout must exceed the longest task_time_limit so that
+    # Redis doesn't redeliver a message while a task is still running.
+    # analyze_images has time_limit=7500 (2h05), so 9000 (2h30) is safe.
     broker_transport_options={
-        "visibility_timeout": 1800,      # 30 min (> task_time_limit)
+        "visibility_timeout": 9000,      # 2 h 30 (> analyze_images time_limit)
         "retry_on_timeout": True,
         "socket_keepalive": True,
         "socket_connect_timeout": 10,

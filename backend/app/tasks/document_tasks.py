@@ -475,24 +475,47 @@ async def _mark_document_failed(document_id: str, reason: str):
     bind=True,
     max_retries=1,
     reject_on_worker_lost=True,
+    soft_time_limit=7200,   # 2 h — large batches need room (global 15 min is too tight)
+    time_limit=7500,        # 2 h 05 hard kill
 )
 def analyze_images_task(self, project_id: str, image_ids: list[str]):
     """Celery task: run Vision AI analysis on selected images.
 
     Triggered from the image gallery when the user clicks "Analyze".
+    Results are saved to DB **incrementally** so that a timeout never
+    loses already-completed work.
     """
     logger.info("[project:%s] analyze_images_task started (%d images)", project_id, len(image_ids))
-    asyncio.run(_analyze_images_async(project_id, image_ids))
+    try:
+        asyncio.run(_analyze_images_async(project_id, image_ids))
+    except SoftTimeLimitExceeded:
+        logger.warning(
+            "[project:%s] Image analysis timed out — partial results already saved",
+            project_id,
+        )
+        # Completed images were already persisted incrementally.
+        # Mark whatever is still pending/in-progress as FAILED.
+        try:
+            asyncio.run(_finalize_after_timeout(project_id, image_ids))
+        except Exception:
+            logger.error("[project:%s] Failed to finalize after timeout", project_id, exc_info=True)
+
+
+# Maximum wall-clock time allowed for a single image (analysis + retries + model load).
+_PER_IMAGE_TIMEOUT = 300  # 5 minutes
 
 
 async def _analyze_images_async(project_id: str, image_ids: list[str]):
-    """Run Vision AI on the given image IDs, updating DB records in place."""
+    """Run Vision AI on the given image IDs, saving each result to DB immediately."""
     from sqlalchemy import select
     from ..database import create_task_engine
     from ..models.document import DocumentImage, ImageAnalysisStatus
     from ..services.image_analysis_service import ImageAnalysisService
     from ..services.anonymization_service import AnonymizationService
     from ..services.progress_service import set_progress
+
+    # Reset service state so the new event loop gets fresh asyncio primitives.
+    ImageAnalysisService._reset()
 
     task_engine, TaskSession = create_task_engine()
     try:
@@ -521,18 +544,6 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
             for img in db_images
         ]
 
-        done_count = 0
-
-        def _progress(done: int, total: int):
-            nonlocal done_count
-            done_count = done
-            set_progress("image_analysis", project_id, {
-                "status": "running",
-                "step": "analyzing",
-                "progress": int(100 * done / total),
-                "message": f"Analyse {done}/{total} images",
-            })
-
         set_progress("image_analysis", project_id, {
             "status": "running",
             "step": "analyzing",
@@ -540,21 +551,52 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
             "message": f"Lancement de l'analyse de {total} images...",
         })
 
-        analysis_results = await ImageAnalysisService.analyze_images_batch(
-            images_data, progress_callback=_progress,
-        )
+        done_count = 0
 
-        # Update DB records with analysis results
-        async with TaskSession() as db:
-            for img_meta, analysis in zip(images_data, analysis_results):
+        async def _process_one(img_meta: dict):
+            """Analyze one image and persist its result to DB immediately."""
+            nonlocal done_count
+            db_id = img_meta["_db_id"]
+            status = ImageAnalysisStatus.COMPLETED.value
+
+            try:
+                analysis = await asyncio.wait_for(
+                    ImageAnalysisService.analyze_image(
+                        file_path=img_meta["file_path"],
+                        page_context=img_meta.get("context", ""),
+                        section_title=img_meta.get("section_title", ""),
+                    ),
+                    timeout=_PER_IMAGE_TIMEOUT,
+                )
+            except asyncio.TimeoutError:
+                logger.warning(
+                    "[project:%s] Image %s timed out after %ds",
+                    project_id, db_id, _PER_IMAGE_TIMEOUT,
+                )
+                analysis = ImageAnalysisService._empty_analysis(
+                    f"Timeout après {_PER_IMAGE_TIMEOUT}s"
+                )
+                status = ImageAnalysisStatus.FAILED.value
+            except Exception as e:
+                logger.error(
+                    "[project:%s] Image %s analysis error: %s",
+                    project_id, db_id, e,
+                )
+                analysis = ImageAnalysisService._empty_analysis(
+                    f"Erreur: {str(e)[:100]}"
+                )
+                status = ImageAnalysisStatus.FAILED.value
+
+            # ── Persist result immediately ──
+            async with TaskSession() as db:
                 result = await db.execute(
                     select(DocumentImage).where(
-                        DocumentImage.id == uuid.UUID(img_meta["_db_id"])
+                        DocumentImage.id == uuid.UUID(db_id)
                     )
                 )
                 img = result.scalar_one_or_none()
                 if not img:
-                    continue
+                    return
 
                 img.image_type = analysis.get("type", "autre")
                 img.description = analysis.get("description", "")
@@ -563,7 +605,7 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
                 img.ocr_text = analysis.get("ocr_text", "")
                 img.suggested_usage = analysis.get("suggested_usage", "")
                 img.tags = analysis.get("key_information", [])[:10]
-                img.analysis_status = ImageAnalysisStatus.COMPLETED.value
+                img.analysis_status = status
 
                 # Anonymize OCR text
                 ocr_text = analysis.get("ocr_text", "")
@@ -581,15 +623,27 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
                     analysis, img.anonymized_ocr_text or "",
                 )
 
-            await db.commit()
+                await db.commit()
+
+            done_count += 1
+            set_progress("image_analysis", project_id, {
+                "status": "running",
+                "step": "analyzing",
+                "progress": int(100 * done_count / total),
+                "message": f"Analyse {done_count}/{total} images",
+            })
+
+        # Process all images concurrently (service semaphore controls parallelism)
+        tasks = [asyncio.create_task(_process_one(img)) for img in images_data]
+        await asyncio.gather(*tasks, return_exceptions=True)
 
         set_progress("image_analysis", project_id, {
             "status": "completed",
             "step": "completed",
             "progress": 100,
-            "message": f"Analyse terminée : {total} images traitées",
+            "message": f"Analyse terminée : {done_count}/{total} images traitées",
         })
-        logger.info("[project:%s] Image analysis completed: %d images", project_id, total)
+        logger.info("[project:%s] Image analysis completed: %d/%d images", project_id, done_count, total)
 
     except Exception as e:
         logger.error("[project:%s] Image analysis failed: %s", project_id, e, exc_info=True)
@@ -599,12 +653,16 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
             "progress": -1,
             "message": f"Erreur: {str(e)[:120]}",
         })
-        # Mark images as failed
+        # Mark remaining unprocessed images as failed
         try:
             async with TaskSession() as db:
                 result = await db.execute(
                     select(DocumentImage).where(
-                        DocumentImage.id.in_([uuid.UUID(iid) for iid in image_ids])
+                        DocumentImage.id.in_([uuid.UUID(iid) for iid in image_ids]),
+                        DocumentImage.analysis_status.notin_([
+                            ImageAnalysisStatus.COMPLETED.value,
+                            ImageAnalysisStatus.FAILED.value,
+                        ]),
                     )
                 )
                 for img in result.scalars().all():
@@ -612,6 +670,42 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
                 await db.commit()
         except Exception:
             pass
+    finally:
+        await task_engine.dispose()
+
+
+async def _finalize_after_timeout(project_id: str, image_ids: list[str]):
+    """Mark remaining unprocessed images as FAILED after a SoftTimeLimitExceeded."""
+    from sqlalchemy import select
+    from ..database import create_task_engine
+    from ..models.document import DocumentImage, ImageAnalysisStatus
+    from ..services.progress_service import set_progress
+
+    task_engine, TaskSession = create_task_engine()
+    try:
+        async with TaskSession() as db:
+            result = await db.execute(
+                select(DocumentImage).where(
+                    DocumentImage.id.in_([uuid.UUID(iid) for iid in image_ids]),
+                    DocumentImage.analysis_status.notin_([
+                        ImageAnalysisStatus.COMPLETED.value,
+                        ImageAnalysisStatus.FAILED.value,
+                    ]),
+                )
+            )
+            remaining = result.scalars().all()
+            for img in remaining:
+                img.analysis_status = ImageAnalysisStatus.FAILED.value
+            await db.commit()
+            remaining_count = len(remaining)
+
+        completed = len(image_ids) - remaining_count
+        set_progress("image_analysis", project_id, {
+            "status": "error",
+            "step": "error",
+            "progress": -1,
+            "message": f"Timeout : {completed}/{len(image_ids)} images traitées avant expiration",
+        })
     finally:
         await task_engine.dispose()
 
