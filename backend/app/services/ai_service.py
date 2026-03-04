@@ -952,11 +952,53 @@ Enrichis et développe significativement ce contenu. Chaque section doit être p
     async def analyze_compliance(
         self, response_content: str, rfp_requirements: str,
         on_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+        target_scope: str = "all",
     ) -> Dict:
-        """Analyze exhaustiveness and compliance of the response."""
-        system_prompt = """Tu es un expert senior en évaluation de réponses aux appels d'offres publics et privés.
-Ta mission: vérifier que le mémoire technique et les documents de réponse couvrent TOUTES les exigences
+        """Analyze exhaustiveness and compliance of the response.
+
+        Args:
+            target_scope: "all" | "memoire_only" | "documents_only"
+                Controls which RFP requirements are relevant for the analysis.
+        """
+        # Build scope-specific instructions so the AI only evaluates requirements
+        # that are relevant to the type of document being analyzed.
+        if target_scope == "memoire_only":
+            scope_context = """## PÉRIMÈTRE DE L'ANALYSE — MÉMOIRE TECHNIQUE UNIQUEMENT
+Tu analyses UNIQUEMENT le **Mémoire Technique** (document rédigé structuré en chapitres).
+Tu dois évaluer sa conformité UNIQUEMENT par rapport aux exigences qui relèvent du mémoire technique:
+- Exigences techniques (méthodologie, moyens, organisation, planning, livrables techniques)
+- Exigences qualité, RSE, environnement, sécurité mentionnées dans le CCTP
+- Présentation de la société, références, CV, moyens humains et matériels
+
+**EXCLUS DE L'ANALYSE** (ne PAS signaler comme manquants):
+- Annexes financières (BPU, DQE, DPGF, bordereaux de prix)
+- Formulaires administratifs (DC1, DC2, DC3, DC4, ATTRI1, AE, acte d'engagement)
+- Attestations, certificats, documents d'assurance
+- Tout document qui est un formulaire à remplir ou une annexe séparée du mémoire technique
+- Tout contenu relevant de la réponse administrative ou financière
+
+Si une exigence de l'AO concerne un BPU, un bordereau de prix, un formulaire administratif ou une annexe
+à fournir séparément, **IGNORE-LA COMPLÈTEMENT**. Ne la mentionne ni dans covered_requirements ni dans missing_elements."""
+            scope_label = "du Mémoire Technique"
+
+        elif target_scope == "documents_only":
+            scope_context = """## PÉRIMÈTRE DE L'ANALYSE — DOCUMENTS UPLOADÉS UNIQUEMENT
+Tu analyses UNIQUEMENT les **documents complémentaires uploadés** (fiches techniques, attestations, tableaux, etc.).
+Tu dois évaluer leur conformité par rapport aux exigences de l'AO qui concernent ces pièces jointes.
+N'évalue PAS le mémoire technique (il n'est pas inclus dans cette analyse)."""
+            scope_label = "des documents de réponse uploadés"
+
+        else:  # "all"
+            scope_context = """## PÉRIMÈTRE DE L'ANALYSE — TOUS LES DOCUMENTS DE RÉPONSE
+Tu analyses l'ensemble de la réponse: Mémoire Technique + documents complémentaires uploadés.
+Évalue la conformité par rapport à TOUTES les exigences de l'AO."""
+            scope_label = "de la réponse complète (Mémoire Technique + documents)"
+
+        system_prompt = f"""Tu es un expert senior en évaluation de réponses aux appels d'offres publics et privés.
+Ta mission: vérifier la conformité et l'exhaustivité {scope_label} par rapport aux exigences
 extraites des pièces du dossier de consultation (CCAP, CCTP, RC, etc.).
+
+{scope_context}
 
 ## Contexte des documents d'appel d'offres (AO)
 Les documents AO sont structurés avec des marqueurs === DOCUMENT: nom_du_fichier ===.
@@ -975,23 +1017,24 @@ La réponse peut contenir:
 - Des documents complémentaires uploadés (fiches techniques, attestations, tableaux Excel, etc.).
 
 ## Règles d'analyse
-1. Extrais CHAQUE exigence significative des documents AO (CCTP + CCAP + autres).
-2. Vérifie si cette exigence est couverte dans la réponse (mémoire technique OU documents complémentaires).
+1. Extrais CHAQUE exigence significative des documents AO **QUI RELÈVE DU PÉRIMÈTRE DÉFINI CI-DESSUS**.
+2. Vérifie si cette exigence est couverte dans le contenu analysé.
 3. Ne marque PAS une exigence comme manquante si elle est couverte quelque part dans le contenu,
    même dans une section différente ou un document séparé.
 4. Pour les exigences du CCTP: vérifie la couverture technique (méthodologie, moyens, organisation).
 5. Pour les exigences du CCAP: vérifie les engagements administratifs (délais, pénalités, conformités).
 6. Sois PRÉCIS sur ce qui manque: ne dis pas juste "non couvert", explique CE QUI manque concrètement.
-7. Analyse l'INTÉGRALITÉ du contenu fourni: technique, RSE, qualité, sécurité, environnement, etc.
+7. Analyse l'INTÉGRALITÉ du contenu fourni dans le périmètre: technique, RSE, qualité, sécurité, environnement, etc.
+8. **NE SIGNALE JAMAIS comme manquant un élément qui ne relève pas du périmètre d'analyse défini.**
 
 Réponds au format JSON (sans markdown):
-{
+{{
   "score": 0-100,
-  "covered_requirements": [{"requirement": "...", "coverage": "complete|partial|missing", "comment": "...", "source_rfp": "nom du document AO source (ex: CCTP, CCAP)", "source_response": "nom du document/chapitre de réponse couvrant cette exigence"}],
-  "missing_elements": [{"requirement": "...", "description": "ce qui manque concrètement dans la réponse", "source_rfp": "nom du document AO source"}],
+  "covered_requirements": [{{"requirement": "...", "coverage": "complete|partial|missing", "comment": "...", "source_rfp": "nom du document AO source (ex: CCTP, CCAP)", "source_response": "nom du document/chapitre de réponse couvrant cette exigence"}}],
+  "missing_elements": [{{"requirement": "...", "description": "ce qui manque concrètement dans la réponse", "source_rfp": "nom du document AO source"}}],
   "recommendations": ["actions concrètes pour améliorer la conformité"],
   "summary": "..."
-}
+}}
 
 Pour source_rfp: indique le nom du document AO (CCTP, CCAP, RC, etc.) où l'exigence est mentionnée.
 Pour source_response: indique le chapitre du mémoire technique ou le document qui couvre cette exigence."""
@@ -999,13 +1042,13 @@ Pour source_response: indique le chapitre du mémoire technique ou le document q
         user_prompt = f"""DOCUMENTS DE L'APPEL D'OFFRES (CCAP, CCTP, RC, annexes):
 {rfp_requirements[:50000]}
 
-CONTENU DE LA RÉPONSE (Mémoire Technique + documents complémentaires):
+CONTENU ANALYSÉ ({scope_label}):
 {response_content[:50000]}
 
-Analyse l'exhaustivité et la conformité de cette réponse par rapport aux exigences de l'AO.
+Analyse l'exhaustivité et la conformité de ce contenu par rapport aux exigences de l'AO.
 IMPORTANT:
-- Parcours CHAQUE article/clause du CCTP et du CCAP pour vérifier sa couverture dans la réponse.
-- Le Mémoire Technique est le document principal de la réponse – concentre-toi dessus en priorité.
+- Respecte STRICTEMENT le périmètre d'analyse défini (ne signale PAS de manques sur des documents hors périmètre).
+- Parcours CHAQUE article/clause pertinent du CCTP et du CCAP pour vérifier sa couverture.
 - Indique pour chaque exigence le document AO source (CCTP art.X, CCAP art.Y) et le chapitre/document de réponse correspondant.
 - Sois factuel et précis dans tes commentaires."""
 
