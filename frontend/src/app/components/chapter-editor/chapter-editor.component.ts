@@ -320,7 +320,7 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
   newNote = '';
   editorMode: 'edit' | 'preview' | 'anonymized' = 'preview';
   Math = Math;
-  renderMarkdown = renderMarkdown;
+  renderMarkdown = (text: string) => renderMarkdown(text, (id: string) => this.api.getImageUrl(id));
 
   // Anonymized view state
   anonymizedContent = '';

@@ -35,6 +35,10 @@ class PreviewChatRequest(BaseModel):
     message: str = Field(..., min_length=1, max_length=2000)
 
 
+class DocumentQARequest(BaseModel):
+    question: str = Field(..., min_length=1, max_length=2000)
+
+
 @router.post("/{project_id}/word")
 async def export_word(
     project_id: uuid.UUID,
@@ -809,3 +813,122 @@ Applique l'instruction et retourne le contenu COMPLET modifie."""
         })
     finally:
         await task_engine.dispose()
+
+
+# ── Document Q&A ──
+
+
+CATEGORY_LABELS = {
+    "old_rfp": "Ancien AO",
+    "old_response": "Ancienne Reponse",
+    "new_rfp": "Nouvel AO",
+    "new_response": "Notre Reponse",
+    "inspiration": "Inspiration",
+}
+
+
+@router.post("/{project_id}/document-qa")
+async def document_qa(
+    project_id: uuid.UUID,
+    request: DocumentQARequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Answer a question about the project documents using RAG (vector search + LLM)."""
+    from ..services.vector_service import VectorService
+    from ..services.ai_service import create_ai_service
+
+    result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouve")
+
+    config_result = await db.execute(
+        select(AIConfig).where(AIConfig.workspace_id == project.workspace_id)
+    )
+    config = config_result.scalar_one_or_none()
+    if not config or not config.mistral_api_key_encrypted:
+        raise HTTPException(status_code=400, detail="Configuration IA non definie")
+
+    ai_service = create_ai_service(config)
+
+    # Semantic search across all documents
+    search_results = VectorService.search(
+        str(project_id), request.question, top_k=15,
+    )
+
+    if not search_results:
+        return {
+            "answer": "Je n'ai trouve aucun document pertinent pour repondre a cette question. Verifiez que des documents ont bien ete charges et traites dans le projet.",
+            "sources": [],
+        }
+
+    # Build context from search results
+    context_parts = []
+    sources = []
+    seen_sources = set()
+    for r in search_results:
+        content = r["content"]
+        # Remove the "passage: " prefix added during indexing
+        if content.startswith("passage: "):
+            content = content[9:]
+        doc_name = r.get("document_name", "Document inconnu")
+        category = r.get("category", "")
+        page = r.get("page_number", 0)
+        cat_label = CATEGORY_LABELS.get(category, category)
+
+        context_parts.append(
+            f"[Source: {doc_name} ({cat_label}), page {page}]\n{content}"
+        )
+
+        source_key = f"{doc_name}|{page}"
+        if source_key not in seen_sources:
+            seen_sources.add(source_key)
+            sources.append({
+                "document_name": doc_name,
+                "category": category,
+                "category_label": cat_label,
+                "page_number": page,
+                "score": r.get("score", 0),
+                "excerpt": content[:200],
+            })
+
+    context_text = "\n\n---\n\n".join(context_parts)
+
+    system_prompt = """Tu es un assistant expert en analyse de documents pour les appels d'offres.
+L'utilisateur te pose des questions sur les documents charges dans le projet.
+Tu dois repondre en te basant UNIQUEMENT sur les extraits de documents fournis ci-dessous.
+
+Regles:
+- Reponds de maniere precise et detaillee en te basant sur les documents.
+- Cite TOUJOURS tes sources : indique le nom du document, la categorie et le numero de page entre parentheses. Exemple: (Source: cahier_des_charges.pdf, Nouvel AO, page 12)
+- Si tu ne trouves pas l'information dans les extraits fournis, dis-le clairement.
+- Quand l'utilisateur parle d'"ancien AO" ou "ancien appel d'offres", il fait reference aux documents de categorie "Ancien AO".
+- Quand il parle d'"ancienne reponse", il fait reference aux documents de categorie "Ancienne Reponse".
+- Quand il parle de "nouvel AO" ou "nouveau cahier des charges", il fait reference aux documents de categorie "Nouvel AO".
+- Quand il parle de "notre reponse", il fait reference aux documents de categorie "Notre Reponse".
+- Utilise le markdown pour structurer ta reponse (titres, listes, gras).
+- Si la question porte sur une comparaison entre ancien et nouvel AO, compare les informations des documents des deux categories."""
+
+    user_prompt = f"""Voici les extraits pertinents des documents du projet :
+
+{context_text}
+
+---
+
+Question de l'utilisateur : {request.question}
+
+Reponds en citant tes sources."""
+
+    try:
+        answer = await ai_service.generate_streaming(
+            system_prompt, user_prompt, temperature=0.2, timeout=120,
+        )
+    except Exception as e:
+        logger.error("Document QA failed for project %s: %s", project_id, e)
+        raise HTTPException(status_code=500, detail=f"Erreur IA: {str(e)[:200]}")
+
+    return {
+        "answer": answer,
+        "sources": sources[:10],
+    }

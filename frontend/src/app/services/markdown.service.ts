@@ -41,7 +41,16 @@ function isTableRow(line: string): boolean {
   return trimmed.includes('|') && (trimmed.match(/\|/g) || []).length >= 2;
 }
 
-export function renderMarkdown(text: string): string {
+/** Regex matching [INSERT_IMAGE:uuid] markers on their own line */
+const IMAGE_MARKER_RE = /^\s*\[INSERT_IMAGE:([^\]]+)\]\s*$/;
+
+/**
+ * Render markdown to HTML.
+ * @param text   The markdown source.
+ * @param imageUrlFn  Optional function that maps an image UUID to an <img> src URL.
+ *                    When provided, [INSERT_IMAGE:uuid] markers are rendered as images.
+ */
+export function renderMarkdown(text: string, imageUrlFn?: (id: string) => string): string {
   if (!text) return '';
 
   const lines = text.split('\n');
@@ -91,6 +100,18 @@ export function renderMarkdown(text: string): string {
         }
       }
       out.push('<blockquote>' + quoteLines.map(l => inlineFormat(l)).join('<br>') + '</blockquote>');
+      continue;
+    }
+
+    // ── Image marker [INSERT_IMAGE:uuid] ──
+    const imageMatch = stripped.match(IMAGE_MARKER_RE);
+    if (imageMatch && imageUrlFn) {
+      closeParagraph();
+      closeAllLists();
+      const imageId = imageMatch[1];
+      const url = imageUrlFn(imageId);
+      out.push(`<div class="inserted-image"><img src="${url}" alt="Image" loading="lazy"></div>`);
+      i++;
       continue;
     }
 

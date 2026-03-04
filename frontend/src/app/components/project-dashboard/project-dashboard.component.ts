@@ -873,6 +873,91 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           </div>
         </mat-tab>
 
+        <mat-tab label="Q&A Documents">
+          <div class="tab-content">
+            <div class="qa-container">
+              <div class="qa-header">
+                <mat-icon>question_answer</mat-icon>
+                <div>
+                  <h3>Interroger les documents du projet</h3>
+                  <p class="qa-subtitle">Posez des questions sur l'ensemble des documents charges. L'IA analysera les documents et citera ses sources.</p>
+                </div>
+              </div>
+
+              <div class="qa-chat-area">
+                <div class="qa-messages" *ngIf="qaMessages.length > 0">
+                  <div *ngFor="let msg of qaMessages" class="qa-msg" [class.qa-msg-user]="msg.role === 'user'" [class.qa-msg-ai]="msg.role === 'assistant'" [class.qa-msg-error]="msg.role === 'error'">
+                    <div class="qa-msg-icon">
+                      <mat-icon *ngIf="msg.role === 'user'">person</mat-icon>
+                      <mat-icon *ngIf="msg.role === 'assistant'">auto_awesome</mat-icon>
+                      <mat-icon *ngIf="msg.role === 'error'">error</mat-icon>
+                    </div>
+                    <div class="qa-msg-body">
+                      <div *ngIf="msg.role === 'user'" class="qa-msg-text">{{ msg.content }}</div>
+                      <div *ngIf="msg.role !== 'user'" class="qa-msg-text rendered-qa" [innerHTML]="renderMarkdown(msg.content)"></div>
+
+                      <div *ngIf="msg.sources?.length" class="qa-sources">
+                        <div class="qa-sources-header" (click)="msg._sourcesOpen = !msg._sourcesOpen">
+                          <mat-icon>{{ msg._sourcesOpen ? 'expand_less' : 'expand_more' }}</mat-icon>
+                          <span>{{ msg.sources.length }} source(s) consultee(s)</span>
+                        </div>
+                        <div *ngIf="msg._sourcesOpen" class="qa-sources-list">
+                          <div *ngFor="let src of msg.sources" class="qa-source-item">
+                            <mat-icon class="qa-source-icon">description</mat-icon>
+                            <div class="qa-source-info">
+                              <strong>{{ src.document_name }}</strong>
+                              <span class="qa-source-meta">
+                                <mat-chip class="qa-cat-chip">{{ src.category_label }}</mat-chip>
+                                page {{ src.page_number }}
+                              </span>
+                              <p class="qa-source-excerpt">{{ src.excerpt }}</p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                      <span class="qa-msg-time">{{ msg.timestamp | date:'HH:mm' }}</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div *ngIf="qaMessages.length === 0" class="qa-empty">
+                  <mat-icon>search</mat-icon>
+                  <h3>Posez votre question</h3>
+                  <p>Exemples :</p>
+                  <div class="qa-examples">
+                    <button mat-stroked-button (click)="qaInput = 'Quelles sont les exigences techniques du nouvel AO ?'; askQuestion()">
+                      Exigences techniques du nouvel AO ?
+                    </button>
+                    <button mat-stroked-button (click)="qaInput = 'Quelles sont les differences entre ancien et nouvel AO ?'; askQuestion()">
+                      Differences ancien vs nouvel AO ?
+                    </button>
+                    <button mat-stroked-button (click)="qaInput = 'Que contenait notre ancienne reponse concernant la methodologie ?'; askQuestion()">
+                      Methodologie dans l'ancienne reponse ?
+                    </button>
+                  </div>
+                </div>
+
+                <div *ngIf="qaLoading" class="qa-loading">
+                  <mat-spinner diameter="24"></mat-spinner>
+                  <span>Analyse des documents en cours...</span>
+                </div>
+              </div>
+
+              <div class="qa-input-area">
+                <mat-form-field appearance="outline" class="full-width qa-input-field">
+                  <mat-label>Votre question sur les documents...</mat-label>
+                  <textarea matInput [(ngModel)]="qaInput" (keydown.enter)="onQaKeydown($event)"
+                    [disabled]="qaLoading" rows="2"
+                    placeholder="Ex: Quels sont les criteres de selection du nouvel AO ?"></textarea>
+                </mat-form-field>
+                <button mat-mini-fab color="primary" (click)="askQuestion()" [disabled]="!qaInput.trim() || qaLoading" matTooltip="Envoyer">
+                  <mat-icon>send</mat-icon>
+                </button>
+              </div>
+            </div>
+          </div>
+        </mat-tab>
+
         <mat-tab label="Membres">
           <div class="tab-content">
             <!-- Add member form -->
@@ -997,6 +1082,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .ai-prompt-section .full-width { width: 100%; }
     .ai-prompt-actions { display: flex; gap: 8px; align-items: center; }
     .sub-ai-prompt { margin-left: 0; }
+    ::ng-deep .inserted-image { margin: 16px 0; text-align: center; }
+    ::ng-deep .inserted-image img { max-width: 100%; height: auto; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
     .ch-content-preview {
       margin-top: 12px; padding: 16px 20px; background: #fafafa; border: 1px solid #e0e0e0;
       border-radius: 8px; font-size: 13.5px; line-height: 1.7; color: #333; max-height: 400px; overflow-y: auto;
@@ -1182,6 +1269,58 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .doc-selector-desc { display: block; font-size: 12px; color: #888; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
     .doc-selector-chapters { font-size: 11px !important; }
 
+    /* Q&A Documents */
+    .qa-container { max-width: 900px; }
+    .qa-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 20px; padding: 16px; background: linear-gradient(135deg, #e8eaf6, #e3f2fd); border-radius: 12px; }
+    .qa-header mat-icon { font-size: 32px; width: 32px; height: 32px; color: #1B3A5C; margin-top: 4px; }
+    .qa-header h3 { margin: 0; color: #1B3A5C; }
+    .qa-subtitle { margin: 4px 0 0; font-size: 13px; color: #666; }
+    .qa-chat-area { min-height: 200px; }
+    .qa-messages { display: flex; flex-direction: column; gap: 16px; margin-bottom: 20px; }
+    .qa-msg { display: flex; gap: 10px; }
+    .qa-msg-icon { padding-top: 4px; }
+    .qa-msg-icon mat-icon { font-size: 20px; width: 20px; height: 20px; }
+    .qa-msg-user .qa-msg-icon mat-icon { color: #1B3A5C; }
+    .qa-msg-ai .qa-msg-icon mat-icon { color: #7b1fa2; }
+    .qa-msg-error .qa-msg-icon mat-icon { color: #c62828; }
+    .qa-msg-body { flex: 1; min-width: 0; }
+    .qa-msg-user .qa-msg-body { background: #e3f2fd; border-radius: 12px; padding: 12px 16px; }
+    .qa-msg-ai .qa-msg-body { background: #f5f5f5; border-radius: 12px; padding: 12px 16px; }
+    .qa-msg-error .qa-msg-body { background: #ffebee; border-radius: 12px; padding: 12px 16px; }
+    .qa-msg-text { font-size: 14px; line-height: 1.7; color: #333; white-space: pre-wrap; word-break: break-word; }
+    ::ng-deep .rendered-qa p { margin: 0 0 10px 0; }
+    ::ng-deep .rendered-qa h2, ::ng-deep .rendered-qa h3 { font-size: 15px; font-weight: 700; color: #1B3A5C; margin: 16px 0 8px 0; }
+    ::ng-deep .rendered-qa ul, ::ng-deep .rendered-qa ol { margin: 6px 0 10px 0; padding-left: 24px; }
+    ::ng-deep .rendered-qa ul { list-style-type: disc; }
+    ::ng-deep .rendered-qa li { margin-bottom: 4px; }
+    ::ng-deep .rendered-qa strong { color: #1B3A5C; }
+    ::ng-deep .rendered-qa code { background: #e8eaf6; padding: 1px 5px; border-radius: 3px; font-size: 12.5px; }
+    ::ng-deep .rendered-qa table { border-collapse: collapse; width: 100%; font-size: 13px; margin: 12px 0; }
+    ::ng-deep .rendered-qa th, ::ng-deep .rendered-qa td { border: 1px solid #ccc; padding: 8px 10px; text-align: left; }
+    ::ng-deep .rendered-qa th { background: #e3f2fd; color: #1B3A5C; font-weight: 600; }
+    .qa-msg-time { font-size: 11px; color: #aaa; display: block; margin-top: 6px; }
+    .qa-sources { margin-top: 10px; border-top: 1px solid #e0e0e0; padding-top: 8px; }
+    .qa-sources-header { display: flex; align-items: center; gap: 4px; cursor: pointer; font-size: 13px; color: #1976d2; font-weight: 500; }
+    .qa-sources-header:hover { color: #1565c0; }
+    .qa-sources-list { margin-top: 8px; display: flex; flex-direction: column; gap: 8px; }
+    .qa-source-item { display: flex; gap: 8px; padding: 8px; background: white; border-radius: 8px; border: 1px solid #e0e0e0; }
+    .qa-source-icon { color: #1976d2; font-size: 18px; width: 18px; height: 18px; margin-top: 2px; }
+    .qa-source-info { flex: 1; min-width: 0; }
+    .qa-source-info strong { font-size: 13px; color: #1B3A5C; }
+    .qa-source-meta { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #888; margin-top: 2px; }
+    .qa-cat-chip { font-size: 10px !important; height: 20px !important; min-height: 20px !important; }
+    .qa-source-excerpt { font-size: 12px; color: #666; margin: 4px 0 0; line-height: 1.5; max-height: 40px; overflow: hidden; text-overflow: ellipsis; }
+    .qa-empty { text-align: center; padding: 40px 20px; color: #888; }
+    .qa-empty mat-icon { font-size: 48px; width: 48px; height: 48px; color: #ccc; }
+    .qa-empty h3 { color: #1B3A5C; margin: 12px 0 4px; }
+    .qa-empty p { font-size: 13px; margin: 0 0 12px; }
+    .qa-examples { display: flex; flex-direction: column; gap: 8px; max-width: 500px; margin: 0 auto; }
+    .qa-examples button { text-align: left; font-size: 13px; color: #1976d2; border-color: #bbdefb; }
+    .qa-loading { display: flex; align-items: center; gap: 12px; padding: 16px; background: #fff3e0; border-radius: 8px; margin-bottom: 16px; }
+    .qa-loading span { font-size: 13px; color: #e65100; }
+    .qa-input-area { display: flex; gap: 12px; align-items: flex-start; }
+    .qa-input-field { flex: 1; }
+
     /* Project Members */
     .add-member-card { padding: 24px; margin-bottom: 16px; }
     .add-member-card h3 { margin-top: 0; color: #1B3A5C; }
@@ -1256,6 +1395,11 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   private markdownCache = new Map<string, string>();
   private wordCountCache = new Map<string, number>();
   aiPromptText: Record<string, string> = {};
+
+  // Document Q&A
+  qaMessages: { role: 'user' | 'assistant' | 'error'; content: string; sources?: any[]; timestamp: Date; _sourcesOpen?: boolean }[] = [];
+  qaInput = '';
+  qaLoading = false;
 
   // Project members
   projectMembers: any[] = [];
@@ -1728,7 +1872,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   // ── Markdown rendering ──
 
-  renderMarkdown = renderMarkdown;
+  renderMarkdown = (text: string) => renderMarkdown(text, (id: string) => this.api.getImageUrl(id));
 
   /** Cached markdown rendering: avoids re-rendering on every change detection cycle. */
   getCachedMarkdown(id: string, content: string): string {
@@ -1737,7 +1881,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     if (cached !== undefined) return cached;
     // Truncate content preview to first 2000 chars for dashboard performance
     const truncated = content.length > 2000 ? content.slice(0, 2000) + '\n\n*[...]*' : content;
-    const html = renderMarkdown(truncated);
+    const html = renderMarkdown(truncated, (imgId: string) => this.api.getImageUrl(imgId));
     this.markdownCache.set(id, html);
     return html;
   }
@@ -2596,6 +2740,46 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       other: 'insert_drive_file',
     };
     return icons[format] || 'insert_drive_file';
+  }
+
+  // ── Document Q&A ──
+
+  askQuestion(): void {
+    const question = this.qaInput.trim();
+    if (!question || this.qaLoading) return;
+
+    this.qaMessages.push({ role: 'user', content: question, timestamp: new Date() });
+    this.qaInput = '';
+    this.qaLoading = true;
+
+    this.api.documentQA(this.projectId, question).subscribe({
+      next: (res) => {
+        this.qaLoading = false;
+        this.qaMessages.push({
+          role: 'assistant',
+          content: res.answer,
+          sources: res.sources,
+          timestamp: new Date(),
+          _sourcesOpen: false,
+        });
+      },
+      error: (err) => {
+        this.qaLoading = false;
+        this.qaMessages.push({
+          role: 'error',
+          content: err.error?.detail || 'Erreur lors de l\'interrogation de l\'IA',
+          timestamp: new Date(),
+        });
+      },
+    });
+  }
+
+  onQaKeydown(event: Event): void {
+    const ke = event as KeyboardEvent;
+    if (!ke.shiftKey) {
+      ke.preventDefault();
+      this.askQuestion();
+    }
   }
 
   // ── Project member management ──
