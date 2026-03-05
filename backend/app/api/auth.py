@@ -129,8 +129,8 @@ async def login(request: LoginRequest, req: Request, response: Response, db: Asy
         key="rfp_access_token",
         value=token,
         httponly=True,
-        secure=True,
-        samesite="strict",
+        secure=settings.cookie_secure,
+        samesite="lax" if not settings.cookie_secure else "strict",
         max_age=settings.access_token_expire_minutes * 60,
         path="/",
     )
@@ -149,8 +149,8 @@ async def logout(response: Response):
     response.delete_cookie(
         key="rfp_access_token",
         httponly=True,
-        secure=True,
-        samesite="strict",
+        secure=settings.cookie_secure,
+        samesite="lax" if not settings.cookie_secure else "strict",
         path="/",
     )
     return {"message": "Déconnexion réussie"}
