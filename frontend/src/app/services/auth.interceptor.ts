@@ -5,15 +5,11 @@ import { AuthService } from './auth.service';
 
 export const authInterceptor: HttpInterceptorFn = (req, next) => {
   const authService = inject(AuthService);
-  const token = authService.getToken();
 
-  if (token) {
-    req = req.clone({
-      setHeaders: {
-        Authorization: `Bearer ${token}`,
-      },
-    });
-  }
+  // Send cookies (httpOnly JWT) with every API request
+  req = req.clone({
+    withCredentials: true,
+  });
 
   return next(req).pipe(
     catchError((error: HttpErrorResponse) => {

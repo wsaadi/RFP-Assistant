@@ -164,7 +164,19 @@ export class ApiService {
   }
 
   getImageUrl(imageId: string): string {
-    const token = localStorage.getItem('rfp_token') || '';
+    // Images are now served via httpOnly cookie authentication.
+    // No token in the URL — the browser sends the cookie automatically.
+    return `${this.baseUrl}/documents/image-file/${imageId}`;
+  }
+
+  getImageTokens(imageIds: string[]): Observable<{ tokens: { [key: string]: string } }> {
+    return this.http.post<{ tokens: { [key: string]: string } }>(
+      `${this.baseUrl}/documents/image-tokens`,
+      imageIds,
+    );
+  }
+
+  getSignedImageUrl(imageId: string, token: string): string {
     return `${this.baseUrl}/documents/image-file/${imageId}?token=${encodeURIComponent(token)}`;
   }
 

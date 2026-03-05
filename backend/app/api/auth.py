@@ -2,7 +2,7 @@
 import logging
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
@@ -86,8 +86,8 @@ def validate_password_strength(password: str) -> None:
 
 
 @router.post("/login", response_model=TokenResponse)
-async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(get_db)):
-    """Authenticate user and return JWT token."""
+async def login(request: LoginRequest, req: Request, response: Response, db: AsyncSession = Depends(get_db)):
+    """Authenticate user and return JWT token (set as httpOnly cookie)."""
     client_ip = req.client.host if req.client else "unknown"
     ip_key = f"ip:{client_ip}"
     email_key = f"email:{request.email.lower().strip()}"
@@ -124,12 +124,36 @@ async def login(request: LoginRequest, req: Request, db: AsyncSession = Depends(
     token = create_access_token(data={"sub": str(user.id), "role": user.role.value})
     logger.info("Successful login user=%s (id=%s) ip=%s", user.username, user.id, client_ip)
 
+    # Set JWT as httpOnly secure cookie (not accessible via JavaScript)
+    response.set_cookie(
+        key="rfp_access_token",
+        value=token,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=settings.access_token_expire_minutes * 60,
+        path="/",
+    )
+
     return TokenResponse(
         access_token=token,
         user_id=str(user.id),
         role=user.role.value,
         username=user.username,
     )
+
+
+@router.post("/logout")
+async def logout(response: Response):
+    """Clear the authentication cookie."""
+    response.delete_cookie(
+        key="rfp_access_token",
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
+    return {"message": "Déconnexion réussie"}
 
 
 @router.get("/me")

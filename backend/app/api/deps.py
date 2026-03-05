@@ -2,7 +2,7 @@
 import uuid
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -13,15 +13,37 @@ from ..models.user import User, UserRole
 from ..models.workspace import WorkspaceMember, MemberRole
 from ..models.project import ProjectMember
 
-security_scheme = HTTPBearer()
+security_scheme = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security_scheme),
     db: AsyncSession = Depends(get_db),
 ) -> User:
-    """Get the current authenticated user from JWT token."""
-    payload = decode_access_token(credentials.credentials)
+    """Get the current authenticated user from JWT token.
+
+    Reads token from (in priority order):
+    1. Authorization: Bearer header
+    2. rfp_access_token httpOnly cookie
+    """
+    token: Optional[str] = None
+
+    # 1. Bearer header
+    if credentials:
+        token = credentials.credentials
+
+    # 2. httpOnly cookie fallback
+    if not token:
+        token = request.cookies.get("rfp_access_token")
+
+    if not token:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token d'authentification requis",
+        )
+
+    payload = decode_access_token(token)
     if payload is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

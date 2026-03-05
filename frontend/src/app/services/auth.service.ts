@@ -7,7 +7,6 @@ import { LoginRequest, TokenResponse, UserInfo } from '../models/report.model';
 @Injectable({ providedIn: 'root' })
 export class AuthService {
   private baseUrl = '/api/auth';
-  private tokenKey = 'rfp_token';
   private userKey = 'rfp_user';
 
   private currentUserSubject = new BehaviorSubject<UserInfo | null>(this.getStoredUser());
@@ -16,9 +15,10 @@ export class AuthService {
   constructor(private http: HttpClient, private router: Router) {}
 
   login(request: LoginRequest): Observable<TokenResponse> {
-    return this.http.post<TokenResponse>(`${this.baseUrl}/login`, request).pipe(
+    return this.http.post<TokenResponse>(`${this.baseUrl}/login`, request, {
+      withCredentials: true,
+    }).pipe(
       tap((response) => {
-        localStorage.setItem(this.tokenKey, response.access_token);
         const user: UserInfo = {
           id: response.user_id,
           email: '',
@@ -27,25 +27,28 @@ export class AuthService {
           role: response.role,
           is_active: true,
         };
-        localStorage.setItem(this.userKey, JSON.stringify(user));
+        sessionStorage.setItem(this.userKey, JSON.stringify(user));
         this.currentUserSubject.next(user);
       })
     );
   }
 
   logout(): void {
-    localStorage.removeItem(this.tokenKey);
-    localStorage.removeItem(this.userKey);
+    this.http.post(`${this.baseUrl}/logout`, {}, { withCredentials: true }).subscribe();
+    sessionStorage.removeItem(this.userKey);
     this.currentUserSubject.next(null);
     this.router.navigate(['/login']);
   }
 
   getToken(): string | null {
-    return localStorage.getItem(this.tokenKey);
+    // Token is now in httpOnly cookie — not accessible via JS.
+    // This method returns null; auth is handled via cookie automatically.
+    return null;
   }
 
   isLoggedIn(): boolean {
-    return !!this.getToken();
+    // With httpOnly cookies, we check user presence in session
+    return !!this.currentUserSubject.value;
   }
 
   isAdmin(): boolean {
@@ -58,16 +61,25 @@ export class AuthService {
   }
 
   fetchCurrentUser(): Observable<UserInfo> {
-    return this.http.get<UserInfo>(`${this.baseUrl}/me`).pipe(
+    return this.http.get<UserInfo>(`${this.baseUrl}/me`, { withCredentials: true }).pipe(
       tap((user) => {
-        localStorage.setItem(this.userKey, JSON.stringify(user));
+        sessionStorage.setItem(this.userKey, JSON.stringify(user));
         this.currentUserSubject.next(user);
       })
     );
   }
 
   private getStoredUser(): UserInfo | null {
-    const stored = localStorage.getItem(this.userKey);
-    return stored ? JSON.parse(stored) : null;
+    const stored = sessionStorage.getItem(this.userKey);
+    if (!stored) {
+      // Migration: check localStorage for old key and move to sessionStorage
+      const legacy = localStorage.getItem(this.userKey) || localStorage.getItem('rfp_token');
+      if (legacy) {
+        localStorage.removeItem(this.userKey);
+        localStorage.removeItem('rfp_token');
+      }
+      return null;
+    }
+    return JSON.parse(stored);
   }
 }
