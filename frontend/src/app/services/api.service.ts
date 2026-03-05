@@ -452,6 +452,10 @@ export class ApiService {
     return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/content-reuse-stats`);
   }
 
+  getContentReuseStatsLatest(projectId: string): Observable<{ result: any | null }> {
+    return this.http.get<{ result: any | null }>(`${this.baseUrl}/projects/${projectId}/content-reuse-stats/latest`);
+  }
+
   // ── AI Cost Tracking (admin) ──
   getAICostTracking(projectId: string): Observable<any> {
     return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/ai-cost-tracking`);

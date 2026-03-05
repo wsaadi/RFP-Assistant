@@ -338,3 +338,27 @@ async def init_db():
             """))
         except Exception:
             logger.debug("Default pricing seed skipped")
+
+    # ── Content Reuse Results table ──
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS content_reuse_results (
+                    id UUID PRIMARY KEY,
+                    project_id UUID NOT NULL REFERENCES rfp_projects(id) ON DELETE CASCADE,
+                    has_old_response BOOLEAN DEFAULT false,
+                    overall_reuse_percentage FLOAT DEFAULT 0.0,
+                    chapters JSON DEFAULT '[]',
+                    summary JSON DEFAULT '{}',
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+        except Exception:
+            logger.debug("content_reuse_results table already exists")
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_content_reuse_results_project "
+                "ON content_reuse_results (project_id, created_at DESC)"
+            ))
+        except Exception:
+            logger.debug("content_reuse_results index already exists")

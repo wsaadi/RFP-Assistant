@@ -89,6 +89,9 @@ class RFPProject(Base):
     members = relationship(
         "ProjectMember", back_populates="project", cascade="all, delete-orphan",
     )
+    content_reuse_results = relationship(
+        "ContentReuseResult", back_populates="project", cascade="all, delete-orphan",
+    )
 
 
 class ProjectMember(Base):
@@ -213,6 +216,27 @@ class GapAnalysisResult(Base):
     )
 
     project = relationship("RFPProject", back_populates="gap_analysis_results")
+
+
+class ContentReuseResult(Base):
+    """Persisted content reuse statistics between old response and generated chapters."""
+    __tablename__ = "content_reuse_results"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rfp_projects.id", ondelete="CASCADE"), nullable=False
+    )
+    has_old_response: Mapped[bool] = mapped_column(Boolean, default=False)
+    overall_reuse_percentage: Mapped[float] = mapped_column(Float, default=0.0)
+    chapters: Mapped[dict] = mapped_column(JSON, default=list)
+    summary: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    project = relationship("RFPProject", back_populates="content_reuse_results")
 
 
 class AIUsageLog(Base):
