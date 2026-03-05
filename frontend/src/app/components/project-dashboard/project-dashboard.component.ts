@@ -22,7 +22,7 @@ import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { AuthService } from '../../services/auth.service';
 import { renderMarkdown } from '../../services/markdown.service';
-import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus, DetectDeliverablesStatus, FillDeliverablesStatus, ResponseDocument, UserInfo } from '../../models/report.model';
+import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics, GenerationStatus, PrefillStatus, DetectDeliverablesStatus, FillDeliverablesStatus, ResponseDocument } from '../../models/report.model';
 
 @Component({
   selector: 'app-project-dashboard',
@@ -866,10 +866,45 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
             </mat-card>
 
-            <mat-card *ngIf="project.improvement_axes" class="axes-display">
-              <h3>Axes d'amélioration enregistrés</h3>
-              <pre class="axes-content">{{ project.improvement_axes }}</pre>
-            </mat-card>
+            <div *ngIf="improvementAxes.length > 0" class="axes-list">
+              <div class="axes-list-header">
+                <h3>Axes d'amélioration enregistrés ({{ improvementAxes.length }})</h3>
+                <button mat-icon-button (click)="loadImprovementAxes()" matTooltip="Actualiser">
+                  <mat-icon>refresh</mat-icon>
+                </button>
+              </div>
+              <mat-card *ngFor="let axis of improvementAxes" class="axis-item">
+                <div *ngIf="editingAxisId !== axis.id" class="axis-display">
+                  <div class="axis-content">{{ axis.content }}</div>
+                  <div class="axis-meta">
+                    <span *ngIf="axis.source" class="axis-source"><mat-icon class="meta-icon">source</mat-icon> {{ axis.source }}</span>
+                    <span class="axis-date"><mat-icon class="meta-icon">schedule</mat-icon> {{ axis.created_at | date:'dd/MM/yyyy HH:mm' }}</span>
+                  </div>
+                  <div class="axis-actions">
+                    <button mat-icon-button (click)="startEditAxis(axis)" matTooltip="Modifier">
+                      <mat-icon>edit</mat-icon>
+                    </button>
+                    <button mat-icon-button color="warn" (click)="deleteAxis(axis)" matTooltip="Supprimer">
+                      <mat-icon>delete</mat-icon>
+                    </button>
+                  </div>
+                </div>
+                <div *ngIf="editingAxisId === axis.id" class="axis-edit">
+                  <mat-form-field appearance="outline" class="full-width">
+                    <mat-label>Contenu</mat-label>
+                    <textarea matInput [(ngModel)]="editAxisContent" rows="3"></textarea>
+                  </mat-form-field>
+                  <mat-form-field appearance="outline" class="full-width">
+                    <mat-label>Source</mat-label>
+                    <input matInput [(ngModel)]="editAxisSource">
+                  </mat-form-field>
+                  <div class="form-actions">
+                    <button mat-button (click)="editingAxisId = null">Annuler</button>
+                    <button mat-raised-button color="primary" (click)="saveEditAxis(axis)">Enregistrer</button>
+                  </div>
+                </div>
+              </mat-card>
+            </div>
           </div>
         </mat-tab>
 
@@ -960,48 +995,21 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
 
         <mat-tab label="Membres">
           <div class="tab-content">
-            <!-- Add member form -->
-            <mat-card class="add-member-card" *ngIf="showAddProjectMember">
-              <h3>Ajouter un membre au projet</h3>
-              <div class="add-member-form">
-                <mat-form-field appearance="outline" class="member-select-field">
-                  <mat-label>Utilisateur</mat-label>
-                  <mat-select [(value)]="newProjectMemberUserId">
-                    <mat-option *ngFor="let u of availableProjectUsers" [value]="u.id">
-                      {{ u.full_name }} ({{ u.username }})
-                    </mat-option>
-                  </mat-select>
-                </mat-form-field>
-                <mat-form-field appearance="outline" class="role-select-field">
-                  <mat-label>Role</mat-label>
-                  <mat-select [(value)]="newProjectMemberRole">
-                    <mat-option value="owner">Proprietaire</mat-option>
-                    <mat-option value="editor">Editeur</mat-option>
-                    <mat-option value="viewer">Lecteur</mat-option>
-                  </mat-select>
-                </mat-form-field>
-                <button mat-raised-button color="primary" (click)="addProjectMember()" [disabled]="!newProjectMemberUserId">
-                  <mat-icon>person_add</mat-icon> Ajouter
-                </button>
-                <button mat-button (click)="showAddProjectMember = false">Annuler</button>
-              </div>
-            </mat-card>
-
-            <button mat-raised-button color="primary" (click)="openAddProjectMember()" *ngIf="!showAddProjectMember" style="margin-bottom:16px">
-              <mat-icon>person_add</mat-icon> Ajouter un membre
-            </button>
-
-            <div class="member-source-info" *ngIf="projectMembers.length > 0 && projectMembers[0].source === 'workspace'">
+            <div class="member-source-info">
               <mat-icon>info</mat-icon>
-              <span>Ces membres sont herites de l'espace de travail. Ajoutez des membres specifiques au projet pour personnaliser l'acces.</span>
+              <span>L'acces au projet est gere individuellement. Seuls les membres de l'espace de travail peuvent etre ajoutes a un projet. Si aucun membre n'est ajoute, tous les membres de l'espace de travail ont acces.</span>
             </div>
 
-            <mat-list class="members-list">
-              <mat-list-item *ngFor="let m of projectMembers" class="member-item">
+            <!-- Project-specific members section -->
+            <h3 class="members-section-title" *ngIf="getProjectSpecificMembers().length > 0">
+              <mat-icon>group</mat-icon> Membres du projet
+            </h3>
+            <mat-list class="members-list" *ngIf="getProjectSpecificMembers().length > 0">
+              <mat-list-item *ngFor="let m of getProjectSpecificMembers()" class="member-item">
                 <mat-icon matListItemIcon>person</mat-icon>
                 <span matListItemTitle>{{ m.full_name }} ({{ m.username }})</span>
-                <span matListItemLine>{{ m.email }} <mat-chip *ngIf="m.source === 'workspace'" class="inherited-chip">Espace de travail</mat-chip></span>
-                <div class="member-actions" *ngIf="m.source === 'project'">
+                <span matListItemLine>{{ m.email }}</span>
+                <div class="member-actions">
                   <mat-form-field appearance="outline" class="role-inline-field">
                     <mat-select [value]="m.role" (selectionChange)="changeProjectMemberRole(m, $event.value)">
                       <mat-option value="owner">Proprietaire</mat-option>
@@ -1013,8 +1021,23 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <mat-icon>person_remove</mat-icon>
                   </button>
                 </div>
-                <div class="member-actions" *ngIf="m.source === 'workspace'">
-                  <span class="role-badge">{{ m.role }}</span>
+              </mat-list-item>
+            </mat-list>
+
+            <!-- Workspace members (not yet project members) -->
+            <h3 class="members-section-title" *ngIf="getWorkspaceOnlyMembers().length > 0">
+              <mat-icon>business</mat-icon> Membres de l'espace de travail
+              <span class="section-subtitle">(pas encore ajoutes au projet)</span>
+            </h3>
+            <mat-list class="members-list" *ngIf="getWorkspaceOnlyMembers().length > 0">
+              <mat-list-item *ngFor="let m of getWorkspaceOnlyMembers()" class="member-item ws-member-item">
+                <mat-icon matListItemIcon>person_outline</mat-icon>
+                <span matListItemTitle>{{ m.full_name }} ({{ m.username }})</span>
+                <span matListItemLine>{{ m.email }} <mat-chip class="inherited-chip">Espace de travail</mat-chip></span>
+                <div class="member-actions">
+                  <button mat-stroked-button color="primary" (click)="quickAddProjectMember(m)" class="quick-add-btn">
+                    <mat-icon>person_add</mat-icon> Ajouter au projet
+                  </button>
                 </div>
               </mat-list-item>
             </mat-list>
@@ -1130,8 +1153,20 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .tool-card h3 { color: #1B3A5C; }
     .tool-card p { color: #666; font-size: 13px; }
     .improvement-form { padding: 24px; margin-top: 16px; }
-    .axes-display { padding: 24px; margin-top: 16px; }
-    .axes-content { white-space: pre-wrap; font-size: 14px; background: #f5f5f5; padding: 12px; border-radius: 4px; }
+    .axes-list { margin-top: 16px; }
+    .axes-list-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    .axes-list-header h3 { margin: 0; color: #1B3A5C; }
+    .axis-item { padding: 16px; margin-bottom: 8px; border-left: 3px solid #7c4dff; }
+    .axis-display { position: relative; }
+    .axis-content { font-size: 14px; line-height: 1.6; color: #333; margin-bottom: 8px; white-space: pre-wrap; }
+    .axis-meta { display: flex; gap: 16px; align-items: center; font-size: 12px; color: #888; }
+    .axis-source { display: flex; align-items: center; gap: 2px; }
+    .axis-date { display: flex; align-items: center; gap: 2px; }
+    .axis-actions { position: absolute; top: -4px; right: -4px; display: flex; gap: 0; opacity: 0.5; transition: opacity 0.2s; }
+    .axis-item:hover .axis-actions { opacity: 1; }
+    .axis-actions button { width: 32px; height: 32px; }
+    .axis-actions mat-icon { font-size: 18px; width: 18px; height: 18px; }
+    .axis-edit { padding-top: 8px; }
     .ai-context-card { padding: 24px; margin-bottom: 20px; border-left: 4px solid #7c4dff; }
     .ai-context-header { display: flex; justify-content: space-between; align-items: flex-start; }
     .ai-context-header h3 { margin: 0; color: #1B3A5C; display: flex; align-items: center; gap: 8px; }
@@ -1270,7 +1305,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .doc-selector-chapters { font-size: 11px !important; }
 
     /* Q&A Documents */
-    .qa-container { max-width: 900px; }
+    .qa-container { max-width: 100%; }
     .qa-header { display: flex; align-items: flex-start; gap: 12px; margin-bottom: 20px; padding: 16px; background: linear-gradient(135deg, #e8eaf6, #e3f2fd); border-radius: 12px; }
     .qa-header mat-icon { font-size: 32px; width: 32px; height: 32px; color: #1B3A5C; margin-top: 4px; }
     .qa-header h3 { margin: 0; color: #1B3A5C; }
@@ -1314,7 +1349,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .qa-empty mat-icon { font-size: 48px; width: 48px; height: 48px; color: #ccc; }
     .qa-empty h3 { color: #1B3A5C; margin: 12px 0 4px; }
     .qa-empty p { font-size: 13px; margin: 0 0 12px; }
-    .qa-examples { display: flex; flex-direction: column; gap: 8px; max-width: 500px; margin: 0 auto; }
+    .qa-examples { display: flex; flex-direction: column; gap: 8px; max-width: 600px; margin: 0 auto; }
     .qa-examples button { text-align: left; font-size: 13px; color: #1976d2; border-color: #bbdefb; }
     .qa-loading { display: flex; align-items: center; gap: 12px; padding: 16px; background: #fff3e0; border-radius: 8px; margin-bottom: 16px; }
     .qa-loading span { font-size: 13px; color: #e65100; }
@@ -1336,6 +1371,12 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .inherited-chip { font-size: 10px !important; height: 20px !important; min-height: 20px !important; }
     .member-source-info { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: #e3f2fd; border-radius: 8px; margin-bottom: 16px; font-size: 13px; color: #1565c0; }
     .member-source-info mat-icon { font-size: 20px; width: 20px; height: 20px; }
+    .members-section-title { display: flex; align-items: center; gap: 8px; color: #1B3A5C; font-size: 15px; margin: 20px 0 8px; }
+    .members-section-title mat-icon { font-size: 20px; width: 20px; height: 20px; }
+    .section-subtitle { font-size: 12px; color: #888; font-weight: 400; }
+    .ws-member-item { opacity: 0.85; }
+    .quick-add-btn { font-size: 12px !important; line-height: 32px !important; height: 32px !important; }
+    .quick-add-btn mat-icon { font-size: 16px; width: 16px; height: 16px; margin-right: 4px; }
   `],
 })
 export class ProjectDashboardComponent implements OnInit, OnDestroy {
@@ -1366,6 +1407,10 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   showImprovementForm = false;
   improvementContent = '';
   improvementSource = '';
+  improvementAxes: { id: string; content: string; source: string; created_at: string }[] = [];
+  editingAxisId: string | null = null;
+  editAxisContent = '';
+  editAxisSource = '';
   editingAiContext = false;
   aiContextDraft = '';
   private pollSub: Subscription | null = null;
@@ -1403,10 +1448,6 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   // Project members
   projectMembers: any[] = [];
-  showAddProjectMember = false;
-  newProjectMemberUserId = '';
-  newProjectMemberRole = 'editor';
-  availableProjectUsers: UserInfo[] = [];
   isAdmin = false;
 
   allCategories = [
@@ -1549,6 +1590,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       next: (m) => this.projectMembers = m,
       error: () => {},
     });
+    this.loadImprovementAxes();
     this.loadResponseDocuments();
   }
 
@@ -2513,6 +2555,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     return groups;
   }
 
+  loadImprovementAxes(): void {
+    this.api.getImprovementAxes(this.projectId).subscribe({
+      next: (res) => this.improvementAxes = res.axes || [],
+      error: () => {},
+    });
+  }
+
   addImprovement(): void {
     if (!this.improvementContent) return;
     this.api.addImprovementAxis(this.projectId, this.improvementContent, this.improvementSource).subscribe({
@@ -2521,8 +2570,37 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.showImprovementForm = false;
         this.improvementContent = '';
         this.improvementSource = '';
-        this.loadAll();
+        this.loadImprovementAxes();
       },
+    });
+  }
+
+  startEditAxis(axis: any): void {
+    this.editingAxisId = axis.id;
+    this.editAxisContent = axis.content;
+    this.editAxisSource = axis.source || '';
+  }
+
+  saveEditAxis(axis: any): void {
+    if (!this.editAxisContent.trim()) return;
+    this.api.updateImprovementAxis(this.projectId, axis.id, this.editAxisContent, this.editAxisSource).subscribe({
+      next: () => {
+        this.snackBar.open('Axe mis à jour', 'OK', { duration: 2000 });
+        this.editingAxisId = null;
+        this.loadImprovementAxes();
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
+    });
+  }
+
+  deleteAxis(axis: any): void {
+    if (!confirm('Supprimer cet axe d\'amélioration ?')) return;
+    this.api.deleteImprovementAxis(this.projectId, axis.id).subscribe({
+      next: () => {
+        this.snackBar.open('Axe supprimé', 'OK', { duration: 2000 });
+        this.loadImprovementAxes();
+      },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
     });
   }
 
@@ -2784,26 +2862,18 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
   // ── Project member management ──
 
-  openAddProjectMember(): void {
-    this.showAddProjectMember = true;
-    this.newProjectMemberUserId = '';
-    this.newProjectMemberRole = 'editor';
-    if (this.isAdmin) {
-      this.api.getUsers().subscribe({
-        next: (users) => {
-          const memberUserIds = new Set(this.projectMembers.map((m: any) => m.user_id));
-          this.availableProjectUsers = users.filter(u => !memberUserIds.has(u.id) && u.is_active);
-        },
-      });
-    }
+  getProjectSpecificMembers(): any[] {
+    return this.projectMembers.filter(m => m.source === 'project');
   }
 
-  addProjectMember(): void {
-    if (!this.newProjectMemberUserId) return;
-    this.api.addProjectMember(this.projectId, this.newProjectMemberUserId, this.newProjectMemberRole).subscribe({
+  getWorkspaceOnlyMembers(): any[] {
+    return this.projectMembers.filter(m => m.source === 'workspace');
+  }
+
+  quickAddProjectMember(member: any): void {
+    this.api.addProjectMember(this.projectId, member.user_id, 'editor').subscribe({
       next: () => {
-        this.snackBar.open('Membre ajoute au projet', 'OK', { duration: 2000 });
-        this.showAddProjectMember = false;
+        this.snackBar.open(`${member.full_name} ajouté au projet`, 'OK', { duration: 2000 });
         this.api.getProjectMembers(this.projectId).subscribe({ next: (m) => this.projectMembers = m });
       },
       error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
