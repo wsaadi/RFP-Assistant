@@ -10,7 +10,8 @@ from sqlalchemy import select
 from ..database import get_db
 from ..security import decode_access_token
 from ..models.user import User, UserRole
-from ..models.workspace import WorkspaceMember
+from ..models.workspace import WorkspaceMember, MemberRole
+from ..models.project import ProjectMember
 
 security_scheme = HTTPBearer()
 
@@ -77,4 +78,102 @@ async def check_workspace_access(
             detail="Accès au workspace non autorisé",
         )
 
+    return member
+
+
+async def require_workspace_owner_or_admin(
+    workspace_id: uuid.UUID, user: User, db: AsyncSession
+) -> WorkspaceMember | None:
+    """Require that the user is a workspace owner or system admin."""
+    if user.role == UserRole.ADMIN:
+        result = await db.execute(
+            select(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == workspace_id)
+            .where(WorkspaceMember.user_id == user.id)
+        )
+        return result.scalar_one_or_none()
+
+    result = await db.execute(
+        select(WorkspaceMember)
+        .where(WorkspaceMember.workspace_id == workspace_id)
+        .where(WorkspaceMember.user_id == user.id)
+    )
+    member = result.scalar_one_or_none()
+    if not member or member.role != MemberRole.OWNER:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seul un administrateur ou le propriétaire du workspace peut effectuer cette action",
+        )
+    return member
+
+
+async def require_project_owner_or_admin(
+    project_id: uuid.UUID, user: User, db: AsyncSession
+) -> ProjectMember | None:
+    """Require that the user is a project owner or system admin."""
+    if user.role == UserRole.ADMIN:
+        result = await db.execute(
+            select(ProjectMember)
+            .where(ProjectMember.project_id == project_id)
+            .where(ProjectMember.user_id == user.id)
+        )
+        return result.scalar_one_or_none()
+
+    result = await db.execute(
+        select(ProjectMember)
+        .where(ProjectMember.project_id == project_id)
+        .where(ProjectMember.user_id == user.id)
+    )
+    member = result.scalar_one_or_none()
+    if not member or member.role != "owner":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Seul un administrateur ou le propriétaire du projet peut effectuer cette action",
+        )
+    return member
+
+
+async def get_workspace_membership(
+    workspace_id: uuid.UUID, user: User, db: AsyncSession
+) -> WorkspaceMember | None:
+    """Get the user's workspace membership (or None if admin without membership)."""
+    result = await db.execute(
+        select(WorkspaceMember)
+        .where(WorkspaceMember.workspace_id == workspace_id)
+        .where(WorkspaceMember.user_id == user.id)
+    )
+    member = result.scalar_one_or_none()
+    if not member and user.role != UserRole.ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès au workspace non autorisé",
+        )
+    return member
+
+
+async def get_project_membership(
+    project_id: uuid.UUID, user: User, db: AsyncSession
+) -> ProjectMember | None:
+    """Get the user's project membership. Raises 403 if no access."""
+    from ..models.project import RFPProject
+
+    if user.role == UserRole.ADMIN:
+        result = await db.execute(
+            select(ProjectMember)
+            .where(ProjectMember.project_id == project_id)
+            .where(ProjectMember.user_id == user.id)
+        )
+        return result.scalar_one_or_none()
+
+    result = await db.execute(
+        select(ProjectMember)
+        .where(ProjectMember.project_id == project_id)
+        .where(ProjectMember.user_id == user.id)
+    )
+    member = result.scalar_one_or_none()
+    if not member:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Accès non autorisé à ce projet",
+        )
     return member
