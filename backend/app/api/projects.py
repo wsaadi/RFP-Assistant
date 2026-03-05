@@ -3706,16 +3706,22 @@ async def get_fields_to_complete(
     chapters = chapters_result.scalars().all()
 
     # Scan all chapters for AI-invented fields
-    placeholder_info: dict = {}  # placeholder -> {occurrences, chapters}
+    placeholder_info: dict = {}  # placeholder -> {occurrences, chapters, chapter_details}
     for ch in chapters:
         if not ch.content:
             continue
         fields = AnonymizationService.find_ai_fields_to_complete(ch.content, known_placeholders)
         for field in fields:
             if field not in placeholder_info:
-                placeholder_info[field] = {"occurrences": 0, "chapters": set()}
+                placeholder_info[field] = {"occurrences": 0, "chapters": set(), "chapter_details": []}
             placeholder_info[field]["occurrences"] += ch.content.count(field)
-            placeholder_info[field]["chapters"].add(ch.title or f"Chapitre {ch.numbering}")
+            ch_title = ch.title or f"Chapitre {ch.numbering}"
+            placeholder_info[field]["chapters"].add(ch_title)
+            placeholder_info[field]["chapter_details"].append({
+                "chapter_id": str(ch.id),
+                "title": ch_title,
+                "numbering": ch.numbering or "",
+            })
 
     fields_out = []
     for placeholder, info in sorted(placeholder_info.items()):
@@ -3728,6 +3734,7 @@ async def get_fields_to_complete(
             readable_label=readable,
             occurrences=info["occurrences"],
             chapters=sorted(info["chapters"]),
+            chapter_details=info["chapter_details"],
         ))
 
     return FieldsToCompleteOut(total=len(fields_out), fields=fields_out)
@@ -3769,6 +3776,335 @@ async def replace_field_to_complete(
         "placeholder": request.placeholder,
         "value": request.value,
     }
+
+
+# ── Content Reuse Statistics ────────────────────────────────────────
+
+@router.get("/{project_id}/content-reuse-stats")
+async def get_content_reuse_stats(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Compute content reuse statistics between old response and generated chapters.
+
+    Compares old response document content with the current chapter content
+    to determine how much of the original content was reused by the AI.
+    Uses n-gram similarity (sequences of words) for robust matching.
+    """
+    import difflib
+
+    # Load old response documents text
+    old_docs_result = await db.execute(
+        select(Document)
+        .where(Document.project_id == project_id)
+        .where(Document.category == DocumentCategory.OLD_RESPONSE)
+        .where(Document.processing_status == ProcessingStatus.COMPLETED)
+    )
+    old_docs = old_docs_result.scalars().all()
+
+    if not old_docs:
+        return {
+            "has_old_response": False,
+            "overall_reuse_percentage": 0,
+            "chapters": [],
+            "summary": {
+                "total_chapters": 0,
+                "chapters_with_reuse": 0,
+                "avg_reuse_percentage": 0,
+                "old_response_word_count": 0,
+                "new_content_word_count": 0,
+            },
+        }
+
+    # Gather old response text from chunks
+    old_text_parts = []
+    for doc in old_docs:
+        if doc.full_text:
+            old_text_parts.append(doc.full_text)
+        else:
+            chunks_result = await db.execute(
+                select(DocumentChunk)
+                .where(DocumentChunk.document_id == doc.id)
+                .order_by(DocumentChunk.page_number, DocumentChunk.chunk_index)
+            )
+            chunks = chunks_result.scalars().all()
+            for chunk in chunks:
+                if chunk.content:
+                    old_text_parts.append(chunk.content)
+
+    old_response_text = "\n".join(old_text_parts)
+    if not old_response_text.strip():
+        return {
+            "has_old_response": True,
+            "overall_reuse_percentage": 0,
+            "chapters": [],
+            "summary": {
+                "total_chapters": 0,
+                "chapters_with_reuse": 0,
+                "avg_reuse_percentage": 0,
+                "old_response_word_count": 0,
+                "new_content_word_count": 0,
+            },
+        }
+
+    # Build n-grams from old response for matching
+    def _normalize(text: str) -> str:
+        """Normalize text for comparison."""
+        return re.sub(r'\s+', ' ', text.lower().strip())
+
+    def _get_ngrams(text: str, n: int = 5) -> set:
+        """Get word-level n-grams from text."""
+        words = text.split()
+        if len(words) < n:
+            return {tuple(words)} if words else set()
+        return {tuple(words[i:i+n]) for i in range(len(words) - n + 1)}
+
+    old_normalized = _normalize(old_response_text)
+    old_words = old_normalized.split()
+    old_ngrams = _get_ngrams(old_normalized, 5)
+
+    # Load chapters
+    chapters_result = await db.execute(
+        select(Chapter)
+        .where(Chapter.project_id == project_id)
+        .order_by(Chapter.order)
+    )
+    chapters = chapters_result.scalars().all()
+
+    chapter_stats = []
+    total_new_words = 0
+    total_reused_words = 0
+
+    for ch in chapters:
+        if not ch.content or not ch.content.strip():
+            continue
+
+        ch_normalized = _normalize(ch.content)
+        ch_words = ch_normalized.split()
+        ch_word_count = len(ch_words)
+        total_new_words += ch_word_count
+
+        if not ch_words:
+            continue
+
+        ch_ngrams = _get_ngrams(ch_normalized, 5)
+
+        # Count matching n-grams
+        matching = ch_ngrams & old_ngrams
+        if ch_ngrams:
+            reuse_pct = round(len(matching) / len(ch_ngrams) * 100, 1)
+        else:
+            reuse_pct = 0
+
+        reused_words = int(ch_word_count * reuse_pct / 100)
+        total_reused_words += reused_words
+
+        # Also compute a quick SequenceMatcher ratio on truncated texts
+        # for a second data point
+        ch_sample = ch_normalized[:3000]
+        old_sample = old_normalized[:10000]
+        seq_ratio = round(
+            difflib.SequenceMatcher(None, ch_sample, old_sample).ratio() * 100, 1
+        )
+
+        # Use the higher of the two metrics as approximate reuse
+        final_pct = max(reuse_pct, seq_ratio)
+
+        chapter_stats.append({
+            "chapter_id": str(ch.id),
+            "title": ch.title,
+            "numbering": ch.numbering or "",
+            "word_count": ch_word_count,
+            "reuse_percentage": final_pct,
+            "ngram_match": reuse_pct,
+            "sequence_match": seq_ratio,
+        })
+
+    overall_pct = round(total_reused_words / total_new_words * 100, 1) if total_new_words else 0
+    chapters_with_reuse = sum(1 for c in chapter_stats if c["reuse_percentage"] > 10)
+    avg_reuse = round(
+        sum(c["reuse_percentage"] for c in chapter_stats) / len(chapter_stats), 1
+    ) if chapter_stats else 0
+
+    return {
+        "has_old_response": True,
+        "overall_reuse_percentage": overall_pct,
+        "chapters": chapter_stats,
+        "summary": {
+            "total_chapters": len(chapter_stats),
+            "chapters_with_reuse": chapters_with_reuse,
+            "avg_reuse_percentage": avg_reuse,
+            "old_response_word_count": len(old_words),
+            "new_content_word_count": total_new_words,
+        },
+    }
+
+
+# ── AI Cost Tracking ───────────────────────────────────────────────
+
+@router.get("/{project_id}/ai-cost-tracking")
+async def get_ai_cost_tracking(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Get AI usage logs and cost summary for a project (admin only)."""
+    from ..models.user import UserRole
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
+
+    # Load AI usage logs from the project
+    from ..models.project import AIUsageLog
+    result = await db.execute(
+        select(AIUsageLog)
+        .where(AIUsageLog.project_id == project_id)
+        .order_by(AIUsageLog.created_at.desc())
+    )
+    logs = result.scalars().all()
+
+    # Load pricing config
+    from ..models.project import AIModelPricing
+    pricing_result = await db.execute(select(AIModelPricing).order_by(AIModelPricing.provider, AIModelPricing.model_name))
+    pricing_rows = pricing_result.scalars().all()
+    pricing = [
+        {
+            "id": str(p.id),
+            "provider": p.provider,
+            "model_name": p.model_name,
+            "price_per_1k_input": p.price_per_1k_input,
+            "price_per_1k_output": p.price_per_1k_output,
+            "currency": p.currency,
+        }
+        for p in pricing_rows
+    ]
+
+    # Build pricing lookup
+    pricing_map = {}
+    for p in pricing_rows:
+        pricing_map[(p.provider, p.model_name)] = p
+
+    # Build daily summary
+    daily_summary: dict = {}
+    total_input_tokens = 0
+    total_output_tokens = 0
+    total_cost = 0.0
+    by_model: dict = {}
+
+    for log in logs:
+        day = log.created_at.strftime("%Y-%m-%d")
+        if day not in daily_summary:
+            daily_summary[day] = {"date": day, "input_tokens": 0, "output_tokens": 0, "cost": 0.0, "requests": 0}
+
+        daily_summary[day]["input_tokens"] += log.input_tokens
+        daily_summary[day]["output_tokens"] += log.output_tokens
+        daily_summary[day]["requests"] += 1
+        total_input_tokens += log.input_tokens
+        total_output_tokens += log.output_tokens
+
+        # Compute cost
+        p = pricing_map.get((log.provider, log.model_name))
+        cost = 0.0
+        if p:
+            cost = (log.input_tokens / 1000 * p.price_per_1k_input) + (log.output_tokens / 1000 * p.price_per_1k_output)
+        daily_summary[day]["cost"] += cost
+        total_cost += cost
+
+        model_key = f"{log.provider}/{log.model_name}"
+        if model_key not in by_model:
+            by_model[model_key] = {"provider": log.provider, "model": log.model_name, "input_tokens": 0, "output_tokens": 0, "cost": 0.0, "requests": 0}
+        by_model[model_key]["input_tokens"] += log.input_tokens
+        by_model[model_key]["output_tokens"] += log.output_tokens
+        by_model[model_key]["cost"] += cost
+        by_model[model_key]["requests"] += 1
+
+    # Round costs
+    for v in daily_summary.values():
+        v["cost"] = round(v["cost"], 4)
+    for v in by_model.values():
+        v["cost"] = round(v["cost"], 4)
+
+    return {
+        "total_input_tokens": total_input_tokens,
+        "total_output_tokens": total_output_tokens,
+        "total_cost": round(total_cost, 4),
+        "total_requests": len(logs),
+        "daily": sorted(daily_summary.values(), key=lambda x: x["date"]),
+        "by_model": list(by_model.values()),
+        "pricing": pricing,
+        "recent_logs": [
+            {
+                "id": str(log.id),
+                "operation": log.operation,
+                "provider": log.provider,
+                "model_name": log.model_name,
+                "input_tokens": log.input_tokens,
+                "output_tokens": log.output_tokens,
+                "created_at": log.created_at.isoformat(),
+            }
+            for log in logs[:100]  # Last 100 logs
+        ],
+    }
+
+
+@router.put("/{project_id}/ai-pricing")
+async def update_ai_pricing(
+    project_id: uuid.UUID,
+    request: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update AI model pricing (admin only)."""
+    from ..models.user import UserRole
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
+
+    from ..models.project import AIModelPricing
+
+    pricing_list = request.get("pricing", [])
+    for item in pricing_list:
+        if item.get("id"):
+            # Update existing
+            result = await db.execute(select(AIModelPricing).where(AIModelPricing.id == uuid.UUID(item["id"])))
+            row = result.scalar_one_or_none()
+            if row:
+                row.price_per_1k_input = item.get("price_per_1k_input", row.price_per_1k_input)
+                row.price_per_1k_output = item.get("price_per_1k_output", row.price_per_1k_output)
+        else:
+            # Create new
+            new_pricing = AIModelPricing(
+                provider=item["provider"],
+                model_name=item["model_name"],
+                price_per_1k_input=item.get("price_per_1k_input", 0),
+                price_per_1k_output=item.get("price_per_1k_output", 0),
+                currency=item.get("currency", "EUR"),
+            )
+            db.add(new_pricing)
+
+    await db.commit()
+    return {"status": "ok"}
+
+
+@router.delete("/{project_id}/ai-pricing/{pricing_id}")
+async def delete_ai_pricing(
+    project_id: uuid.UUID,
+    pricing_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an AI pricing entry (admin only)."""
+    from ..models.user import UserRole
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
+
+    from ..models.project import AIModelPricing
+    result = await db.execute(select(AIModelPricing).where(AIModelPricing.id == pricing_id))
+    row = result.scalar_one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="Pricing non trouvé")
+    await db.delete(row)
+    await db.commit()
+    return {"status": "ok"}
 
 
 # ── Project Members ─────────────────────────────────────────────────

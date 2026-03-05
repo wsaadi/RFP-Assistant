@@ -232,6 +232,24 @@ async def _run_chapter_generation(
                 available_images=available_images,
             )
 
+        # ── Log AI usage ──
+        if hasattr(ai_service, 'total_input_tokens') and ai_service.total_input_tokens > 0:
+            try:
+                async with TaskSession() as usage_db:
+                    from ..models.project import AIUsageLog
+                    usage_log = AIUsageLog(
+                        project_id=project_id,
+                        operation=f"generate_chapter_{action}",
+                        provider=config.provider or "mistral",
+                        model_name=config.model_name or "mistral-large-latest",
+                        input_tokens=ai_service.total_input_tokens,
+                        output_tokens=ai_service.total_output_tokens,
+                    )
+                    usage_db.add(usage_log)
+                    await usage_db.commit()
+            except Exception as e:
+                logger.warning("Failed to log AI usage: %s", e)
+
         # ── Phase 3: Deanonymize + save (with image references) ──
         _update("deanonymizing", 80, "Deanonymisation...")
         async with TaskSession() as db:

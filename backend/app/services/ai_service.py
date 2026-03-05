@@ -199,6 +199,9 @@ class MistralAIService:
         self.temperature = temperature
         self.max_tokens = max_tokens
         self._client = Mistral(api_key=api_key)
+        # Track cumulative token usage for the current session
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
 
     @classmethod
     def from_config(cls, config: AIConfig, decrypted_key: str = "") -> "MistralAIService":
@@ -242,7 +245,17 @@ class MistralAIService:
             raise TimeoutError(f"L'appel IA a expire apres {timeout:.0f}s. Essayez avec des documents plus courts.")
 
         result = response.choices[0].message.content or ""
-        logger.info("Mistral response: %d chars (~%d tokens)", len(result), len(result) // 4)
+        # Track token usage from the Mistral response
+        usage = getattr(response, 'usage', None)
+        if usage:
+            in_tok = getattr(usage, 'prompt_tokens', 0) or 0
+            out_tok = getattr(usage, 'completion_tokens', 0) or 0
+            self.total_input_tokens += in_tok
+            self.total_output_tokens += out_tok
+            logger.info("Mistral response: %d chars, %d input tokens, %d output tokens",
+                        len(result), in_tok, out_tok)
+        else:
+            logger.info("Mistral response: %d chars (~%d tokens)", len(result), len(result) // 4)
         return result
 
     async def generate_streaming(
@@ -328,6 +341,10 @@ class MistralAIService:
 
         result = "".join(chunks)
         elapsed = time.monotonic() - t0
+        # Approximate token counts for streaming (no usage object available)
+        approx_input = (len(system_prompt) + len(user_prompt)) // 4
+        self.total_input_tokens += approx_input
+        self.total_output_tokens += token_count
         logger.info("Mistral stream done: %d tokens, %d chars in %.1fs (%.0f tok/s)",
                      token_count, len(result), elapsed,
                      token_count / elapsed if elapsed > 0 else 0)

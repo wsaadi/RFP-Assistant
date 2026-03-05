@@ -23,7 +23,7 @@ from .models.user import User, UserRole
 from .models import (
     User, Workspace, WorkspaceMember,
     Document, DocumentChunk, DocumentImage,
-    RFPProject, AnonymizationMapping, AIConfig,
+    RFPProject, AnonymizationMapping, AIConfig, AIUsageLog, AIModelPricing,
     Chapter, ResponseDocument,
 )
 

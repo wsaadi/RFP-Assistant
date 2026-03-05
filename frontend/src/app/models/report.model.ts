@@ -340,16 +340,93 @@ export interface AnonymizationReport {
 }
 
 // ── Fields to Complete (AI-invented placeholders) ──
+export interface FieldChapterDetail {
+  chapter_id: string;
+  title: string;
+  numbering: string;
+}
+
 export interface FieldToComplete {
   placeholder: string;
   readable_label: string;
   occurrences: number;
   chapters: string[];
+  chapter_details: FieldChapterDetail[];
 }
 
 export interface FieldsToComplete {
   total: number;
   fields: FieldToComplete[];
+}
+
+// ── Content Reuse Statistics ──
+export interface ContentReuseChapter {
+  chapter_id: string;
+  title: string;
+  numbering: string;
+  word_count: number;
+  reuse_percentage: number;
+  ngram_match: number;
+  sequence_match: number;
+}
+
+export interface ContentReuseStats {
+  has_old_response: boolean;
+  overall_reuse_percentage: number;
+  chapters: ContentReuseChapter[];
+  summary: {
+    total_chapters: number;
+    chapters_with_reuse: number;
+    avg_reuse_percentage: number;
+    old_response_word_count: number;
+    new_content_word_count: number;
+  };
+}
+
+// ── AI Cost Tracking ──
+export interface AICostDaily {
+  date: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost: number;
+  requests: number;
+}
+
+export interface AICostByModel {
+  provider: string;
+  model: string;
+  input_tokens: number;
+  output_tokens: number;
+  cost: number;
+  requests: number;
+}
+
+export interface AIModelPricing {
+  id: string;
+  provider: string;
+  model_name: string;
+  price_per_1k_input: number;
+  price_per_1k_output: number;
+  currency: string;
+}
+
+export interface AICostTracking {
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost: number;
+  total_requests: number;
+  daily: AICostDaily[];
+  by_model: AICostByModel[];
+  pricing: AIModelPricing[];
+  recent_logs: {
+    id: string;
+    operation: string;
+    provider: string;
+    model_name: string;
+    input_tokens: number;
+    output_tokens: number;
+    created_at: string;
+  }[];
 }
 
 // ── Search ──

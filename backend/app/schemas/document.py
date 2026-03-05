@@ -146,11 +146,18 @@ class AnonymizationReportOut(BaseModel):
     sample_after: str = ""
 
 
+class FieldChapterDetail(BaseModel):
+    chapter_id: str
+    title: str
+    numbering: str = ""
+
+
 class FieldToComplete(BaseModel):
     placeholder: str
     readable_label: str
     occurrences: int
     chapters: List[str]  # chapter titles where this placeholder appears
+    chapter_details: List[FieldChapterDetail] = []  # chapter IDs + titles for linking
 
 
 class FieldsToCompleteOut(BaseModel):
