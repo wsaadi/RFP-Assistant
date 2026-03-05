@@ -399,7 +399,14 @@ async def import_project_backup(
     if not file.filename or not file.filename.endswith(".zip"):
         raise HTTPException(status_code=400, detail="Fichier ZIP requis")
 
+    MAX_BACKUP_SIZE = 500 * 1024 * 1024  # 500 MB
     content = await file.read()
+
+    if len(content) > MAX_BACKUP_SIZE:
+        raise HTTPException(
+            status_code=413,
+            detail=f"Le fichier est trop volumineux ({len(content) // (1024*1024)} Mo). Taille maximale : {MAX_BACKUP_SIZE // (1024*1024)} Mo.",
+        )
 
     try:
         project = await ExportService.import_project(
