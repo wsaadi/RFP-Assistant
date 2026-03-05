@@ -690,6 +690,12 @@ Quels chapitres doivent etre modifies? Retourne le JSON."""
         raw_identify = await ai_service.generate_streaming(
             identify_system, identify_user, temperature=0.1, timeout=300,
         )
+
+        # Log AI usage for preview chat - pass 1 (identify)
+        from ..services.ai_service import log_ai_usage_from_service
+        async with TaskSession() as usage_db:
+            await log_ai_usage_from_service(usage_db, project_id, "preview_chat_identify", ai_service)
+
         identify_result = _parse_json(raw_identify)
 
         target_ids = set()
@@ -786,6 +792,10 @@ Applique l'instruction et retourne le contenu COMPLET modifie."""
                     "new_content": _deanon(modified_content.strip()),
                 })
                 changed_titles.append(ch["title"])
+
+        # Log AI usage for preview chat - pass 2 (modify chapters)
+        async with TaskSession() as usage_db:
+            await log_ai_usage_from_service(usage_db, project_id, "preview_chat_modify", ai_service)
 
         if changes_to_save:
             _update("saving", 90, f"Enregistrement de {len(changes_to_save)} chapitre(s)...")
@@ -931,6 +941,10 @@ Reponds en citant tes sources."""
     except Exception as e:
         logger.error("Document QA failed for project %s: %s", project_id, e)
         raise HTTPException(status_code=500, detail=f"Erreur IA: {str(e)[:200]}")
+
+    # Log AI usage for document QA
+    from ..services.ai_service import log_ai_usage_from_service
+    await log_ai_usage_from_service(db, project_id, "document_qa", ai_service)
 
     return {
         "answer": answer,
@@ -1205,6 +1219,11 @@ async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID,
             max_tokens=16000,
             timeout=900,
         )
+
+        # Log AI usage for soutenance generation
+        from ..services.ai_service import log_ai_usage_from_service
+        async with TaskSession() as usage_db:
+            await log_ai_usage_from_service(usage_db, project_id, "soutenance_generation", ai_service)
 
         _update("parsing", 60, "Analyse de la reponse de l'IA...")
 

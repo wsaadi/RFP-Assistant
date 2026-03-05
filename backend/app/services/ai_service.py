@@ -8,9 +8,60 @@ from typing import Awaitable, Callable, List, Optional, Dict
 import httpx
 from mistralai import Mistral
 
-from ..models.project import AIConfig
+from ..models.project import AIConfig, AIUsageLog
 
 logger = logging.getLogger(__name__)
+
+
+async def log_ai_usage(
+    db_session,
+    project_id,
+    operation: str,
+    provider: str,
+    model_name: str,
+    input_tokens: int,
+    output_tokens: int,
+) -> None:
+    """Log an AI API call to the usage tracking table.
+
+    Silently catches errors to never break the calling operation.
+    Skips logging when both token counts are zero.
+    """
+    if input_tokens <= 0 and output_tokens <= 0:
+        return
+    try:
+        usage_log = AIUsageLog(
+            project_id=project_id,
+            operation=operation,
+            provider=provider,
+            model_name=model_name,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+        )
+        db_session.add(usage_log)
+        await db_session.commit()
+    except Exception as e:
+        logger.warning("Failed to log AI usage for %s: %s", operation, e)
+
+
+async def log_ai_usage_from_service(
+    db_session,
+    project_id,
+    operation: str,
+    ai_service: "MistralAIService",
+) -> None:
+    """Log AI usage from a MistralAIService/OllamaAIService instance.
+
+    Reads accumulated tokens from the service instance and resets them.
+    """
+    in_tok = getattr(ai_service, 'total_input_tokens', 0)
+    out_tok = getattr(ai_service, 'total_output_tokens', 0)
+    provider = "ollama" if hasattr(ai_service, 'base_url') else "mistral"
+    model = getattr(ai_service, 'model', 'unknown')
+    await log_ai_usage(db_session, project_id, operation, provider, model, in_tok, out_tok)
+    # Reset counters so next operation starts fresh
+    ai_service.total_input_tokens = 0
+    ai_service.total_output_tokens = 0
 
 
 # ── Identity & anti-hallucination guardrail ─────────────────────────
@@ -1484,6 +1535,9 @@ class OllamaAIService(MistralAIService):
         self.model = model
         self.temperature = temperature
         self.max_tokens = max_tokens
+        # Track cumulative token usage for the current session
+        self.total_input_tokens = 0
+        self.total_output_tokens = 0
 
     async def generate(
         self, system_prompt: str, user_prompt: str,
@@ -1529,7 +1583,13 @@ class OllamaAIService(MistralAIService):
             )
 
         result = data.get("message", {}).get("content", "")
-        logger.info("Ollama response: %d chars (~%d tokens)", len(result), len(result) // 4)
+        # Track token usage from Ollama response
+        in_tok = data.get("prompt_eval_count", 0) or 0
+        out_tok = data.get("eval_count", 0) or 0
+        self.total_input_tokens += in_tok
+        self.total_output_tokens += out_tok
+        logger.info("Ollama response: %d chars, %d input tokens, %d output tokens",
+                     len(result), in_tok, out_tok)
         return result
 
     async def generate_streaming(
@@ -1590,6 +1650,11 @@ class OllamaAIService(MistralAIService):
                                 await on_progress(token_count, total_chars)
 
                         if data.get("done", False):
+                            # Final chunk contains token counts
+                            in_tok = data.get("prompt_eval_count", 0) or 0
+                            out_tok = data.get("eval_count", 0) or 0
+                            self.total_input_tokens += in_tok
+                            self.total_output_tokens += out_tok
                             break
 
         except httpx.TimeoutException:

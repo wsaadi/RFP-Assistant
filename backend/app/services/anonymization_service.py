@@ -341,6 +341,9 @@ class AnonymizationService:
     # Track the *last* NER run outcome so callers can report it to the user.
     _last_ner_produced_entities: Optional[bool] = None
     _last_ner_failure_reason: Optional[str] = None
+    # Track cumulative token usage for NER calls (for cost tracking)
+    _total_input_tokens: int = 0
+    _total_output_tokens: int = 0
 
     @classmethod
     def configure(cls, provider_config: ProviderConfig):
@@ -351,10 +354,21 @@ class AnonymizationService:
         cls._provider_config = provider_config
         cls._provider_available = None  # Force re-check
         cls._http_client = None  # Reset client for new provider
+        cls._total_input_tokens = 0
+        cls._total_output_tokens = 0
         logger.info(
             "[NER] Configured provider=%s model=%s",
             provider_config.provider, provider_config.model,
         )
+
+    @classmethod
+    def get_and_reset_token_usage(cls) -> tuple:
+        """Return (input_tokens, output_tokens) and reset counters."""
+        in_tok = cls._total_input_tokens
+        out_tok = cls._total_output_tokens
+        cls._total_input_tokens = 0
+        cls._total_output_tokens = 0
+        return in_tok, out_tok
 
     @classmethod
     def _get_provider_config(cls) -> ProviderConfig:
@@ -536,11 +550,15 @@ class AnonymizationService:
 
         try:
             client = await cls._get_http_client()
-            raw_content = await call_llm_chat(
+            llm_response = await call_llm_chat(
                 config, messages,
                 temperature=0.0, max_tokens=4096,
                 client=client,
             )
+            raw_content = llm_response.content
+            # Accumulate token usage for NER calls
+            cls._total_input_tokens += llm_response.input_tokens
+            cls._total_output_tokens += llm_response.output_tokens
 
             if not raw_content:
                 return results

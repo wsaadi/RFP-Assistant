@@ -65,6 +65,9 @@ class ImageAnalysisService:
     _semaphore: Optional[asyncio.Semaphore] = None
     _http_client: Optional[httpx.AsyncClient] = None
     _provider_config: Optional[ProviderConfig] = None
+    # Track cumulative token usage for vision calls (for cost tracking)
+    _total_input_tokens: int = 0
+    _total_output_tokens: int = 0
 
     @classmethod
     def configure(cls, provider_config: ProviderConfig):
@@ -72,10 +75,21 @@ class ImageAnalysisService:
         cls._provider_config = provider_config
         cls._http_client = None  # Reset client for new provider
         cls._semaphore = None  # Reset semaphore for new concurrency
+        cls._total_input_tokens = 0
+        cls._total_output_tokens = 0
         logger.info(
             "[Vision] Configured provider=%s model=%s",
             provider_config.provider, provider_config.model,
         )
+
+    @classmethod
+    def get_and_reset_token_usage(cls) -> tuple:
+        """Return (input_tokens, output_tokens) and reset counters."""
+        in_tok = cls._total_input_tokens
+        out_tok = cls._total_output_tokens
+        cls._total_input_tokens = 0
+        cls._total_output_tokens = 0
+        return in_tok, out_tok
 
     @classmethod
     def _get_provider_config(cls) -> ProviderConfig:
@@ -118,6 +132,8 @@ class ImageAnalysisService:
         """
         cls._semaphore = None
         cls._http_client = None
+        cls._total_input_tokens = 0
+        cls._total_output_tokens = 0
 
     @staticmethod
     def _image_to_base64(file_path: str) -> Optional[str]:
@@ -210,14 +226,16 @@ class ImageAnalysisService:
         config = cls._get_provider_config()
         client = cls._get_http_client()
 
-        raw_content = await call_llm_vision(
+        llm_response = await call_llm_vision(
             config, image_b64,
             system_prompt=_VISION_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             temperature=0.1, max_tokens=2048,
             client=client, use_system=True,
         )
-        result = cls._parse_vision_response(raw_content)
+        cls._total_input_tokens += llm_response.input_tokens
+        cls._total_output_tokens += llm_response.output_tokens
+        result = cls._parse_vision_response(llm_response.content)
 
         if result.get("type") != "autre" or result.get("description", "").startswith("Type:"):
             return result
@@ -231,14 +249,16 @@ class ImageAnalysisService:
             '"ocr_text":"texte lisible",'
             '"is_informative":true}'
         )
-        raw_content = await call_llm_vision(
+        llm_response = await call_llm_vision(
             config, image_b64,
             system_prompt="",
             user_prompt=fallback,
             temperature=0.1, max_tokens=2048,
             client=client, use_system=False,
         )
-        return cls._parse_vision_response(raw_content)
+        cls._total_input_tokens += llm_response.input_tokens
+        cls._total_output_tokens += llm_response.output_tokens
+        return cls._parse_vision_response(llm_response.content)
 
     # Normalize type values — accepts both French (preferred) and English (fallback)
     _TYPE_MAP = {
