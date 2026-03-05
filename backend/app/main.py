@@ -24,7 +24,7 @@ from .models import (
     User, Workspace, WorkspaceMember,
     Document, DocumentChunk, DocumentImage,
     RFPProject, AnonymizationMapping, AIConfig, AIUsageLog, AIModelPricing,
-    Chapter, ResponseDocument,
+    Chapter, ResponseDocument, BrandingSettings,
 )
 
 from .api.auth import router as auth_router
@@ -34,6 +34,7 @@ from .api.projects import router as projects_router
 from .api.documents import router as documents_router
 from .api.chapters import router as chapters_router
 from .api.export import router as export_router
+from .api.branding import router as branding_router
 
 
 @asynccontextmanager
@@ -258,6 +259,7 @@ app.include_router(projects_router, prefix="/api")
 app.include_router(documents_router, prefix="/api")
 app.include_router(chapters_router, prefix="/api")
 app.include_router(export_router, prefix="/api")
+app.include_router(branding_router, prefix="/api")
 
 
 @app.get("/")

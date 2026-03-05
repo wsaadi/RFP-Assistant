@@ -88,6 +88,11 @@ export const routes: Routes = [
             loadComponent: () =>
               import('./components/admin-settings/admin-settings.component').then((m) => m.AdminSettingsComponent),
           },
+          {
+            path: 'branding',
+            loadComponent: () =>
+              import('./components/admin-branding/admin-branding.component').then((m) => m.AdminBrandingComponent),
+          },
         ],
       },
     ],
