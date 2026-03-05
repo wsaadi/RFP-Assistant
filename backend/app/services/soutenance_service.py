@@ -1,24 +1,17 @@
 """Service for generating soutenance (defense) preparation materials using AI."""
-import json
 import logging
-import re
-from typing import Optional
+
+from .ai_service import _parse_json_object
 
 logger = logging.getLogger(__name__)
 
 
 def _parse_json_response(raw: str) -> dict:
-    """Parse JSON from AI response, stripping markdown fences."""
-    cleaned = raw.strip()
-    cleaned = re.sub(r'^```(?:json)?\s*\n?', '', cleaned)
-    cleaned = re.sub(r'\n?```\s*$', '', cleaned)
-    try:
-        return json.loads(cleaned)
-    except json.JSONDecodeError:
-        match = re.search(r'\{[\s\S]*\}', cleaned)
-        if match:
-            return json.loads(match.group())
-        raise ValueError("L'IA n'a pas retourne un JSON valide pour la soutenance")
+    """Parse JSON from AI response, with truncation repair support."""
+    result = _parse_json_object(raw)
+    if result is not None:
+        return result
+    raise ValueError("L'IA n'a pas retourne un JSON valide pour la soutenance")
 
 
 SOUTENANCE_SYSTEM_PROMPT = """Tu es un expert en preparation de soutenances commerciales pour les appels d'offres.
