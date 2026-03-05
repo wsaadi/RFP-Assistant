@@ -69,6 +69,6 @@ class ResponseDocument(Base):
     chapters = relationship(
         "Chapter",
         back_populates="response_document",
-        cascade="all, delete-orphan",
+        passive_deletes=True,
         order_by="Chapter.order",
     )
