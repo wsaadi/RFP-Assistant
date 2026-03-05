@@ -6,7 +6,9 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatMenuModule } from '@angular/material/menu';
 import { MatDividerModule } from '@angular/material/divider';
+import { MatTooltipModule } from '@angular/material/tooltip';
 import { AuthService } from '../../services/auth.service';
+import { BrandingService, BrandingSettings } from '../../services/branding.service';
 
 @Component({
   selector: 'app-layout',
@@ -14,13 +16,16 @@ import { AuthService } from '../../services/auth.service';
   imports: [
     CommonModule, RouterOutlet, RouterLink, RouterLinkActive,
     MatToolbarModule, MatButtonModule, MatIconModule, MatMenuModule, MatDividerModule,
+    MatTooltipModule,
   ],
   template: `
     <mat-toolbar color="primary" class="toolbar">
-      <button mat-icon-button routerLink="/workspaces">
-        <mat-icon>description</mat-icon>
-      </button>
-      <span class="app-title" routerLink="/workspaces" style="cursor:pointer">RFP Assistant</span>
+      <a routerLink="/workspaces" class="logo-link">
+        <img *ngIf="branding.has_logo" [src]="branding.logo_url + '?v=' + cacheBreaker"
+             alt="Logo" class="toolbar-logo">
+        <mat-icon *ngIf="!branding.has_logo" class="toolbar-logo-icon">description</mat-icon>
+        <span class="app-title">{{ branding.app_name || 'RFP Assistant' }}</span>
+      </a>
 
       <span class="spacer"></span>
 
@@ -28,9 +33,20 @@ import { AuthService } from '../../services/auth.service';
         <mat-icon>workspaces</mat-icon>
       </button>
 
-      <button mat-icon-button *ngIf="isAdmin" routerLink="/admin/users" matTooltip="Administration">
+      <button mat-icon-button *ngIf="isAdmin" [matMenuTriggerFor]="adminMenu" matTooltip="Administration">
         <mat-icon>admin_panel_settings</mat-icon>
       </button>
+
+      <mat-menu #adminMenu="matMenu">
+        <button mat-menu-item routerLink="/admin/users">
+          <mat-icon>people</mat-icon>
+          <span>Utilisateurs</span>
+        </button>
+        <button mat-menu-item routerLink="/admin/branding">
+          <mat-icon>palette</mat-icon>
+          <span>Personnalisation</span>
+        </button>
+      </mat-menu>
 
       <button mat-icon-button [matMenuTriggerFor]="userMenu">
         <mat-icon>account_circle</mat-icon>
@@ -55,7 +71,16 @@ import { AuthService } from '../../services/auth.service';
   `,
   styles: [`
     .toolbar { position: sticky; top: 0; z-index: 1000; }
-    .app-title { margin-left: 8px; font-size: 18px; font-weight: 500; }
+    .logo-link {
+      display: flex; align-items: center; gap: 10px;
+      text-decoration: none; color: inherit; cursor: pointer;
+    }
+    .toolbar-logo {
+      height: 32px; max-width: 120px; object-fit: contain;
+      filter: brightness(0) invert(1);
+    }
+    .toolbar-logo-icon { font-size: 28px; width: 28px; height: 28px; }
+    .app-title { font-size: 18px; font-weight: 500; white-space: nowrap; }
     .spacer { flex: 1; }
     .main-content { min-height: calc(100vh - 64px); background: #f5f5f5; padding: 24px; }
     .user-info-menu { padding: 12px 16px; }
@@ -67,12 +92,29 @@ export class LayoutComponent {
   username = '';
   userRole = '';
   isAdmin = false;
+  branding: BrandingSettings = {
+    app_name: 'RFP Assistant',
+    has_logo: false,
+    has_favicon: false,
+    primary_color: '#1B3A5C',
+    logo_url: '',
+    favicon_url: '',
+  };
+  cacheBreaker = Date.now();
 
-  constructor(private authService: AuthService) {
+  constructor(
+    private authService: AuthService,
+    private brandingService: BrandingService,
+  ) {
     this.authService.currentUser$.subscribe((user) => {
       this.username = user?.username || '';
       this.userRole = user?.role || '';
       this.isAdmin = user?.role === 'admin';
+    });
+
+    this.brandingService.branding$.subscribe((b) => {
+      this.branding = b;
+      this.cacheBreaker = Date.now();
     });
   }
 

@@ -5,6 +5,7 @@ from .document import Document, DocumentChunk, DocumentImage
 from .project import RFPProject, AnonymizationMapping, AIConfig, AIUsageLog, AIModelPricing, ContentReuseResult
 from .chapter import Chapter
 from .response_document import ResponseDocument
+from .branding import BrandingSettings
 
 __all__ = [
     "User",
@@ -21,4 +22,5 @@ __all__ = [
     "Chapter",
     "ResponseDocument",
     "ContentReuseResult",
+    "BrandingSettings",
 ]

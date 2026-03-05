@@ -8,6 +8,7 @@ import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
 import { AuthService } from '../../services/auth.service';
+import { BrandingService, BrandingSettings } from '../../services/branding.service';
 
 @Component({
   selector: 'app-login',
@@ -17,8 +18,10 @@ import { AuthService } from '../../services/auth.service';
     <div class="login-container">
       <mat-card class="login-card">
         <div class="login-header">
-          <mat-icon class="logo-icon">description</mat-icon>
-          <h1>RFP Response Assistant</h1>
+          <img *ngIf="branding.has_logo" [src]="branding.logo_url + '?v=' + cacheBreaker"
+               alt="Logo" class="login-logo">
+          <mat-icon *ngIf="!branding.has_logo" class="logo-icon">description</mat-icon>
+          <h1>{{ branding.app_name || 'RFP Response Assistant' }}</h1>
           <p>Assistant IA de rédaction de réponses aux appels d'offres</p>
         </div>
 
@@ -60,6 +63,7 @@ import { AuthService } from '../../services/auth.service';
     .login-header h1 { margin: 12px 0 4px; font-size: 22px; color: #1B3A5C; }
     .login-header p { color: #666; font-size: 13px; }
     .logo-icon { font-size: 48px; width: 48px; height: 48px; color: #2C5F8A; }
+    .login-logo { max-height: 64px; max-width: 200px; object-fit: contain; }
     .login-form { display: flex; flex-direction: column; gap: 8px; }
     .full-width { width: 100%; }
     .login-btn { height: 48px; font-size: 16px; }
@@ -72,11 +76,29 @@ export class LoginComponent {
   hidePassword = true;
   loading = false;
   error = '';
+  branding: BrandingSettings = {
+    app_name: 'RFP Response Assistant',
+    has_logo: false,
+    has_favicon: false,
+    primary_color: '#1B3A5C',
+    logo_url: '',
+    favicon_url: '',
+  };
+  cacheBreaker = Date.now();
 
-  constructor(private authService: AuthService, private router: Router) {
+  constructor(
+    private authService: AuthService,
+    private router: Router,
+    private brandingService: BrandingService,
+  ) {
     if (this.authService.isLoggedIn()) {
       this.router.navigate(['/']);
     }
+
+    this.brandingService.branding$.subscribe((b) => {
+      this.branding = b;
+      this.cacheBreaker = Date.now();
+    });
   }
 
   onLogin(): void {
