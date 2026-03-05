@@ -20,7 +20,7 @@ from ..models.chapter import Chapter, ChapterType, ChapterStatus
 from ..models.response_document import ResponseDocument, DocumentFormat, ContentType
 from ..schemas.project import (
     ProjectCreate, ProjectUpdate, ProjectOut,
-    ImprovementAxisRequest, GapAnalysisRequest,
+    ImprovementAxisRequest, ImprovementAxisUpdate, GapAnalysisRequest,
     GenerateStructureRequest, PrefillRequest, ComplianceAnalysisRequest,
 )
 from ..schemas.document import (
@@ -75,13 +75,56 @@ async def list_projects(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List all projects in a workspace."""
+    """List projects in a workspace that the current user has access to.
+
+    A user can see a project if:
+    - They are an admin, OR
+    - They are a direct project member, OR
+    - The project has no project-specific members (open to all workspace members)
+    """
+    from ..models.user import UserRole
+
+    # Verify workspace membership first
+    ws_member_result = await db.execute(
+        select(WorkspaceMember)
+        .where(WorkspaceMember.workspace_id == workspace_id)
+        .where(WorkspaceMember.user_id == current_user.id)
+    )
+    is_ws_member = ws_member_result.scalar_one_or_none() is not None
+    is_admin = current_user.role == UserRole.ADMIN
+
+    if not is_ws_member and not is_admin:
+        raise HTTPException(status_code=403, detail="Accès non autorisé à cet espace de travail")
+
     result = await db.execute(
         select(RFPProject)
         .where(RFPProject.workspace_id == workspace_id)
         .order_by(RFPProject.updated_at.desc())
     )
-    projects = result.scalars().all()
+    all_projects = result.scalars().all()
+
+    # Filter projects by access
+    projects = []
+    for p in all_projects:
+        if is_admin:
+            projects.append(p)
+            continue
+        # Check if project has specific members
+        member_count = (await db.execute(
+            select(func.count()).where(ProjectMember.project_id == p.id)
+        )).scalar() or 0
+        if member_count == 0:
+            # No project-specific members → open to all workspace members
+            projects.append(p)
+        else:
+            # Check if current user is a project member
+            pm = await db.execute(
+                select(ProjectMember)
+                .where(ProjectMember.project_id == p.id)
+                .where(ProjectMember.user_id == current_user.id)
+            )
+            if pm.scalar_one_or_none():
+                projects.append(p)
 
     project_list = []
     for p in projects:
@@ -169,10 +212,35 @@ async def get_project(
     db: AsyncSession = Depends(get_db),
 ):
     """Get project details."""
+    from ..models.user import UserRole
+
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    # Check access: admin, or workspace member with project access
+    is_admin = current_user.role == UserRole.ADMIN
+    if not is_admin:
+        ws_check = await db.execute(
+            select(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == project.workspace_id)
+            .where(WorkspaceMember.user_id == current_user.id)
+        )
+        if not ws_check.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Accès non autorisé")
+        # Check project-level access if project has specific members
+        pm_count = (await db.execute(
+            select(func.count()).where(ProjectMember.project_id == project_id)
+        )).scalar() or 0
+        if pm_count > 0:
+            pm_check = await db.execute(
+                select(ProjectMember)
+                .where(ProjectMember.project_id == project_id)
+                .where(ProjectMember.user_id == current_user.id)
+            )
+            if not pm_check.scalar_one_or_none():
+                raise HTTPException(status_code=403, detail="Accès non autorisé à ce projet")
 
     doc_count = (await db.execute(
         select(func.count()).where(Document.project_id == project_id)
@@ -2726,6 +2794,63 @@ async def export_compliance_pdf(
     )
 
 
+import json
+from datetime import datetime as dt_datetime
+
+
+def _parse_improvement_axes(raw: str) -> list[dict]:
+    """Parse improvement_axes field. Supports JSON array format or legacy text format."""
+    if not raw:
+        return []
+    raw = raw.strip()
+    if raw.startswith("["):
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            pass
+    # Legacy text format: convert lines starting with "- " to structured items
+    items = []
+    for i, line in enumerate(raw.split("\n")):
+        line = line.strip()
+        if line.startswith("- "):
+            line = line[2:]
+        if not line:
+            continue
+        # Try to extract source info from "(Source: ...)" at end
+        source = ""
+        if " (Source: " in line and line.endswith(")"):
+            idx = line.rfind(" (Source: ")
+            source = line[idx + 10:-1]
+            line = line[:idx]
+        items.append({
+            "id": str(uuid.uuid4()),
+            "content": line,
+            "source": source,
+            "created_at": dt_datetime.now().isoformat(),
+        })
+    return items
+
+
+def _serialize_improvement_axes(items: list[dict]) -> str:
+    return json.dumps(items, ensure_ascii=False)
+
+
+@router.get("/{project_id}/improvement-axes")
+async def list_improvement_axes(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """List all improvement axes for a project."""
+    result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    items = _parse_improvement_axes(project.improvement_axes or "")
+    return {"axes": items}
+
+
 @router.post("/{project_id}/improvement-axes")
 async def add_improvement_axis(
     project_id: uuid.UUID,
@@ -2733,18 +2858,73 @@ async def add_improvement_axis(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Add improvement axes from client feedback."""
+    """Add an improvement axis from client feedback."""
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    existing = project.improvement_axes or ""
-    source_info = f" (Source: {request.source})" if request.source else ""
-    project.improvement_axes = existing + f"\n- {request.content}{source_info}" if existing else f"- {request.content}{source_info}"
+    items = _parse_improvement_axes(project.improvement_axes or "")
+    new_item = {
+        "id": str(uuid.uuid4()),
+        "content": request.content,
+        "source": request.source or "",
+        "created_at": dt_datetime.now().isoformat(),
+    }
+    items.append(new_item)
+    project.improvement_axes = _serialize_improvement_axes(items)
 
     await db.commit()
-    return {"success": True, "message": "Axe d'amélioration ajouté"}
+    return {"success": True, "message": "Axe d'amélioration ajouté", "axis": new_item}
+
+
+@router.put("/{project_id}/improvement-axes/{axis_id}")
+async def update_improvement_axis(
+    project_id: uuid.UUID,
+    axis_id: str,
+    request: ImprovementAxisUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Update an existing improvement axis."""
+    result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    items = _parse_improvement_axes(project.improvement_axes or "")
+    for item in items:
+        if item.get("id") == axis_id:
+            item["content"] = request.content
+            item["source"] = request.source or ""
+            project.improvement_axes = _serialize_improvement_axes(items)
+            await db.commit()
+            return {"success": True, "message": "Axe mis à jour", "axis": item}
+
+    raise HTTPException(status_code=404, detail="Axe non trouvé")
+
+
+@router.delete("/{project_id}/improvement-axes/{axis_id}")
+async def delete_improvement_axis(
+    project_id: uuid.UUID,
+    axis_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Delete an improvement axis."""
+    result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    items = _parse_improvement_axes(project.improvement_axes or "")
+    new_items = [item for item in items if item.get("id") != axis_id]
+    if len(new_items) == len(items):
+        raise HTTPException(status_code=404, detail="Axe non trouvé")
+
+    project.improvement_axes = _serialize_improvement_axes(new_items)
+    await db.commit()
+    return {"success": True, "message": "Axe supprimé"}
 
 
 @router.get("/{project_id}/statistics", response_model=StatisticsOut)
@@ -3577,30 +3757,7 @@ async def list_project_members(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List project members. If no project-specific members, returns workspace members."""
-    result = await db.execute(
-        select(ProjectMember, User)
-        .join(User, User.id == ProjectMember.user_id)
-        .where(ProjectMember.project_id == project_id)
-    )
-    rows = result.all()
-
-    if rows:
-        return [
-            {
-                "id": str(pm.id),
-                "user_id": str(user.id),
-                "username": user.username,
-                "email": user.email,
-                "full_name": user.full_name,
-                "role": pm.role,
-                "joined_at": pm.joined_at.isoformat(),
-                "source": "project",
-            }
-            for pm, user in rows
-        ]
-
-    # Fallback: return workspace members
+    """List project members and workspace members with source indication."""
     project_result = await db.execute(
         select(RFPProject).where(RFPProject.id == project_id)
     )
@@ -3608,25 +3765,50 @@ async def list_project_members(
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
+    # Get project-specific members
+    result = await db.execute(
+        select(ProjectMember, User)
+        .join(User, User.id == ProjectMember.user_id)
+        .where(ProjectMember.project_id == project_id)
+    )
+    project_rows = result.all()
+    project_member_user_ids = {user.id for _, user in project_rows}
+
+    members = [
+        {
+            "id": str(pm.id),
+            "user_id": str(user.id),
+            "username": user.username,
+            "email": user.email,
+            "full_name": user.full_name,
+            "role": pm.role,
+            "joined_at": pm.joined_at.isoformat(),
+            "source": "project",
+        }
+        for pm, user in project_rows
+    ]
+
+    # Also return workspace members (not already project members) for reference
     ws_result = await db.execute(
         select(WorkspaceMember, User)
         .join(User, User.id == WorkspaceMember.user_id)
         .where(WorkspaceMember.workspace_id == project.workspace_id)
     )
     ws_rows = ws_result.all()
-    return [
-        {
-            "id": str(wm.id),
-            "user_id": str(user.id),
-            "username": user.username,
-            "email": user.email,
-            "full_name": user.full_name,
-            "role": wm.role.value,
-            "joined_at": wm.joined_at.isoformat(),
-            "source": "workspace",
-        }
-        for wm, user in ws_rows
-    ]
+    for wm, user in ws_rows:
+        if user.id not in project_member_user_ids:
+            members.append({
+                "id": str(wm.id),
+                "user_id": str(user.id),
+                "username": user.username,
+                "email": user.email,
+                "full_name": user.full_name,
+                "role": wm.role.value,
+                "joined_at": wm.joined_at.isoformat(),
+                "source": "workspace",
+            })
+
+    return members
 
 
 @router.post("/{project_id}/members", status_code=status.HTTP_201_CREATED)
@@ -3636,7 +3818,7 @@ async def add_project_member(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Add a member to a project."""
+    """Add a member to a project. The user must be a workspace member first."""
     user_id = request.get("user_id")
     role = request.get("role", "editor")
 
@@ -3645,6 +3827,21 @@ async def add_project_member(
     user = user_result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
+
+    # Get project to find workspace_id
+    proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    proj = proj_result.scalar_one_or_none()
+    if not proj:
+        raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    # Verify user is a workspace member
+    ws_member = await db.execute(
+        select(WorkspaceMember)
+        .where(WorkspaceMember.workspace_id == proj.workspace_id)
+        .where(WorkspaceMember.user_id == uuid.UUID(user_id))
+    )
+    if not ws_member.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="L'utilisateur doit d'abord être membre de l'espace de travail")
 
     # Check not already member
     existing = await db.execute(

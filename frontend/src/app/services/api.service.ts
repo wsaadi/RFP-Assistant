@@ -370,8 +370,20 @@ export class ApiService {
     return this.http.get(`${this.baseUrl}/projects/${projectId}/gap-analysis/export-pdf`, { responseType: 'blob' });
   }
 
+  getImprovementAxes(projectId: string): Observable<any> {
+    return this.http.get(`${this.baseUrl}/projects/${projectId}/improvement-axes`);
+  }
+
   addImprovementAxis(projectId: string, content: string, source: string = ''): Observable<any> {
     return this.http.post(`${this.baseUrl}/projects/${projectId}/improvement-axes`, { content, source });
+  }
+
+  updateImprovementAxis(projectId: string, axisId: string, content: string, source: string = ''): Observable<any> {
+    return this.http.put(`${this.baseUrl}/projects/${projectId}/improvement-axes/${axisId}`, { content, source });
+  }
+
+  deleteImprovementAxis(projectId: string, axisId: string): Observable<any> {
+    return this.http.delete(`${this.baseUrl}/projects/${projectId}/improvement-axes/${axisId}`);
   }
 
   getStatistics(projectId: string): Observable<ProjectStatistics> {

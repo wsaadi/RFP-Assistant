@@ -96,6 +96,11 @@ class ImprovementAxisRequest(BaseModel):
     source: str = ""
 
 
+class ImprovementAxisUpdate(BaseModel):
+    content: str = Field(..., min_length=1)
+    source: str = ""
+
+
 class GapAnalysisRequest(BaseModel):
     pass
 
