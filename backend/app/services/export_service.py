@@ -450,6 +450,9 @@ class ExportService:
             images_dir = os.path.join(settings.images_dir, str(new_project.id))
             os.makedirs(images_dir, exist_ok=True)
 
+            # Map old image IDs to new ones (needed to remap chapter references)
+            image_id_map: Dict[str, str] = {}
+
             for img_data in project_data.get("images", []):
                 arcname = f"images/{img_data['stored_filename']}"
                 try:
@@ -464,6 +467,7 @@ class ExportService:
                     if not new_doc_id:
                         continue
 
+                    old_img_id = img_data.get("id")
                     new_image = DocumentImage(
                         document_id=new_doc_id,
                         stored_filename=img_data["stored_filename"],
@@ -487,8 +491,53 @@ class ExportService:
                         section_title=img_data.get("section_title", ""),
                     )
                     db.add(new_image)
+                    await db.flush()
+                    if old_img_id:
+                        image_id_map[old_img_id] = str(new_image.id)
                 except KeyError:
                     continue
+
+            # Remap image references in chapters (content and image_references)
+            if image_id_map:
+                for ch_data in project_data.get("chapters", []):
+                    old_ch_id = ch_data["id"]
+                    new_ch_id = chapter_id_map.get(old_ch_id)
+                    if not new_ch_id:
+                        continue
+
+                    result = await db.execute(
+                        select(Chapter).where(Chapter.id == new_ch_id)
+                    )
+                    chapter = result.scalar_one()
+                    updated = False
+
+                    # Remap [INSERT_IMAGE:old_uuid] markers in content
+                    if chapter.content:
+                        new_content = chapter.content
+                        for old_id, new_id in image_id_map.items():
+                            new_content = new_content.replace(
+                                f"[INSERT_IMAGE:{old_id}]",
+                                f"[INSERT_IMAGE:{new_id}]",
+                            )
+                        if new_content != chapter.content:
+                            chapter.content = new_content
+                            updated = True
+
+                    # Remap image_id and file_path in image_references
+                    if chapter.image_references:
+                        new_refs = []
+                        for ref in chapter.image_references:
+                            old_ref_id = ref.get("image_id", "")
+                            if old_ref_id in image_id_map:
+                                ref = dict(ref)
+                                ref["image_id"] = image_id_map[old_ref_id]
+                                # Update file_path to point to new project images dir
+                                if ref.get("file_path"):
+                                    filename = os.path.basename(ref["file_path"])
+                                    ref["file_path"] = os.path.join(images_dir, filename)
+                            new_refs.append(ref)
+                        chapter.image_references = new_refs
+                        updated = True
 
             # Import compliance results
             for cr_data in project_data.get("compliance_results", []):
