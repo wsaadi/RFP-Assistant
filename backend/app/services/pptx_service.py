@@ -9,38 +9,90 @@ from pptx.util import Inches, Pt, Emu
 from pptx.dml.color import RGBColor
 from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
+from pptx.oxml.ns import qn
 
 logger = logging.getLogger(__name__)
 
 # ── Color palette ──
-COLOR_PRIMARY = RGBColor(0x1B, 0x3A, 0x5C)      # Dark navy
-COLOR_SECONDARY = RGBColor(0x2C, 0x5F, 0x8A)     # Medium blue
-COLOR_ACCENT = RGBColor(0x3D, 0x7A, 0xB5)        # Bright blue
-COLOR_ACCENT_LIGHT = RGBColor(0x5A, 0x9F, 0xD4)  # Light accent
+COLOR_PRIMARY = RGBColor(0x1B, 0x3A, 0x5C)
+COLOR_SECONDARY = RGBColor(0x2C, 0x5F, 0x8A)
+COLOR_ACCENT = RGBColor(0x3D, 0x7A, 0xB5)
+COLOR_ACCENT_LIGHT = RGBColor(0x5A, 0x9F, 0xD4)
+COLOR_ACCENT_PALE = RGBColor(0xD6, 0xEA, 0xF8)
 COLOR_WHITE = RGBColor(0xFF, 0xFF, 0xFF)
-COLOR_LIGHT_BG = RGBColor(0xF0, 0xF4, 0xF8)      # Very light gray-blue
-COLOR_CARD_BG = RGBColor(0xF8, 0xFA, 0xFC)        # Card background
+COLOR_LIGHT_BG = RGBColor(0xF0, 0xF4, 0xF8)
+COLOR_CARD_BG = RGBColor(0xF8, 0xFA, 0xFC)
 COLOR_DARK_TEXT = RGBColor(0x2C, 0x3E, 0x50)
 COLOR_MUTED = RGBColor(0x7F, 0x8C, 0x8D)
 COLOR_SUCCESS = RGBColor(0x27, 0xAE, 0x60)
+COLOR_SUCCESS_LIGHT = RGBColor(0xD5, 0xF5, 0xE3)
 COLOR_WARN = RGBColor(0xE6, 0x7E, 0x22)
+COLOR_WARN_LIGHT = RGBColor(0xFD, 0xEA, 0xD3)
 COLOR_PURPLE = RGBColor(0x8E, 0x44, 0xAD)
+COLOR_PURPLE_LIGHT = RGBColor(0xEB, 0xDE, 0xF0)
 COLOR_TEAL = RGBColor(0x00, 0x89, 0x7B)
+COLOR_TEAL_LIGHT = RGBColor(0xD1, 0xF2, 0xEB)
 COLOR_CORAL = RGBColor(0xE7, 0x4C, 0x3C)
+COLOR_CORAL_LIGHT = RGBColor(0xFA, 0xDB, 0xD8)
+COLOR_SIDEBAR = RGBColor(0xE8, 0xEE, 0xF5)
 
 # Unicode icons for visual decoration
-ICON_CHECK = "\u2713"      # ✓
-ICON_ARROW = "\u279C"      # ➜
+ICON_CHECK = "\u2713"       # ✓
+ICON_ARROW_R = "\u279C"     # ➜
 ICON_STAR = "\u2605"        # ★
-ICON_DIAMOND = "\u25C6"    # ◆
-ICON_CIRCLE = "\u25CF"     # ●
-ICON_BULLET = "\u2022"     # •
-ICON_QUOTE_L = "\u201C"    # "
-ICON_QUOTE_R = "\u201D"    # "
-ICON_TARGET = "\u25CE"     # ◎
-ICON_LIGHT = "\u2600"      # ☀
-ICON_SHIELD = "\u25D0"     # ◐
-ICON_CHART = "\u25A0"      # ■
+ICON_DIAMOND = "\u25C6"     # ◆
+ICON_CIRCLE = "\u25CF"      # ●
+ICON_BULLET = "\u2022"      # •
+ICON_TARGET = "\u25CE"      # ◎
+ICON_SQUARE = "\u25A0"      # ■
+ICON_TRIANGLE = "\u25B6"    # ▶
+ICON_RING = "\u25CB"        # ○
+ICON_DASH = "\u2014"        # —
+
+# Section-specific icons (mapped by keyword detection)
+SECTION_ICONS = {
+    "contexte": "\U0001F50D",     # 🔍
+    "comprehen": "\U0001F4CB",    # 📋
+    "solution": "\U0001F4A1",     # 💡
+    "methodol": "\u2699",         # ⚙
+    "approche": "\U0001F4CA",     # 📊
+    "equipe": "\U0001F465",       # 👥
+    "moyen": "\U0001F527",        # 🔧
+    "planning": "\U0001F4C5",     # 📅
+    "livrable": "\U0001F4E6",     # 📦
+    "reference": "\U0001F3C6",    # 🏆
+    "experience": "\U0001F3C6",   # 🏆
+    "qualite": "\u2705",          # ✅
+    "engage": "\U0001F91D",       # 🤝
+    "valeur": "\U0001F4B0",       # 💰
+    "innov": "\U0001F680",        # 🚀
+    "securite": "\U0001F6E1",     # 🛡
+    "gouvern": "\U0001F3DB",      # 🏛
+    "transition": "\U0001F504",   # 🔄
+    "support": "\U0001F6E0",      # 🛠
+    "form": "\U0001F393",         # 🎓
+}
+
+# Color rotation for sections
+SECTION_COLORS = [
+    (COLOR_SECONDARY, COLOR_ACCENT_PALE),
+    (COLOR_TEAL, COLOR_TEAL_LIGHT),
+    (COLOR_PURPLE, COLOR_PURPLE_LIGHT),
+    (COLOR_SUCCESS, COLOR_SUCCESS_LIGHT),
+    (COLOR_WARN, COLOR_WARN_LIGHT),
+    (COLOR_CORAL, COLOR_CORAL_LIGHT),
+    (COLOR_ACCENT, COLOR_ACCENT_PALE),
+    (COLOR_PRIMARY, COLOR_LIGHT_BG),
+]
+
+
+def _get_section_icon(title: str) -> str:
+    """Get an appropriate icon for a section based on its title."""
+    lower = title.lower()
+    for keyword, icon in SECTION_ICONS.items():
+        if keyword in lower:
+            return icon
+    return ICON_DIAMOND
 
 
 class RFPPptxService:
@@ -58,20 +110,24 @@ class RFPPptxService:
         fill.fore_color.rgb = color
 
     @staticmethod
-    def _rect(slide, left, top, width, height, color: RGBColor, alpha=None):
+    def _rect(slide, left, top, width, height, color: RGBColor):
         shape = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, left, top, width, height)
         shape.fill.solid()
         shape.fill.fore_color.rgb = color
         shape.line.fill.background()
-        shape.rotation = 0
         return shape
 
     @staticmethod
-    def _rounded_rect(slide, left, top, width, height, color: RGBColor):
+    def _rounded_rect(slide, left, top, width, height, color: RGBColor,
+                      border_color=None):
         shape = slide.shapes.add_shape(MSO_SHAPE.ROUNDED_RECTANGLE, left, top, width, height)
         shape.fill.solid()
         shape.fill.fore_color.rgb = color
-        shape.line.fill.background()
+        if border_color:
+            shape.line.color.rgb = border_color
+            shape.line.width = Pt(1)
+        else:
+            shape.line.fill.background()
         return shape
 
     @staticmethod
@@ -81,6 +137,20 @@ class RFPPptxService:
         shape.fill.fore_color.rgb = color
         shape.line.fill.background()
         return shape
+
+    @classmethod
+    def _icon_badge(cls, slide, left, top, size, bg_color, icon_text,
+                    icon_size=16, icon_color=None):
+        """Create a colored circle with an icon/text inside."""
+        circ = cls._oval(slide, left, top, size, size, bg_color)
+        tf = circ.text_frame
+        tf.paragraphs[0].text = icon_text
+        tf.paragraphs[0].font.size = Pt(icon_size)
+        tf.paragraphs[0].font.bold = True
+        tf.paragraphs[0].font.color.rgb = icon_color or COLOR_WHITE
+        tf.paragraphs[0].alignment = PP_ALIGN.CENTER
+        tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+        return circ
 
     @staticmethod
     def _text_box(slide, left, top, width, height, text: str,
@@ -104,111 +174,121 @@ class RFPPptxService:
             notes_slide = slide.notes_slide
             notes_slide.notes_text_frame.text = text
 
-    # ── Decorative elements ──
+    # ── Decorative/layout elements ──
 
     @classmethod
-    def _add_corner_accent(cls, slide, position="top-right"):
-        """Add a decorative corner triangle/shape."""
-        if position == "top-right":
-            # Large decorative circle in top-right corner (partially off-slide)
-            cls._oval(slide, cls.SLIDE_W - Inches(2.5), Inches(-1.5),
-                      Inches(4), Inches(4), COLOR_ACCENT_LIGHT)
-        elif position == "bottom-left":
-            cls._oval(slide, Inches(-1.5), cls.SLIDE_H - Inches(2.5),
-                      Inches(4), Inches(4), COLOR_ACCENT_LIGHT)
-
-    @classmethod
-    def _add_footer_bar(cls, slide, text="", show_page=False, page_num=0, total=0):
-        """Add a professional footer bar."""
+    def _add_footer_bar(cls, slide, text="CONFIDENTIEL", section_color=None):
+        """Professional footer with accent line."""
         cls._rect(slide, Inches(0), cls.SLIDE_H - Inches(0.4),
                   cls.SLIDE_W, Inches(0.4), COLOR_PRIMARY)
-        # Accent line above footer
         cls._rect(slide, Inches(0), cls.SLIDE_H - Inches(0.43),
-                  cls.SLIDE_W, Inches(0.03), COLOR_ACCENT)
+                  cls.SLIDE_W, Inches(0.03), section_color or COLOR_ACCENT)
         if text:
-            cls._text_box(slide, Inches(0.5), cls.SLIDE_H - Inches(0.38),
-                          Inches(6), Inches(0.35), text,
-                          font_size=8, color=COLOR_WHITE, alignment=PP_ALIGN.LEFT)
-        if show_page:
-            cls._text_box(slide, cls.SLIDE_W - Inches(1.5), cls.SLIDE_H - Inches(0.38),
-                          Inches(1.2), Inches(0.35), f"{page_num}/{total}",
-                          font_size=8, color=COLOR_WHITE, alignment=PP_ALIGN.RIGHT)
+            cls._text_box(slide, Inches(0.5), cls.SLIDE_H - Inches(0.37),
+                          Inches(6), Inches(0.32), text,
+                          font_size=8, color=COLOR_WHITE)
+
+    @classmethod
+    def _add_left_sidebar(cls, slide, accent_color=COLOR_ACCENT, icon=""):
+        """Add a thin decorative sidebar on the left."""
+        # Sidebar strip
+        cls._rect(slide, Inches(0), Inches(0), Inches(0.45), cls.SLIDE_H, COLOR_SIDEBAR)
+        # Accent color bar
+        cls._rect(slide, Inches(0), Inches(0), Inches(0.06), cls.SLIDE_H, accent_color)
+        # Icon in sidebar
+        if icon:
+            cls._text_box(slide, Inches(0.06), Inches(3.2), Inches(0.38), Inches(0.4),
+                          icon, font_size=16, color=accent_color, alignment=PP_ALIGN.CENTER)
 
     @classmethod
     def _add_slide_header(cls, slide, title: str, subtitle: str = "",
-                          section_label: str = ""):
-        """Add a professional header to content slides."""
+                          section_label: str = "", accent_color=None):
+        """Professional slide header bar."""
+        ac = accent_color or COLOR_ACCENT
         # Top accent line
-        cls._rect(slide, Inches(0), Inches(0), cls.SLIDE_W, Inches(0.05), COLOR_ACCENT)
+        cls._rect(slide, Inches(0), Inches(0), cls.SLIDE_W, Inches(0.05), ac)
         # Header background
         cls._rect(slide, Inches(0), Inches(0.05), cls.SLIDE_W, Inches(1.0), COLOR_PRIMARY)
 
-        # Section label (small)
+        x_offset = Inches(0.8)
+
         if section_label:
-            cls._text_box(slide, Inches(0.8), Inches(0.12), Inches(10), Inches(0.3),
+            cls._text_box(slide, x_offset, Inches(0.12), Inches(10), Inches(0.3),
                           section_label.upper(), font_size=9, bold=True,
-                          color=COLOR_ACCENT_LIGHT, alignment=PP_ALIGN.LEFT)
+                          color=ac)
 
-        # Title
         title_y = Inches(0.35) if section_label else Inches(0.2)
-        cls._text_box(slide, Inches(0.8), title_y, Inches(10), Inches(0.6),
-                      title, font_size=24, bold=True,
-                      color=COLOR_WHITE, alignment=PP_ALIGN.LEFT)
+        cls._text_box(slide, x_offset, title_y, Inches(11), Inches(0.6),
+                      title, font_size=24, bold=True, color=COLOR_WHITE)
 
-        # Subtitle
         if subtitle:
-            cls._text_box(slide, Inches(0.8), Inches(1.15), Inches(10), Inches(0.35),
+            cls._text_box(slide, x_offset, Inches(1.15), Inches(10), Inches(0.35),
                           subtitle, font_size=13, color=COLOR_MUTED)
+
+    @classmethod
+    def _add_decorative_dots(cls, slide, x_start, y_start, cols=5, rows=4,
+                             color=COLOR_ACCENT_PALE, dot_size=Inches(0.08),
+                             spacing=Inches(0.25)):
+        """Add a grid of small decorative dots (modern pattern)."""
+        for r in range(rows):
+            for c in range(cols):
+                cls._oval(slide, x_start + c * spacing, y_start + r * spacing,
+                          dot_size, dot_size, color)
 
     # ── Slide types ──
 
     @classmethod
     def _create_title_slide(cls, prs, project_name, client_name, company_name, rfp_reference):
-        """Create an impactful cover slide with decorative elements."""
+        """Cover slide with decorative geometry."""
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         cls._add_background(slide, COLOR_PRIMARY)
 
-        # Decorative circles in corners
-        cls._oval(slide, cls.SLIDE_W - Inches(4), Inches(-2),
-                  Inches(7), Inches(7), COLOR_SECONDARY)
+        # Decorative circles (overlapping, modern)
+        cls._oval(slide, cls.SLIDE_W - Inches(5), Inches(-2.5),
+                  Inches(8), Inches(8), COLOR_SECONDARY)
+        cls._oval(slide, cls.SLIDE_W - Inches(3), Inches(-1),
+                  Inches(5), Inches(5), COLOR_ACCENT)
         cls._oval(slide, Inches(-3), cls.SLIDE_H - Inches(4),
                   Inches(6), Inches(6), COLOR_SECONDARY)
-        # Smaller accent circles
-        cls._oval(slide, cls.SLIDE_W - Inches(2), Inches(5),
-                  Inches(3), Inches(3), COLOR_ACCENT)
+
+        # Dot pattern decoration (top-left)
+        cls._add_decorative_dots(slide, Inches(1), Inches(0.4), cols=6, rows=3,
+                                 color=COLOR_ACCENT_LIGHT)
 
         # Top accent bar
         cls._rect(slide, Inches(0), Inches(0), cls.SLIDE_W, Inches(0.06), COLOR_ACCENT)
 
         # "SOUTENANCE" label
-        cls._text_box(slide, Inches(1), Inches(1.2), Inches(8), Inches(0.5),
+        cls._text_box(slide, Inches(1), Inches(1.5), Inches(8), Inches(0.5),
                       "SOUTENANCE COMMERCIALE", font_size=14, bold=True,
-                      color=COLOR_ACCENT_LIGHT, alignment=PP_ALIGN.LEFT)
+                      color=COLOR_ACCENT_LIGHT)
 
-        # Project name - main title
-        cls._text_box(slide, Inches(1), Inches(1.8), Inches(8), Inches(1.5),
-                      project_name, font_size=36, bold=True,
-                      color=COLOR_WHITE, alignment=PP_ALIGN.LEFT)
+        # Project name
+        cls._text_box(slide, Inches(1), Inches(2.1), Inches(8), Inches(1.5),
+                      project_name, font_size=38, bold=True, color=COLOR_WHITE)
 
-        # Separator line
-        cls._rect(slide, Inches(1), Inches(3.5), Inches(3), Inches(0.05), COLOR_ACCENT)
+        # Separator
+        cls._rect(slide, Inches(1), Inches(3.8), Inches(3.5), Inches(0.05), COLOR_ACCENT)
 
-        # Info block with icons
-        info_y = Inches(3.9)
+        # Info block
+        info_y = Inches(4.2)
         if client_name:
-            cls._text_box(slide, Inches(1), info_y, Inches(8), Inches(0.4),
-                          f"{ICON_TARGET}  Client : {client_name}", font_size=16,
-                          color=COLOR_WHITE, alignment=PP_ALIGN.LEFT)
-            info_y += Inches(0.5)
+            cls._icon_badge(slide, Inches(1), info_y, Inches(0.35), COLOR_ACCENT,
+                            ICON_TARGET, icon_size=12)
+            cls._text_box(slide, Inches(1.5), info_y, Inches(7), Inches(0.4),
+                          f"Client : {client_name}", font_size=16, color=COLOR_WHITE)
+            info_y += Inches(0.55)
         if company_name:
-            cls._text_box(slide, Inches(1), info_y, Inches(8), Inches(0.4),
-                          f"{ICON_DIAMOND}  Soumissionnaire : {company_name}", font_size=16,
-                          color=COLOR_WHITE, alignment=PP_ALIGN.LEFT)
-            info_y += Inches(0.5)
+            cls._icon_badge(slide, Inches(1), info_y, Inches(0.35), COLOR_TEAL,
+                            ICON_DIAMOND, icon_size=12)
+            cls._text_box(slide, Inches(1.5), info_y, Inches(7), Inches(0.4),
+                          f"Soumissionnaire : {company_name}", font_size=16, color=COLOR_WHITE)
+            info_y += Inches(0.55)
         if rfp_reference:
-            cls._text_box(slide, Inches(1), info_y, Inches(8), Inches(0.4),
-                          f"{ICON_BULLET}  Reference : {rfp_reference}", font_size=14,
-                          color=COLOR_ACCENT_LIGHT, alignment=PP_ALIGN.LEFT)
+            cls._icon_badge(slide, Inches(1), info_y, Inches(0.35), COLOR_PURPLE,
+                            ICON_SQUARE, icon_size=10)
+            cls._text_box(slide, Inches(1.5), info_y, Inches(7), Inches(0.4),
+                          f"Reference : {rfp_reference}", font_size=14, color=COLOR_ACCENT_LIGHT)
 
         # Bottom bar
         cls._rect(slide, Inches(0), cls.SLIDE_H - Inches(0.5),
@@ -216,46 +296,34 @@ class RFPPptxService:
         cls._text_box(slide, Inches(1), cls.SLIDE_H - Inches(0.45),
                       Inches(10), Inches(0.4),
                       "DOCUMENT CONFIDENTIEL", font_size=10, bold=True,
-                      color=COLOR_WHITE, alignment=PP_ALIGN.LEFT)
+                      color=COLOR_WHITE)
 
     @classmethod
-    def _create_agenda_slide(cls, prs, sections: List[dict]):
-        """Create an agenda slide with visual timeline."""
+    def _create_agenda_slide(cls, prs, sections):
+        """Agenda slide with visual timeline and colored dots."""
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         cls._add_background(slide, COLOR_WHITE)
-
         cls._add_slide_header(slide, "AGENDA")
 
-        # Vertical timeline line
+        # Decorative dots in bottom-right
+        cls._add_decorative_dots(slide, cls.SLIDE_W - Inches(2), cls.SLIDE_H - Inches(2),
+                                 cols=4, rows=4, color=COLOR_ACCENT_PALE)
+
+        # Timeline line
         line_x = Inches(1.6)
-        cls._rect(slide, line_x + Inches(0.17), Inches(1.5),
-                  Inches(0.04), Inches(5.3), COLOR_ACCENT)
+        cls._rect(slide, line_x + Inches(0.19), Inches(1.5),
+                  Inches(0.04), Inches(5.3), COLOR_ACCENT_PALE)
 
         y = Inches(1.5)
-        colors = [COLOR_SECONDARY, COLOR_ACCENT, COLOR_TEAL, COLOR_PURPLE,
-                  COLOR_SUCCESS, COLOR_WARN, COLOR_CORAL, COLOR_PRIMARY]
-
         for i, section in enumerate(sections):
             title = section.get("title", "")
             duration = section.get("duration", "")
-            dot_color = colors[i % len(colors)]
+            sc, sc_light = SECTION_COLORS[i % len(SECTION_COLORS)]
+            icon = _get_section_icon(title)
 
-            # Timeline dot
-            cls._oval(slide, line_x, y + Inches(0.06),
-                      Inches(0.38), Inches(0.38), dot_color)
-            # Number in dot
-            dot = slide.shapes.add_shape(MSO_SHAPE.OVAL, line_x + Inches(0.04),
-                                         y + Inches(0.1), Inches(0.3), Inches(0.3))
-            dot.fill.solid()
-            dot.fill.fore_color.rgb = dot_color
-            dot.line.fill.background()
-            tf = dot.text_frame
-            tf.paragraphs[0].text = str(i + 1)
-            tf.paragraphs[0].font.size = Pt(12)
-            tf.paragraphs[0].font.bold = True
-            tf.paragraphs[0].font.color.rgb = COLOR_WHITE
-            tf.paragraphs[0].alignment = PP_ALIGN.CENTER
-            tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+            # Timeline dot with icon
+            cls._icon_badge(slide, line_x, y + Inches(0.03),
+                            Inches(0.42), sc, icon, icon_size=14)
 
             # Title
             cls._text_box(slide, Inches(2.3), y, Inches(7), Inches(0.45),
@@ -263,28 +331,39 @@ class RFPPptxService:
 
             # Duration badge
             if duration:
-                badge = cls._rounded_rect(slide, Inches(10), y + Inches(0.05),
-                                          Inches(1.8), Inches(0.35), COLOR_LIGHT_BG)
+                cls._rounded_rect(slide, Inches(10), y + Inches(0.05),
+                                  Inches(2), Inches(0.35), sc_light, border_color=sc)
                 cls._text_box(slide, Inches(10), y + Inches(0.05),
-                              Inches(1.8), Inches(0.35), duration,
-                              font_size=11, color=COLOR_MUTED, alignment=PP_ALIGN.CENTER)
+                              Inches(2), Inches(0.35), f"{ICON_CIRCLE} {duration}",
+                              font_size=10, color=sc, alignment=PP_ALIGN.CENTER)
 
-            y += Inches(0.55)
+            y += Inches(0.58)
 
-        cls._add_footer_bar(slide, "CONFIDENTIEL")
+        cls._add_footer_bar(slide)
 
     @classmethod
-    def _create_section_divider(cls, prs, section_number, section_title, duration=""):
-        """Create a visually striking section divider."""
+    def _create_section_divider(cls, prs, section_number, section_title,
+                                duration="", total_sections=1):
+        """Visually striking section divider with geometric decoration."""
         slide = prs.slides.add_slide(prs.slide_layouts[6])
+        sc, sc_light = SECTION_COLORS[(section_number - 1) % len(SECTION_COLORS)]
+
         cls._add_background(slide, COLOR_SECONDARY)
 
-        # Decorative circles
-        cls._oval(slide, Inches(-2), Inches(-2), Inches(6), Inches(6), COLOR_PRIMARY)
-        cls._oval(slide, cls.SLIDE_W - Inches(3), cls.SLIDE_H - Inches(3),
-                  Inches(5), Inches(5), COLOR_ACCENT)
+        # Large decorative shapes
+        cls._oval(slide, Inches(-2.5), Inches(-2.5),
+                  Inches(7), Inches(7), COLOR_PRIMARY)
+        cls._oval(slide, cls.SLIDE_W - Inches(4), cls.SLIDE_H - Inches(4),
+                  Inches(6), Inches(6), sc)
+        # Smaller decorative accent
+        cls._oval(slide, cls.SLIDE_W - Inches(2), Inches(0.5),
+                  Inches(1.5), Inches(1.5), COLOR_ACCENT)
 
-        # Section number - large
+        # Dot pattern
+        cls._add_decorative_dots(slide, Inches(8), Inches(1), cols=5, rows=3,
+                                 color=COLOR_ACCENT_LIGHT, spacing=Inches(0.3))
+
+        # Section number
         num_text = f"0{section_number}" if section_number < 10 else str(section_number)
         cls._text_box(slide, Inches(1), Inches(1.5), Inches(11), Inches(1.5),
                       num_text, font_size=80, bold=True,
@@ -296,162 +375,184 @@ class RFPPptxService:
                       color=COLOR_WHITE, alignment=PP_ALIGN.CENTER)
 
         # Accent bar
-        cls._rect(slide, Inches(5), Inches(4.4), Inches(3.3), Inches(0.05), COLOR_ACCENT)
+        cls._rect(slide, Inches(4.5), Inches(4.3), Inches(4.3), Inches(0.05), sc)
 
-        # Duration
+        # Duration + icon
+        icon = _get_section_icon(section_title)
         if duration:
-            cls._text_box(slide, Inches(1), Inches(4.8), Inches(11), Inches(0.5),
-                          f"{ICON_CIRCLE}  {duration}", font_size=16,
+            cls._text_box(slide, Inches(1), Inches(4.7), Inches(11), Inches(0.5),
+                          f"{icon}  {duration}", font_size=18,
                           color=COLOR_ACCENT_LIGHT, alignment=PP_ALIGN.CENTER)
+
+        # Progress bar at bottom
+        bar_y = cls.SLIDE_H - Inches(0.3)
+        cls._rect(slide, Inches(0), bar_y, cls.SLIDE_W, Inches(0.3), COLOR_PRIMARY)
+        if total_sections > 0:
+            progress_w = int(cls.SLIDE_W) * section_number // total_sections
+            cls._rect(slide, Inches(0), bar_y, progress_w, Inches(0.3), sc)
 
     @classmethod
     def _create_content_slide(cls, prs, title, bullet_points, subtitle="",
                               speaker_notes="", section_label="",
-                              layout="bullets", icon_char=None):
-        """Create a content slide with bullet points and optional 2-column layout."""
+                              section_idx=0):
+        """Content slide with sidebar accent and icon bullets."""
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         cls._add_background(slide, COLOR_WHITE)
 
-        cls._add_slide_header(slide, title, subtitle, section_label)
-        cls._add_footer_bar(slide, "CONFIDENTIEL")
+        sc, sc_light = SECTION_COLORS[section_idx % len(SECTION_COLORS)]
+        icon = _get_section_icon(section_label or title)
+
+        # Left sidebar
+        cls._add_left_sidebar(slide, accent_color=sc, icon=icon)
+
+        cls._add_slide_header(slide, title, subtitle, section_label, accent_color=sc)
+        cls._add_footer_bar(slide, section_color=sc)
 
         start_y = Inches(1.5) if subtitle else Inches(1.3)
+        content_x = Inches(0.65)
+        content_w = Inches(12.2)
 
-        if layout == "two_columns" and len(bullet_points) >= 4:
-            mid = (len(bullet_points) + 1) // 2
-            left_bullets = bullet_points[:mid]
-            right_bullets = bullet_points[mid:]
+        n_bullets = len(bullet_points)
 
-            # Left column
-            cls._add_bullet_list(slide, Inches(0.6), start_y,
-                                 Inches(5.8), Inches(5), left_bullets)
-            # Vertical separator
-            cls._rect(slide, Inches(6.5), start_y + Inches(0.2),
+        if n_bullets >= 6:
+            # Two-column layout
+            mid = (n_bullets + 1) // 2
+            cls._add_icon_bullet_list(slide, content_x, start_y,
+                                      Inches(5.8), Inches(5),
+                                      bullet_points[:mid], sc, sc_light)
+            cls._rect(slide, Inches(6.6), start_y + Inches(0.2),
                       Inches(0.02), Inches(4.5), COLOR_LIGHT_BG)
-            # Right column
-            cls._add_bullet_list(slide, Inches(6.8), start_y,
-                                 Inches(5.8), Inches(5), right_bullets)
-        elif layout == "cards" and len(bullet_points) <= 6:
-            cls._add_card_layout(slide, start_y, bullet_points, icon_char)
+            cls._add_icon_bullet_list(slide, Inches(6.9), start_y,
+                                      Inches(5.8), Inches(5),
+                                      bullet_points[mid:], sc, sc_light)
+        elif n_bullets <= 4 and all(len(b) < 100 for b in bullet_points):
+            # Card layout
+            cls._add_card_layout(slide, start_y, bullet_points, sc, sc_light)
         else:
-            cls._add_bullet_list(slide, Inches(0.6), start_y,
-                                 Inches(11.5), Inches(5.2), bullet_points)
+            # Standard bullet list with icons
+            cls._add_icon_bullet_list(slide, content_x, start_y,
+                                      content_w, Inches(5.2),
+                                      bullet_points, sc, sc_light)
+
+        # Decorative dots in bottom-right corner
+        cls._add_decorative_dots(slide, cls.SLIDE_W - Inches(1.5),
+                                 cls.SLIDE_H - Inches(1.5),
+                                 cols=3, rows=3, color=sc_light)
 
         cls._add_notes(slide, speaker_notes)
 
     @classmethod
-    def _add_bullet_list(cls, slide, left, top, width, height, bullets):
-        """Add a formatted bullet list to a slide."""
-        txBox = slide.shapes.add_textbox(left, top, width, height)
-        tf = txBox.text_frame
-        tf.word_wrap = True
-
+    def _add_icon_bullet_list(cls, slide, left, top, width, height,
+                              bullets, accent_color, light_color):
+        """Bullet list where each item has a small colored icon badge."""
+        y = top
         for idx, point in enumerate(bullets):
-            p = tf.paragraphs[0] if idx == 0 else tf.add_paragraph()
-            if point.strip().startswith("- ") and point.startswith("  "):
-                p.text = f"  {ICON_ARROW}  {point.strip()[2:]}"
-                p.font.size = Pt(13)
-                p.font.color.rgb = COLOR_MUTED
-                p.level = 1
-                p.space_before = Pt(4)
+            clean = point.lstrip("- ").strip()
+            is_sub = point.strip().startswith("- ") and point.startswith("  ")
+
+            if is_sub:
+                cls._text_box(slide, left + Inches(0.7), y, width - Inches(0.8), Inches(0.4),
+                              f"{ICON_ARROW_R}  {clean}", font_size=12,
+                              color=COLOR_MUTED)
+                y += Inches(0.38)
             else:
-                clean = point.lstrip("- ").strip()
-                p.text = f"{ICON_DIAMOND}  {clean}"
-                p.font.size = Pt(14)
-                p.font.color.rgb = COLOR_DARK_TEXT
-                p.font.bold = False
-                p.level = 0
-                p.space_before = Pt(10)
+                # Icon dot for main bullets
+                cls._icon_badge(slide, left, y + Inches(0.02),
+                                Inches(0.28), accent_color,
+                                ICON_TRIANGLE, icon_size=9)
+                cls._text_box(slide, left + Inches(0.4), y, width - Inches(0.5), Inches(0.5),
+                              clean, font_size=14, color=COLOR_DARK_TEXT)
+                y += Inches(0.5)
 
     @classmethod
-    def _add_card_layout(cls, slide, start_y, items, icon_char=None):
-        """Layout items as card-style blocks."""
-        cols = 2 if len(items) <= 4 else 3
-        col_width = Inches(11) / cols
-        card_h = Inches(1.8)
+    def _add_card_layout(cls, slide, start_y, items, accent_color, light_color):
+        """Card-style layout with icon badges."""
+        cols = 2
+        col_width = Inches(5.8)
+        card_h = Inches(2.0)
         x_start = Inches(0.8)
-        gap = Inches(0.3)
+        gap_x = Inches(0.5)
+        gap_y = Inches(0.4)
 
-        icon = icon_char or ICON_DIAMOND
+        icons = [ICON_STAR, ICON_TARGET, ICON_DIAMOND, ICON_CHECK, ICON_CIRCLE, ICON_SQUARE]
+        colors_cycle = [COLOR_SECONDARY, COLOR_TEAL, COLOR_PURPLE,
+                        COLOR_SUCCESS, COLOR_WARN, COLOR_ACCENT]
 
         for i, item in enumerate(items):
             col = i % cols
             row = i // cols
-            x = x_start + col * (col_width + gap)
-            y = start_y + row * (card_h + gap)
+            x = x_start + col * (col_width + gap_x)
+            y = start_y + row * (card_h + gap_y)
+            ic = colors_cycle[i % len(colors_cycle)]
 
-            # Card background
-            cls._rounded_rect(slide, x, y, col_width, card_h, COLOR_LIGHT_BG)
+            # Card background with colored left border
+            cls._rounded_rect(slide, x, y, col_width, card_h, COLOR_CARD_BG)
+            cls._rect(slide, x, y + Inches(0.1), Inches(0.05), card_h - Inches(0.2), ic)
 
-            # Icon circle
-            icon_colors = [COLOR_SECONDARY, COLOR_ACCENT, COLOR_TEAL,
-                           COLOR_SUCCESS, COLOR_PURPLE, COLOR_WARN]
-            ic = icon_colors[i % len(icon_colors)]
-            circ = cls._oval(slide, x + Inches(0.2), y + Inches(0.3),
-                             Inches(0.5), Inches(0.5), ic)
-            tf = circ.text_frame
-            tf.paragraphs[0].text = icon
-            tf.paragraphs[0].font.size = Pt(16)
-            tf.paragraphs[0].font.color.rgb = COLOR_WHITE
-            tf.paragraphs[0].alignment = PP_ALIGN.CENTER
-            tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+            # Icon badge
+            cls._icon_badge(slide, x + Inches(0.3), y + Inches(0.35),
+                            Inches(0.55), ic, icons[i % len(icons)], icon_size=18)
 
             # Text
             clean = item.lstrip("- ").strip()
-            cls._text_box(slide, x + Inches(0.9), y + Inches(0.2),
-                          col_width - Inches(1.2), card_h - Inches(0.4),
-                          clean, font_size=12, color=COLOR_DARK_TEXT)
+            cls._text_box(slide, x + Inches(1.05), y + Inches(0.25),
+                          col_width - Inches(1.4), card_h - Inches(0.5),
+                          clean, font_size=13, color=COLOR_DARK_TEXT)
 
     @classmethod
     def _create_key_figures_slide(cls, prs, title, figures):
-        """Create an impactful key figures slide with large numbers."""
+        """Key figures with large numbers, color-coded cards, and icon badges."""
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         cls._add_background(slide, COLOR_WHITE)
-
         cls._add_slide_header(slide, title)
-        cls._add_footer_bar(slide, "CONFIDENTIEL")
+        cls._add_footer_bar(slide)
+
+        # Decorative background shapes
+        cls._oval(slide, cls.SLIDE_W - Inches(3), Inches(1.5),
+                  Inches(4), Inches(4), COLOR_LIGHT_BG)
 
         cols = min(len(figures), 4)
-        rows = math.ceil(len(figures) / cols)
         box_width = Inches(11) / cols
         start_x = Inches(1)
 
-        colors = [COLOR_SECONDARY, COLOR_TEAL, COLOR_PURPLE, COLOR_WARN,
-                  COLOR_ACCENT, COLOR_SUCCESS, COLOR_CORAL, COLOR_PRIMARY]
+        fig_icons = [ICON_TARGET, ICON_STAR, ICON_DIAMOND, ICON_CHECK,
+                     ICON_CIRCLE, ICON_SQUARE, ICON_RING, ICON_TRIANGLE]
 
         for i, fig in enumerate(figures):
             col = i % cols
             row = i // cols
             x = start_x + col * box_width
             y = Inches(1.8) + row * Inches(2.5)
+            sc, sc_light = SECTION_COLORS[i % len(SECTION_COLORS)]
 
-            # Card background
             card_w = box_width - Inches(0.4)
-            cls._rounded_rect(slide, x, y, card_w, Inches(2.2), COLOR_LIGHT_BG)
+            # Card with light background
+            cls._rounded_rect(slide, x, y, card_w, Inches(2.2), sc_light)
+            # Top color bar
+            cls._rect(slide, x, y, card_w, Inches(0.06), sc)
 
-            # Color accent bar at top of card
-            color_idx = i % len(colors)
-            cls._rect(slide, x, y, card_w, Inches(0.06), colors[color_idx])
+            # Icon badge top-right
+            cls._icon_badge(slide, x + card_w - Inches(0.5), y + Inches(0.15),
+                            Inches(0.35), sc, fig_icons[i % len(fig_icons)], icon_size=12)
 
             # Value
             cls._text_box(slide, x, y + Inches(0.3), card_w, Inches(0.9),
                           fig.get("value", ""), font_size=40, bold=True,
-                          color=colors[color_idx], alignment=PP_ALIGN.CENTER)
+                          color=sc, alignment=PP_ALIGN.CENTER)
 
             # Separator
-            cls._rect(slide, x + Inches(0.5), y + Inches(1.3),
-                      card_w - Inches(1), Inches(0.02), colors[color_idx])
+            cls._rect(slide, x + Inches(0.4), y + Inches(1.3),
+                      card_w - Inches(0.8), Inches(0.02), sc)
 
             # Label
-            cls._text_box(slide, x + Inches(0.2), y + Inches(1.4),
-                          card_w - Inches(0.4), Inches(0.7),
+            cls._text_box(slide, x + Inches(0.15), y + Inches(1.4),
+                          card_w - Inches(0.3), Inches(0.7),
                           fig.get("label", ""), font_size=12,
                           color=COLOR_MUTED, alignment=PP_ALIGN.CENTER)
 
     @classmethod
     def _create_strengths_slide(cls, prs, strengths):
-        """Create a strengths slide with numbered cards and icons."""
-        # Split into multiple slides if needed (max 5 per slide)
+        """Strengths slides with numbered badges and star icons."""
         per_slide = 5
         for page in range(0, len(strengths), per_slide):
             chunk = strengths[page:page + per_slide]
@@ -461,55 +562,50 @@ class RFPPptxService:
             slide = prs.slides.add_slide(prs.slide_layouts[6])
             cls._add_background(slide, COLOR_LIGHT_BG)
 
-            title_suffix = f" ({slide_num}/{total_pages})" if total_pages > 1 else ""
-            cls._add_slide_header(slide, f"NOS FORCES{title_suffix}")
-            cls._add_footer_bar(slide, "CONFIDENTIEL")
+            title_sfx = f" ({slide_num}/{total_pages})" if total_pages > 1 else ""
+            cls._add_slide_header(slide, f"NOS FORCES{title_sfx}", accent_color=COLOR_WARN)
+            cls._add_footer_bar(slide, section_color=COLOR_WARN)
+
+            # Decorative star pattern
+            cls._add_decorative_dots(slide, cls.SLIDE_W - Inches(2.5), Inches(1.5),
+                                     cols=4, rows=3, color=COLOR_WARN_LIGHT, spacing=Inches(0.3))
 
             y = Inches(1.4)
             for i, strength in enumerate(chunk):
                 global_idx = page + i
+                sc, sc_light = SECTION_COLORS[global_idx % len(SECTION_COLORS)]
 
-                # Card
-                cls._rounded_rect(slide, Inches(0.5), y, Inches(12), Inches(0.9), COLOR_WHITE)
+                # Card with shadow effect (offset darker rect)
+                cls._rounded_rect(slide, Inches(0.55), y + Inches(0.03),
+                                  Inches(12), Inches(0.85), COLOR_ACCENT_PALE)
+                cls._rounded_rect(slide, Inches(0.5), y, Inches(12), Inches(0.85), COLOR_WHITE)
 
-                # Number circle
-                colors = [COLOR_SECONDARY, COLOR_TEAL, COLOR_ACCENT,
-                          COLOR_SUCCESS, COLOR_PURPLE]
-                nc = colors[global_idx % len(colors)]
-                circ = cls._oval(slide, Inches(0.7), y + Inches(0.15),
-                                 Inches(0.6), Inches(0.6), nc)
-                tf = circ.text_frame
-                tf.paragraphs[0].text = str(global_idx + 1)
-                tf.paragraphs[0].font.size = Pt(18)
-                tf.paragraphs[0].font.bold = True
-                tf.paragraphs[0].font.color.rgb = COLOR_WHITE
-                tf.paragraphs[0].alignment = PP_ALIGN.CENTER
-                tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+                # Number badge
+                cls._icon_badge(slide, Inches(0.7), y + Inches(0.12),
+                                Inches(0.6), sc, str(global_idx + 1), icon_size=18)
 
                 # Star icon
-                cls._text_box(slide, Inches(11.2), y + Inches(0.2),
-                              Inches(0.6), Inches(0.5), ICON_STAR,
-                              font_size=18, color=COLOR_WARN, alignment=PP_ALIGN.CENTER)
+                cls._icon_badge(slide, Inches(11.3), y + Inches(0.17),
+                                Inches(0.5), COLOR_WARN, ICON_STAR, icon_size=14)
 
                 # Text
                 cls._text_box(slide, Inches(1.5), y + Inches(0.15),
-                              Inches(9.5), Inches(0.6), strength,
+                              Inches(9.5), Inches(0.55), strength,
                               font_size=14, color=COLOR_DARK_TEXT)
 
-                y += Inches(1.05)
+                y += Inches(1.0)
 
     @classmethod
     def _create_qa_slide(cls, prs, questions):
-        """Create Q&A preparation slides."""
+        """Q&A preparation slides."""
         per_slide = 3
         for page in range(0, len(questions), per_slide):
             chunk = questions[page:page + per_slide]
 
             slide = prs.slides.add_slide(prs.slide_layouts[6])
             cls._add_background(slide, COLOR_WHITE)
-
-            cls._add_slide_header(slide, "QUESTIONS ANTICIPEES")
-            cls._add_footer_bar(slide, "CONFIDENTIEL")
+            cls._add_slide_header(slide, "QUESTIONS ANTICIPEES", accent_color=COLOR_PURPLE)
+            cls._add_footer_bar(slide, section_color=COLOR_PURPLE)
 
             y = Inches(1.4)
             for i, qa in enumerate(chunk):
@@ -517,99 +613,103 @@ class RFPPptxService:
                 a = qa.get("answer", "")
 
                 # Question card
-                cls._rounded_rect(slide, Inches(0.5), y, Inches(12), Inches(1.6), COLOR_LIGHT_BG)
+                cls._rounded_rect(slide, Inches(0.5), y, Inches(12), Inches(1.6),
+                                  COLOR_PURPLE_LIGHT, border_color=COLOR_PURPLE)
 
-                # Q icon
-                q_circ = cls._oval(slide, Inches(0.7), y + Inches(0.15),
-                                   Inches(0.45), Inches(0.45), COLOR_PURPLE)
-                tf = q_circ.text_frame
-                tf.paragraphs[0].text = "Q"
-                tf.paragraphs[0].font.size = Pt(16)
-                tf.paragraphs[0].font.bold = True
-                tf.paragraphs[0].font.color.rgb = COLOR_WHITE
-                tf.paragraphs[0].alignment = PP_ALIGN.CENTER
-                tf.vertical_anchor = MSO_ANCHOR.MIDDLE
+                # Q badge
+                cls._icon_badge(slide, Inches(0.7), y + Inches(0.15),
+                                Inches(0.45), COLOR_PURPLE, "Q", icon_size=16)
 
                 # Question text
                 cls._text_box(slide, Inches(1.3), y + Inches(0.1),
                               Inches(10.5), Inches(0.5), q,
                               font_size=13, bold=True, color=COLOR_PRIMARY)
 
-                # Answer
+                # Answer with arrow
                 if a:
-                    # Truncate long answers
-                    display_answer = a[:250] + "..." if len(a) > 250 else a
-                    cls._text_box(slide, Inches(1.3), y + Inches(0.65),
-                                  Inches(10.5), Inches(0.8),
-                                  f"{ICON_ARROW} {display_answer}",
+                    display = a[:280] + "..." if len(a) > 280 else a
+                    cls._icon_badge(slide, Inches(1.3), y + Inches(0.7),
+                                    Inches(0.25), COLOR_SUCCESS, ICON_CHECK, icon_size=9)
+                    cls._text_box(slide, Inches(1.7), y + Inches(0.65),
+                                  Inches(10.2), Inches(0.85), display,
                                   font_size=11, color=COLOR_MUTED)
 
                 y += Inches(1.8)
 
     @classmethod
-    def _create_summary_slide(cls, prs, project_name, strengths, key_messages=None):
-        """Create a visual summary/recap slide."""
+    def _create_summary_slide(cls, prs, project_name, strengths):
+        """Visual recap slide."""
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         cls._add_background(slide, COLOR_PRIMARY)
 
         # Decorative
-        cls._oval(slide, cls.SLIDE_W - Inches(3.5), Inches(-1.5),
-                  Inches(5), Inches(5), COLOR_SECONDARY)
+        cls._oval(slide, cls.SLIDE_W - Inches(4), Inches(-2),
+                  Inches(6), Inches(6), COLOR_SECONDARY)
+        cls._oval(slide, Inches(-2), cls.SLIDE_H - Inches(3),
+                  Inches(4), Inches(4), COLOR_SECONDARY)
+
+        # Dot pattern
+        cls._add_decorative_dots(slide, Inches(9), Inches(0.5), cols=5, rows=3,
+                                 color=COLOR_ACCENT_LIGHT, spacing=Inches(0.3))
 
         cls._text_box(slide, Inches(0.8), Inches(0.5), Inches(10), Inches(0.8),
-                      "EN RESUME", font_size=32, bold=True,
-                      color=COLOR_WHITE, alignment=PP_ALIGN.LEFT)
+                      "EN RESUME", font_size=34, bold=True, color=COLOR_WHITE)
 
-        cls._rect(slide, Inches(0.8), Inches(1.3), Inches(3), Inches(0.04), COLOR_ACCENT)
+        cls._rect(slide, Inches(0.8), Inches(1.3), Inches(3.5), Inches(0.04), COLOR_ACCENT)
 
-        # Key takeaways
         y = Inches(1.8)
         items = strengths[:6] if strengths else []
         for i, item in enumerate(items):
-            cls._text_box(slide, Inches(0.8), y, Inches(11), Inches(0.5),
-                          f"{ICON_CHECK}  {item}", font_size=15,
-                          color=COLOR_WHITE)
+            sc, _ = SECTION_COLORS[i % len(SECTION_COLORS)]
+            cls._icon_badge(slide, Inches(0.8), y + Inches(0.02),
+                            Inches(0.3), sc, ICON_CHECK, icon_size=11)
+            cls._text_box(slide, Inches(1.3), y, Inches(10), Inches(0.5),
+                          item, font_size=15, color=COLOR_WHITE)
             y += Inches(0.6)
 
-        cls._add_footer_bar(slide, "CONFIDENTIEL")
+        cls._add_footer_bar(slide)
 
     @classmethod
     def _create_closing_slide(cls, prs, company_name, client_name):
-        """Create a professional closing slide."""
+        """Professional closing slide."""
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         cls._add_background(slide, COLOR_PRIMARY)
 
         # Decorative circles
-        cls._oval(slide, Inches(-2), Inches(-2), Inches(6), Inches(6), COLOR_SECONDARY)
-        cls._oval(slide, cls.SLIDE_W - Inches(3), cls.SLIDE_H - Inches(3),
-                  Inches(5), Inches(5), COLOR_SECONDARY)
-        cls._oval(slide, Inches(4), Inches(1), Inches(2), Inches(2), COLOR_ACCENT)
+        cls._oval(slide, Inches(-2.5), Inches(-2.5),
+                  Inches(7), Inches(7), COLOR_SECONDARY)
+        cls._oval(slide, cls.SLIDE_W - Inches(4), cls.SLIDE_H - Inches(4),
+                  Inches(6), Inches(6), COLOR_SECONDARY)
+        cls._oval(slide, Inches(5), Inches(0.5), Inches(2), Inches(2), COLOR_ACCENT)
 
-        # Main message
+        # Dot pattern
+        cls._add_decorative_dots(slide, Inches(1), Inches(1), cols=4, rows=3,
+                                 color=COLOR_ACCENT_LIGHT, spacing=Inches(0.3))
+
         cls._text_box(slide, Inches(1), Inches(2), Inches(11), Inches(1.2),
-                      "MERCI", font_size=56, bold=True,
+                      "MERCI", font_size=60, bold=True,
                       color=COLOR_WHITE, alignment=PP_ALIGN.CENTER)
 
         cls._rect(slide, Inches(5), Inches(3.3), Inches(3.3), Inches(0.05), COLOR_ACCENT)
 
         cls._text_box(slide, Inches(1), Inches(3.7), Inches(11), Inches(0.6),
-                      "Questions & Echanges", font_size=26,
+                      "Questions & Echanges", font_size=28,
                       color=COLOR_ACCENT_LIGHT, alignment=PP_ALIGN.CENTER)
 
-        # Contact info
-        contact_parts = []
+        contact = []
         if company_name:
-            contact_parts.append(company_name)
+            contact.append(company_name)
         if client_name:
-            contact_parts.append(f"Client : {client_name}")
-        if contact_parts:
+            contact.append(f"Client : {client_name}")
+        if contact:
             cls._text_box(slide, Inches(1), Inches(5.2), Inches(11), Inches(0.5),
-                          "  |  ".join(contact_parts), font_size=14,
+                          "  |  ".join(contact), font_size=14,
                           color=COLOR_WHITE, alignment=PP_ALIGN.CENTER)
 
-        # Bottom bar
         cls._rect(slide, Inches(0), cls.SLIDE_H - Inches(0.5),
                   cls.SLIDE_W, Inches(0.5), COLOR_SECONDARY)
+
+    # ── Main generation ──
 
     @classmethod
     def generate_presentation(cls, project_name, client_name, company_name,
@@ -624,6 +724,7 @@ class RFPPptxService:
         strengths = soutenance_data.get("strengths", [])
         script = soutenance_data.get("script", {})
         qa_prep = script.get("qa_preparation", {})
+        total_sections = len(sections)
 
         # 1. Cover slide
         cls._create_title_slide(prs, project_name, client_name, company_name, rfp_reference)
@@ -632,33 +733,24 @@ class RFPPptxService:
         cls._create_agenda_slide(prs, sections)
 
         # 3. Content slides per section
-        for sec_idx, section in enumerate(sections, 1):
+        for sec_idx, section in enumerate(sections):
             section_title = section.get("title", "")
             duration = section.get("duration", "")
 
             # Section divider
-            cls._create_section_divider(prs, sec_idx, section_title, duration)
+            cls._create_section_divider(prs, sec_idx + 1, section_title,
+                                        duration, total_sections)
 
             # Section content slides
-            slides_data = section.get("slides", [])
-            for slide_idx, slide_data in enumerate(slides_data):
-                bullets = slide_data.get("bullets", [])
-
-                # Choose layout based on content
-                layout = "bullets"
-                if len(bullets) >= 6 and slide_idx == 0:
-                    layout = "two_columns"
-                elif len(bullets) <= 4 and all(len(b) < 80 for b in bullets):
-                    layout = "cards"
-
+            for slide_data in section.get("slides", []):
                 cls._create_content_slide(
                     prs,
                     title=slide_data.get("title", ""),
-                    bullet_points=bullets,
+                    bullet_points=slide_data.get("bullets", []),
                     subtitle=slide_data.get("subtitle", ""),
                     speaker_notes=slide_data.get("speaker_notes", ""),
                     section_label=section_title,
-                    layout=layout,
+                    section_idx=sec_idx,
                 )
 
         # 4. Key figures slide

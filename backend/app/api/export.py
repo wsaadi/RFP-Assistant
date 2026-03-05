@@ -1204,17 +1204,71 @@ async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID)
         store_export_result("soutenance_pptx", pid, pptx_bytes, pptx_filename)
 
         # Store script data (as JSON in Redis)
+        # The AI response has top-level sections/strengths/key_figures AND a nested
+        # "script" block.  The script block may be truncated when the LLM hits
+        # max_tokens because it comes last in the JSON.  We ensure the dashboard
+        # is always populated by merging top-level data into the script.
         script_data = soutenance_data.get("script", {})
         script_data["project_name"] = proj_name
         script_data["client_name"] = proj_client
         script_data["company_name"] = proj_company
         script_data["rfp_reference"] = proj_ref
+
+        top_sections = soutenance_data.get("sections", [])
         script_data["sections_overview"] = [
             {"title": s.get("title", ""), "duration": s.get("duration", "")}
-            for s in soutenance_data.get("sections", [])
+            for s in top_sections
         ]
         script_data["key_figures"] = soutenance_data.get("key_figures", [])
         script_data["strengths"] = soutenance_data.get("strengths", [])
+
+        # If script.sections is empty/missing, rebuild from top-level sections
+        if not script_data.get("sections"):
+            script_data["sections"] = [
+                {
+                    "title": s.get("title", ""),
+                    "duration": s.get("duration", ""),
+                    "presenter_guide": "\n".join(
+                        sl.get("speaker_notes", "")
+                        for sl in s.get("slides", [])
+                        if sl.get("speaker_notes")
+                    ),
+                    "key_messages": [
+                        sl.get("title", "")
+                        for sl in s.get("slides", [])
+                        if sl.get("title")
+                    ],
+                    "anticipated_questions": [],
+                    "suggested_answers": [],
+                }
+                for s in top_sections
+            ]
+
+        # If total_duration missing, compute from sections
+        if not script_data.get("total_duration"):
+            durations = [s.get("duration", "") for s in top_sections]
+            total_min = 0
+            for d in durations:
+                import re
+                m = re.search(r'(\d+)', d)
+                if m:
+                    total_min += int(m.group(1))
+            script_data["total_duration"] = f"{total_min} minutes" if total_min else "45 minutes"
+
+        # Ensure qa_preparation exists
+        if not script_data.get("qa_preparation"):
+            script_data["qa_preparation"] = {
+                "expected_questions": [],
+                "difficult_topics": [],
+            }
+
+        # Ensure introduction/closing exist
+        if not script_data.get("introduction"):
+            script_data["introduction"] = f"Presentation de la soutenance pour le projet {proj_name} aupres de {proj_client}."
+        if not script_data.get("closing"):
+            script_data["closing"] = "Merci pour votre attention. Nous restons a votre disposition pour toute question."
+        if not script_data.get("general_tips"):
+            script_data["general_tips"] = []
 
         # Store script as JSON bytes with a special marker
         script_json = _json.dumps(script_data, ensure_ascii=False, indent=2)
