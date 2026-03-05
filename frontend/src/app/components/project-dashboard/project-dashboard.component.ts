@@ -63,7 +63,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           <button mat-raised-button color="accent" [routerLink]="['/project', projectId, 'preview']">
             <mat-icon>visibility</mat-icon> Aperçu
           </button>
-          <button mat-raised-button color="primary" (click)="exportSoutenance()" [disabled]="exportingSoutenance" matTooltip="Generer PowerPoint + script de soutenance">
+          <button mat-raised-button color="primary" (click)="handleSoutenanceClick()" [disabled]="exportingSoutenance" matTooltip="Soutenance PowerPoint + script">
             <mat-spinner *ngIf="exportingSoutenance" diameter="18"></mat-spinner>
             <mat-icon *ngIf="!exportingSoutenance">co_present</mat-icon>
             {{ exportingSoutenance ? 'Generation...' : 'Soutenance' }}
@@ -119,6 +119,44 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           <span class="gen-pct">{{ soutenanceProgress.progress }}%</span>
         </div>
         <p class="gen-message">{{ soutenanceProgress.message }}</p>
+      </mat-card>
+
+      <!-- Soutenance options dialog -->
+      <mat-card *ngIf="showSoutenanceOptions" class="gen-progress-card soutenance-options-card">
+        <div class="soutenance-options-header">
+          <mat-icon>co_present</mat-icon>
+          <h3>Preparation de soutenance</h3>
+          <span style="flex:1"></span>
+          <button mat-icon-button (click)="showSoutenanceOptions = false"><mat-icon>close</mat-icon></button>
+        </div>
+        <div class="soutenance-options-body">
+          <div *ngIf="soutenanceExists" class="soutenance-existing">
+            <p><mat-icon>check_circle</mat-icon> Une soutenance a deja ete generee pour ce projet.</p>
+            <button mat-raised-button color="primary" (click)="goToSoutenance()">
+              <mat-icon>visibility</mat-icon> Voir la soutenance existante
+            </button>
+          </div>
+          <div class="soutenance-generate">
+            <p *ngIf="soutenanceExists">Ou regenerer avec de nouveaux parametres :</p>
+            <div class="slide-count-row">
+              <label>Nombre de slides :</label>
+              <mat-select [(value)]="selectedSlideCount" class="slide-select">
+                <mat-option [value]="15">15 slides (~15 min)</mat-option>
+                <mat-option [value]="20">20 slides (~20 min)</mat-option>
+                <mat-option [value]="25">25 slides (~25 min)</mat-option>
+                <mat-option [value]="30">30 slides (~30 min)</mat-option>
+                <mat-option [value]="35">35 slides (~35 min)</mat-option>
+                <mat-option [value]="40">40 slides (~40 min)</mat-option>
+                <mat-option [value]="45">45 slides (~45 min)</mat-option>
+                <mat-option [value]="50">50 slides (~50 min)</mat-option>
+                <mat-option [value]="60">60 slides (~60 min)</mat-option>
+              </mat-select>
+            </div>
+            <button mat-raised-button color="accent" (click)="launchSoutenanceGeneration()">
+              <mat-icon>auto_awesome</mat-icon> {{ soutenanceExists ? 'Regenerer la soutenance' : 'Generer la soutenance' }}
+            </button>
+          </div>
+        </div>
       </mat-card>
 
       <!-- Quick stats -->
@@ -1380,6 +1418,19 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .soutenance-progress-card { border-left-color: #e65100; }
     .soutenance-progress-card .gen-progress-header h3 { color: #e65100; }
     .soutenance-progress-card .spin-icon { color: #e65100; }
+    .soutenance-options-card { border-left-color: #1565c0; padding: 16px 20px; }
+    .soutenance-options-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .soutenance-options-header mat-icon { color: #1565c0; }
+    .soutenance-options-header h3 { margin: 0; color: #1565c0; font-size: 16px; }
+    .soutenance-options-body { display: flex; flex-direction: column; gap: 16px; }
+    .soutenance-existing { display: flex; flex-direction: column; gap: 10px; }
+    .soutenance-existing p { display: flex; align-items: center; gap: 8px; margin: 0; color: #2e7d32; font-size: 14px; }
+    .soutenance-existing p mat-icon { color: #2e7d32; font-size: 20px; width: 20px; height: 20px; }
+    .soutenance-generate { display: flex; flex-direction: column; gap: 12px; }
+    .soutenance-generate p { margin: 0; font-size: 13px; color: #666; }
+    .slide-count-row { display: flex; align-items: center; gap: 12px; }
+    .slide-count-row label { font-size: 14px; font-weight: 500; color: #333; white-space: nowrap; }
+    .slide-select { width: 200px; }
     .prefill-step { color: #7b1fa2 !important; }
     .prefill-progress-card .spin-icon { color: #7b1fa2; }
     @keyframes spin { 100% { transform: rotate(360deg); } }
@@ -2943,11 +2994,38 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   exportingSoutenance = false;
   soutenanceProgress: { status: string; step: string; progress: number; message: string } | null = null;
   private soutenancePollSub: Subscription | null = null;
+  showSoutenanceOptions = false;
+  soutenanceExists = false;
+  selectedSlideCount = 35;
 
-  exportSoutenance(): void {
+  handleSoutenanceClick(): void {
+    this.api.checkSoutenanceExists(this.projectId).subscribe({
+      next: (res) => {
+        if (res.exists) {
+          this.soutenanceExists = true;
+          this.showSoutenanceOptions = true;
+        } else {
+          this.soutenanceExists = false;
+          this.showSoutenanceOptions = true;
+        }
+      },
+      error: () => {
+        this.soutenanceExists = false;
+        this.showSoutenanceOptions = true;
+      },
+    });
+  }
+
+  goToSoutenance(): void {
+    this.showSoutenanceOptions = false;
+    this.router.navigate(['/project', this.projectId, 'soutenance']);
+  }
+
+  launchSoutenanceGeneration(): void {
+    this.showSoutenanceOptions = false;
     this.exportingSoutenance = true;
     this.soutenanceProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de la preparation de soutenance...' };
-    this.api.exportSoutenance(this.projectId).subscribe({
+    this.api.exportSoutenance(this.projectId, this.selectedSlideCount).subscribe({
       next: () => {
         this.startSoutenancePolling();
       },

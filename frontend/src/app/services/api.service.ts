@@ -535,8 +535,12 @@ export class ApiService {
   }
 
   // ── Soutenance ──
-  exportSoutenance(projectId: string): Observable<any> {
-    return this.http.post(`${this.baseUrl}/export/${projectId}/soutenance`, {});
+  exportSoutenance(projectId: string, slideCount: number = 35): Observable<any> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/soutenance`, { slide_count: slideCount });
+  }
+
+  checkSoutenanceExists(projectId: string): Observable<{ exists: boolean }> {
+    return this.http.get<{ exists: boolean }>(`${this.baseUrl}/export/${projectId}/soutenance-exists`);
   }
 
   getSoutenanceStatus(projectId: string): Observable<{ status: string; step: string; progress: number; message: string }> {
