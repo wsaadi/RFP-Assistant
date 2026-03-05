@@ -80,20 +80,23 @@ Tu dois retourner un JSON valide avec cette structure EXACTE:
 }
 
 REGLES IMPORTANTES:
-1. La soutenance doit suivre un deroulement logique et persuasif
+1. La soutenance doit suivre un deroulement logique et persuasif pour une presentation de 45 a 60 minutes
 2. Commence par le contexte et la comprehension du besoin du client
-3. Presente ensuite la solution proposee, la methodologie, les moyens
+3. Presente ensuite la solution proposee, la methodologie, les moyens, l'equipe, le planning
 4. Termine par les forces differenciantes et la conclusion
 5. Le script doit etre TRES detaille et actionnable - c'est un vrai guide de preparation
-6. Anticipe les questions difficiles du jury
+6. Anticipe les questions difficiles du jury (au moins 8-10 questions)
 7. Mets en avant les elements differenciants par rapport a la concurrence
 8. Les speaker_notes doivent contenir ce que le presentateur doit DIRE mot pour mot
-9. Genere entre 15 et 25 slides au total
-10. Chaque section doit avoir une duree estimee
-11. Les key_figures doivent etre des chiffres extraits du contenu (pas inventes)
-12. Les strengths doivent refleter les vrais points forts de la proposition
-13. NE PAS inventer de chiffres, statistiques ou references qui ne sont pas dans le contenu
-14. Utiliser [A COMPLETER] pour les informations manquantes"""
+9. IMPORTANT: Genere entre 30 et 45 slides de contenu au total (hors slides de titre et de transition). Chaque section doit avoir entre 3 et 8 slides. Il faut suffisamment de slides pour couvrir 45 minutes de presentation
+10. Chaque slide doit avoir 3 a 5 bullet points detailles
+11. Chaque section doit avoir une duree estimee
+12. Les key_figures doivent etre des chiffres extraits du contenu (pas inventes) - au moins 4 chiffres
+13. Les strengths doivent refleter les vrais points forts de la proposition - au moins 6 forces
+14. NE PAS inventer de chiffres, statistiques ou references qui ne sont pas dans le contenu
+15. Utiliser [A COMPLETER] pour les informations manquantes
+16. Decoupe bien les sections: Contexte/Comprehension, Solution proposee, Methodologie/Approche, Equipe/Moyens, Planning/Livrables, Retour d'experience/References, Engagement qualite, Valeur ajoutee
+17. Chaque section des anticipated_questions doit avoir au moins 2-3 questions"""
 
 
 def build_soutenance_prompt(
@@ -136,8 +139,8 @@ def build_soutenance_prompt(
 
         if content and content.strip():
             # Truncate very long chapters to avoid token limits
-            truncated = content[:3000] if len(content) > 3000 else content
-            suffix = "... [contenu tronque]" if len(content) > 3000 else ""
+            truncated = content[:5000] if len(content) > 5000 else content
+            suffix = "... [contenu tronque]" if len(content) > 5000 else ""
             chapters_text_parts.append(
                 f"### {numbering} {title} ({chapter_type})\n{truncated}{suffix}"
             )
@@ -150,8 +153,8 @@ def build_soutenance_prompt(
             c_numbering = child.get("numbering", "")
             c_title = child.get("title", "")
             if c_content and c_content.strip():
-                truncated = c_content[:2000] if len(c_content) > 2000 else c_content
-                suffix = "... [contenu tronque]" if len(c_content) > 2000 else ""
+                truncated = c_content[:3000] if len(c_content) > 3000 else c_content
+                suffix = "... [contenu tronque]" if len(c_content) > 3000 else ""
                 chapters_text_parts.append(
                     f"#### {c_numbering} {c_title}\n{truncated}{suffix}"
                 )

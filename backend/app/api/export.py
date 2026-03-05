@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
+from ..config import settings
 from ..database import get_db
 from ..models.user import User
 from ..models.project import RFPProject, AIConfig
@@ -993,15 +994,28 @@ async def download_soutenance_pptx(
     current_user: User = Depends(get_current_user),
 ):
     """Download the generated soutenance PowerPoint."""
+    import io, os
     pid = str(project_id)
     result = get_export_result("soutenance_pptx", pid)
-    if not result:
-        raise HTTPException(status_code=404, detail="Aucune presentation disponible. Lancez d'abord la generation.")
 
-    import io
-    file_buffer = io.BytesIO(result["bytes"])
-    file_buffer.seek(0)
-    filename = result["filename"]
+    if result:
+        file_buffer = io.BytesIO(result["bytes"])
+        file_buffer.seek(0)
+        filename = result["filename"]
+    else:
+        # Fall back to filesystem
+        sout_dir = os.path.join(settings.export_dir, "soutenance", pid)
+        fname_path = os.path.join(sout_dir, ".pptx_filename")
+        if not os.path.exists(fname_path):
+            raise HTTPException(status_code=404, detail="Aucune presentation disponible. Lancez d'abord la generation.")
+        with open(fname_path, "r") as f:
+            filename = f.read().strip()
+        pptx_path = os.path.join(sout_dir, filename)
+        if not os.path.exists(pptx_path):
+            raise HTTPException(status_code=404, detail="Fichier PowerPoint introuvable.")
+        with open(pptx_path, "rb") as f:
+            file_buffer = io.BytesIO(f.read())
+        file_buffer.seek(0)
 
     return StreamingResponse(
         file_buffer,
@@ -1017,14 +1031,22 @@ async def download_soutenance_script(
 ):
     """Download the generated soutenance script as JSON."""
     import json as _json
+    import os
 
     pid = str(project_id)
     result = get_export_result("soutenance_script", pid)
-    if not result:
+
+    if result:
+        script_data = _json.loads(result["bytes"].decode("utf-8"))
+        return script_data
+
+    # Fall back to filesystem
+    script_path = os.path.join(settings.export_dir, "soutenance", pid, "script.json")
+    if not os.path.exists(script_path):
         raise HTTPException(status_code=404, detail="Aucun script disponible. Lancez d'abord la generation.")
 
-    script_data = _json.loads(result["bytes"].decode("utf-8"))
-    return script_data
+    with open(script_path, "r", encoding="utf-8") as f:
+        return _json.load(f)
 
 
 @router.post("/{project_id}/soutenance-cancel")
@@ -1153,8 +1175,8 @@ async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID)
         raw_response = await ai_service.generate_streaming(
             system_prompt, user_prompt,
             temperature=0.3,
-            max_tokens=8000,
-            timeout=600,
+            max_tokens=16000,
+            timeout=900,
         )
 
         _update("parsing", 60, "Analyse de la reponse de l'IA...")
@@ -1197,6 +1219,18 @@ async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID)
         # Store script as JSON bytes with a special marker
         script_json = _json.dumps(script_data, ensure_ascii=False, indent=2)
         store_export_result("soutenance_script", pid, script_json.encode("utf-8"), "script.json")
+
+        # Persist to filesystem for durability (survives Redis TTL expiry)
+        import os
+        sout_dir = os.path.join(settings.export_dir, "soutenance", pid)
+        os.makedirs(sout_dir, exist_ok=True)
+        with open(os.path.join(sout_dir, pptx_filename), "wb") as f:
+            f.write(pptx_bytes)
+        with open(os.path.join(sout_dir, "script.json"), "w", encoding="utf-8") as f:
+            f.write(script_json)
+        # Store the pptx filename for later retrieval
+        with open(os.path.join(sout_dir, ".pptx_filename"), "w") as f:
+            f.write(pptx_filename)
 
         # Count slides for the message
         total_slides = 2  # cover + agenda
