@@ -164,9 +164,9 @@ class VectorService:
     @classmethod
     def delete_project_data(cls, project_id: str):
         """Delete all vector data for a project."""
-        client = cls.get_client()
-        collection_name = f"project_{project_id}"
         try:
+            client = cls.get_client()
+            collection_name = f"project_{project_id}"
             client.delete_collection(collection_name)
         except Exception:
             pass
