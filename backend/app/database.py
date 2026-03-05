@@ -276,3 +276,65 @@ async def init_db():
                 ))
             except Exception:
                 logger.debug("ai_configs.%s column already exists", col_name)
+
+    # ── AI Usage Logs table ──
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS ai_usage_logs (
+                    id UUID PRIMARY KEY,
+                    project_id UUID NOT NULL REFERENCES rfp_projects(id) ON DELETE CASCADE,
+                    operation VARCHAR(100) NOT NULL,
+                    provider VARCHAR(50) NOT NULL,
+                    model_name VARCHAR(100) NOT NULL,
+                    input_tokens INTEGER DEFAULT 0,
+                    output_tokens INTEGER DEFAULT 0,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+        except Exception:
+            logger.debug("ai_usage_logs table already exists")
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_ai_usage_logs_project "
+                "ON ai_usage_logs (project_id, created_at DESC)"
+            ))
+        except Exception:
+            logger.debug("ai_usage_logs index already exists")
+
+    # ── AI Model Pricing table ──
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS ai_model_pricing (
+                    id UUID PRIMARY KEY,
+                    provider VARCHAR(50) NOT NULL,
+                    model_name VARCHAR(100) NOT NULL,
+                    price_per_1k_input FLOAT DEFAULT 0.0,
+                    price_per_1k_output FLOAT DEFAULT 0.0,
+                    currency VARCHAR(10) DEFAULT 'EUR',
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+        except Exception:
+            logger.debug("ai_model_pricing table already exists")
+
+        # Seed default pricing for common models
+        try:
+            await conn.execute(text("""
+                INSERT INTO ai_model_pricing (id, provider, model_name, price_per_1k_input, price_per_1k_output, currency)
+                SELECT gen_random_uuid(), 'mistral', 'mistral-large-latest', 0.002, 0.006, 'EUR'
+                WHERE NOT EXISTS (SELECT 1 FROM ai_model_pricing WHERE provider = 'mistral' AND model_name = 'mistral-large-latest')
+            """))
+            await conn.execute(text("""
+                INSERT INTO ai_model_pricing (id, provider, model_name, price_per_1k_input, price_per_1k_output, currency)
+                SELECT gen_random_uuid(), 'mistral', 'mistral-small-latest', 0.0002, 0.0006, 'EUR'
+                WHERE NOT EXISTS (SELECT 1 FROM ai_model_pricing WHERE provider = 'mistral' AND model_name = 'mistral-small-latest')
+            """))
+            await conn.execute(text("""
+                INSERT INTO ai_model_pricing (id, provider, model_name, price_per_1k_input, price_per_1k_output, currency)
+                SELECT gen_random_uuid(), 'scaleway', 'pixtral-large-latest', 0.002, 0.006, 'EUR'
+                WHERE NOT EXISTS (SELECT 1 FROM ai_model_pricing WHERE provider = 'scaleway' AND model_name = 'pixtral-large-latest')
+            """))
+        except Exception:
+            logger.debug("Default pricing seed skipped")

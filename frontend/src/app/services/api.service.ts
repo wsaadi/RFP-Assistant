@@ -447,6 +447,24 @@ export class ApiService {
     return this.http.post<{ updated_chapters: number; total_replacements: number }>(`${this.baseUrl}/projects/${projectId}/fields-to-complete/replace`, { placeholder, value });
   }
 
+  // ── Content Reuse Statistics ──
+  getContentReuseStats(projectId: string): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/content-reuse-stats`);
+  }
+
+  // ── AI Cost Tracking (admin) ──
+  getAICostTracking(projectId: string): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/ai-cost-tracking`);
+  }
+
+  updateAIPricing(projectId: string, pricing: any[]): Observable<any> {
+    return this.http.put<any>(`${this.baseUrl}/projects/${projectId}/ai-pricing`, { pricing });
+  }
+
+  deleteAIPricing(projectId: string, pricingId: string): Observable<any> {
+    return this.http.delete<any>(`${this.baseUrl}/projects/${projectId}/ai-pricing/${pricingId}`);
+  }
+
   // ── Export/Import ──
   exportWord(projectId: string): Observable<any> {
     return this.http.post(`${this.baseUrl}/export/${projectId}/word`, {});

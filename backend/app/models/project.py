@@ -213,3 +213,44 @@ class GapAnalysisResult(Base):
     )
 
     project = relationship("RFPProject", back_populates="gap_analysis_results")
+
+
+class AIUsageLog(Base):
+    """Tracks each AI API call with token counts for cost monitoring."""
+    __tablename__ = "ai_usage_logs"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("rfp_projects.id", ondelete="CASCADE"), nullable=False
+    )
+    operation: Mapped[str] = mapped_column(String(100), nullable=False)  # e.g. "generate_chapter", "gap_analysis"
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)  # e.g. "mistral", "ollama", "scaleway"
+    model_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
+    )
+
+    project = relationship("RFPProject")
+
+
+class AIModelPricing(Base):
+    """Editable pricing table for AI models (token costs per 1K tokens)."""
+    __tablename__ = "ai_model_pricing"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    provider: Mapped[str] = mapped_column(String(50), nullable=False)
+    model_name: Mapped[str] = mapped_column(String(100), nullable=False)
+    price_per_1k_input: Mapped[float] = mapped_column(Float, default=0.0)
+    price_per_1k_output: Mapped[float] = mapped_column(Float, default=0.0)
+    currency: Mapped[str] = mapped_column(String(10), default="EUR")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=lambda: datetime.now(timezone.utc),
+        onupdate=lambda: datetime.now(timezone.utc),
+    )

@@ -144,9 +144,18 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping, FieldsToC
               <th mat-header-cell *matHeaderCellDef>Information demandee</th>
               <td mat-cell *matCellDef="let f">
                 <span class="field-label">{{ f.readable_label }}</span>
-                <span class="field-chapters" matTooltip="{{ f.chapters.join(', ') }}">
+                <span class="field-chapters">
                   ({{ f.occurrences }} occurrence(s) dans {{ f.chapters.length }} chapitre(s))
                 </span>
+                <div class="field-chapter-links" *ngIf="f.chapter_details?.length">
+                  <a *ngFor="let ch of f.chapter_details"
+                    [routerLink]="['/project', projectId, 'chapter', ch.chapter_id]"
+                    class="chapter-link"
+                    [matTooltip]="'Editer: ' + ch.title">
+                    <mat-icon class="link-icon">edit</mat-icon>
+                    {{ ch.numbering ? ch.numbering + ' ' : '' }}{{ ch.title | slice:0:30 }}{{ ch.title.length > 30 ? '...' : '' }}
+                  </a>
+                </div>
               </td>
             </ng-container>
             <ng-container matColumnDef="value">
@@ -429,6 +438,10 @@ import { ProjectStatistics, AnonymizationReport, AnonymizationMapping, FieldsToC
     .field-label { font-weight: 500; color: #1B3A5C; }
     .field-chapters { font-size: 12px; color: #888; margin-left: 8px; }
     .field-input { width: 100%; font-size: 13px; }
+    .field-chapter-links { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+    .chapter-link { display: inline-flex; align-items: center; gap: 3px; font-size: 12px; color: #1565c0; text-decoration: none; background: #e3f2fd; padding: 2px 8px; border-radius: 12px; cursor: pointer; transition: background 0.2s; }
+    .chapter-link:hover { background: #bbdefb; text-decoration: none; }
+    .link-icon { font-size: 14px; width: 14px; height: 14px; }
   `],
 })
 export class StatisticsComponent implements OnInit, OnDestroy {
