@@ -29,7 +29,7 @@ from ..schemas.document import (
     FieldsToCompleteOut, FieldToComplete, FieldReplaceRequest,
 )
 from ..schemas.response_document import ResponseDocumentOut, ResponseDocumentUpdate, BulkUpdateSelectionRequest
-from ..services.ai_service import MistralAIService, create_ai_service
+from ..services.ai_service import MistralAIService, create_ai_service, log_ai_usage_from_service
 from ..services.vector_service import VectorService
 from ..services.anonymization_service import AnonymizationService
 from ..services.progress_service import set_progress, get_or_idle
@@ -692,6 +692,10 @@ async def _run_gap_analysis(project_id: uuid.UUID, workspace_id: uuid.UUID):
         _update("analyzing", 40, "Analyse IA des ecarts en cours...")
         analysis = await ai_service.analyze_gap(anon_old, anon_new)
 
+        # Log AI usage for gap analysis
+        async with task_session() as usage_db:
+            await log_ai_usage_from_service(usage_db, project_id, "gap_analysis", ai_service)
+
         # ── Phase 3: Deanonymize + save (short DB session) ──
         _update("deanonymizing", 75, "Deanonymisation des resultats...")
         async with task_session() as db:
@@ -1022,6 +1026,9 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             gap_analysis = await ai_service.analyze_gap(
                 anon_old_rfp, anon_new_rfp, on_progress=gap_cb,
             )
+            # Log AI usage for gap analysis within structure generation
+            async with task_session() as usage_db:
+                await log_ai_usage_from_service(usage_db, project_id, "structure_gap_analysis", ai_service)
             gap_new = len(gap_analysis.get("new_requirements", []))
             gap_mod = len(gap_analysis.get("modified_requirements", []))
             gap_del = len(gap_analysis.get("removed_requirements", []))
@@ -1165,6 +1172,10 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
 
             all_doc_structures = [(did, struct) for did, struct in results if struct]
 
+            # Log AI usage for structure generation (multi-doc)
+            async with task_session() as usage_db:
+                await log_ai_usage_from_service(usage_db, project_id, "generate_structure", ai_service)
+
             if not all_doc_structures:
                 set_progress(_NS_GEN, pid, {
                     "status": "error", "step": "error", "progress": 0,
@@ -1227,6 +1238,10 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                 company_name=proj_company_name,
                 client_name=proj_client_name,
             )
+
+            # Log AI usage for legacy structure generation
+            async with task_session() as usage_db:
+                await log_ai_usage_from_service(usage_db, project_id, "generate_structure", ai_service)
 
             if not structure:
                 set_progress(_NS_GEN, pid, {
@@ -1497,6 +1512,10 @@ async def _run_prefill(project_id: uuid.UUID, workspace_id: uuid.UUID, chapter_i
                     company_name=proj_company_name,
                     client_name=proj_client_name,
                 )
+
+                # Log AI usage for prefill chapter generation
+                async with task_session() as usage_db:
+                    await log_ai_usage_from_service(usage_db, project_id, "prefill_chapter", ai_service)
 
                 # Short DB session for deanonymization + save
                 refs = [
@@ -2075,6 +2094,10 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
             _fill_one_doc(idx, doc_data) for idx, doc_data in enumerate(docs_data)
         ])
 
+        # Log AI usage for fill content generation
+        async with task_session() as usage_db:
+            await log_ai_usage_from_service(usage_db, project_id, "fill_content", ai_service)
+
         # ── Phase 3: Deanonymize + save (short DB session) ──
         _update("saving", 96, "Deanonymisation et enregistrement...")
         filled_count = 0
@@ -2343,6 +2366,10 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
             anon_response, anon_rfp, on_progress=_compliance_progress_cb,
             target_scope=target_scope,
         )
+
+        # Log AI usage for compliance analysis
+        async with task_session() as usage_db:
+            await log_ai_usage_from_service(usage_db, project_id, "compliance_analysis", ai_service)
 
         # ── Phase 3: Deanonymize + save (short DB session) ──
         _update("deanonymizing", 75, "Deanonymisation des resultats...")
@@ -2707,6 +2734,10 @@ Contexte de rédaction (informations sur notre société et notre approche):
         )
 
         content = await ai_service.generate(system_prompt, "\n\n".join(user_parts), max_tokens=6000)
+
+        # Log AI usage for gap remediation
+        async with task_session() as usage_db:
+            await log_ai_usage_from_service(usage_db, project_id, "gap_remediation", ai_service)
 
         # ── Phase 3: Deanonymize + save (short DB session) ──
         _update("deanonymizing", 80, "Deanonymisation...",
@@ -3704,6 +3735,10 @@ async def resolve_orphans_with_ai(
 
     ai_service = await _get_ai_service(project.workspace_id, db)
     result = await AnonymizationService.resolve_orphans_with_ai(project_id, db, ai_service)
+
+    # Log AI usage for orphan resolution
+    await log_ai_usage_from_service(db, project_id, "resolve_orphans", ai_service)
+
     await db.commit()
     return result
 
@@ -4899,6 +4934,9 @@ async def fill_excel_document(
     )
     logger.info("fill-excel %s: AI returned %d cell entries", resp_doc.title, len(fill_data))
 
+    # Log AI usage for Excel fill
+    await log_ai_usage_from_service(db, project_id, "fill_excel", ai_service)
+
     # 7. Fill the Excel and return as download
     filled_bytes = _fill_excel_with_data(excel_doc.file_path, fill_data)
 
@@ -5414,6 +5452,9 @@ async def fill_pdf_document(
         has_form_fields=pdf_zones["has_form_fields"],
     )
     logger.info("fill-pdf %s: AI returned %d fill entries", resp_doc.title, len(fill_data))
+
+    # Log AI usage for PDF fill
+    await log_ai_usage_from_service(db, project_id, "fill_pdf", ai_service)
 
     # 7. Fill the PDF and return as download
     zone_map = {z["id"]: z for z in pdf_zones["zones"]}

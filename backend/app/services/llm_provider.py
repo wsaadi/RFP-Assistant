@@ -10,6 +10,7 @@ share the same calling logic.  Ollama uses its own ``/api/chat`` format.
 """
 import asyncio
 import logging
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
 import httpx
@@ -19,6 +20,14 @@ logger = logging.getLogger(__name__)
 # Default timeout for API calls (seconds)
 _DEFAULT_TIMEOUT = 120
 _MAX_RETRIES = 2
+
+
+@dataclass
+class LLMResponse:
+    """Response from an LLM call, including token usage for cost tracking."""
+    content: str = ""
+    input_tokens: int = 0
+    output_tokens: int = 0
 
 # Well-known base URLs (used when the user doesn't override)
 PROVIDER_DEFAULTS = {
@@ -62,8 +71,8 @@ async def call_llm_chat(
     temperature: float = 0.0,
     max_tokens: int = 4096,
     client: Optional[httpx.AsyncClient] = None,
-) -> str:
-    """Send a chat completion request and return the assistant's text response.
+) -> LLMResponse:
+    """Send a chat completion request and return the assistant's text response with usage.
 
     Works with Ollama (``/api/chat``) and OpenAI-compatible providers
     (``/v1/chat/completions``).
@@ -90,8 +99,8 @@ async def call_llm_vision(
     max_tokens: int = 2048,
     client: Optional[httpx.AsyncClient] = None,
     use_system: bool = True,
-) -> str:
-    """Send a vision request (image + text) and return the assistant's response.
+) -> LLMResponse:
+    """Send a vision request (image + text) and return the assistant's response with usage.
 
     Handles the different image formats between Ollama and OpenAI-compatible APIs.
     """
@@ -151,7 +160,7 @@ async def _call_with_retries(
     temperature: float,
     max_tokens: int,
     client: httpx.AsyncClient,
-) -> str:
+) -> LLMResponse:
     """Call the appropriate API endpoint with retry logic."""
     last_exc = None
 
@@ -184,7 +193,7 @@ async def _call_openai_compatible(
     temperature: float,
     max_tokens: int,
     client: httpx.AsyncClient,
-) -> str:
+) -> LLMResponse:
     """Call an OpenAI-compatible chat completions endpoint (Mistral / Scaleway)."""
     url = f"{config.base_url.rstrip('/')}/chat/completions"
 
@@ -210,7 +219,13 @@ async def _call_openai_compatible(
     resp.raise_for_status()
     data = resp.json()
 
-    return data["choices"][0]["message"]["content"]
+    content = data["choices"][0]["message"]["content"]
+    usage = data.get("usage", {})
+    return LLMResponse(
+        content=content,
+        input_tokens=usage.get("prompt_tokens", 0) or 0,
+        output_tokens=usage.get("completion_tokens", 0) or 0,
+    )
 
 
 async def _call_ollama(
@@ -219,7 +234,7 @@ async def _call_ollama(
     temperature: float,
     max_tokens: int,
     client: httpx.AsyncClient,
-) -> str:
+) -> LLMResponse:
     """Call the Ollama ``/api/chat`` endpoint."""
     url = f"{config.base_url.rstrip('/')}/api/chat"
 
@@ -237,7 +252,12 @@ async def _call_ollama(
     resp.raise_for_status()
     data = resp.json()
 
-    return data.get("message", {}).get("content", "")
+    content = data.get("message", {}).get("content", "")
+    return LLMResponse(
+        content=content,
+        input_tokens=data.get("prompt_eval_count", 0) or 0,
+        output_tokens=data.get("eval_count", 0) or 0,
+    )
 
 
 async def check_provider_available(config: ProviderConfig) -> Dict:

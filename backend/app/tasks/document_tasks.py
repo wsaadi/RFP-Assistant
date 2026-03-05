@@ -288,6 +288,22 @@ async def _process_document_async(document_id: str, project_id: str):
                 )
             else:
                 logger.info("[doc:%s] Anonymization completed successfully (NER active)", document_id)
+
+            # Log AI usage for anonymization NER
+            try:
+                from ..services.ai_service import log_ai_usage
+                ner_in, ner_out = AnonymizationService.get_and_reset_token_usage()
+                if ner_in > 0 or ner_out > 0:
+                    ner_cfg = AnonymizationService._get_provider_config()
+                    async with TaskSession() as usage_db:
+                        await log_ai_usage(
+                            usage_db, uuid.UUID(project_id), "anonymization_ner",
+                            ner_cfg.provider, ner_cfg.model,
+                            ner_in, ner_out,
+                        )
+            except Exception as cost_err:
+                logger.warning("[doc:%s] Failed to log NER AI usage: %s", document_id, cost_err)
+
         except SoftTimeLimitExceeded:
             raise  # Don't catch timeout — let it propagate to the outer handler
         except Exception as anon_err:
@@ -708,6 +724,30 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
         # Process all images concurrently (service semaphore controls parallelism)
         tasks = [asyncio.create_task(_process_one(img)) for img in images_data]
         await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Log AI usage for image analysis (vision) + NER anonymization of OCR
+        try:
+            from ..services.ai_service import log_ai_usage
+            vision_in, vision_out = ImageAnalysisService.get_and_reset_token_usage()
+            if vision_in > 0 or vision_out > 0:
+                vision_cfg = ImageAnalysisService._get_provider_config()
+                async with TaskSession() as usage_db:
+                    await log_ai_usage(
+                        usage_db, uuid.UUID(project_id), "image_analysis",
+                        vision_cfg.provider, vision_cfg.model,
+                        vision_in, vision_out,
+                    )
+            ner_in, ner_out = AnonymizationService.get_and_reset_token_usage()
+            if ner_in > 0 or ner_out > 0:
+                ner_cfg = AnonymizationService._get_provider_config()
+                async with TaskSession() as usage_db:
+                    await log_ai_usage(
+                        usage_db, uuid.UUID(project_id), "anonymization_ocr",
+                        ner_cfg.provider, ner_cfg.model,
+                        ner_in, ner_out,
+                    )
+        except Exception as cost_err:
+            logger.warning("[project:%s] Failed to log AI usage: %s", project_id, cost_err)
 
         set_progress("image_analysis", project_id, {
             "status": "completed",
