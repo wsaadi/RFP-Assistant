@@ -16,6 +16,8 @@ from ..models.document import Document, DocumentImage
 from ..services.word_service import RFPWordService
 from ..services.export_service import ExportService
 from ..services.anonymization_service import AnonymizationService
+from ..services.pptx_service import RFPPptxService
+from ..services.soutenance_service import build_soutenance_prompt, _parse_json_response as parse_soutenance_json
 from ..services.progress_service import (
     set_progress, get_or_idle, delete_progress,
     store_export_result, get_export_result, delete_export_result,
@@ -29,6 +31,7 @@ logger = logging.getLogger(__name__)
 _NS_WORD = "word_export"
 _NS_BACKUP = "backup_export"
 _NS_PREVIEW_CHAT = "preview_chat"
+_NS_SOUTENANCE = "soutenance_export"
 
 
 class PreviewChatRequest(BaseModel):
@@ -932,3 +935,290 @@ Reponds en citant tes sources."""
         "answer": answer,
         "sources": sources[:10],
     }
+
+
+# ── Soutenance (PowerPoint + Script) ──
+
+
+@router.post("/{project_id}/soutenance")
+async def export_soutenance(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Launch soutenance generation (PowerPoint + script) as a background task."""
+    pid = str(project_id)
+
+    existing = get_or_idle(_NS_SOUTENANCE, pid)
+    if existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Generation de soutenance deja en cours")
+
+    result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="Projet non trouve")
+
+    config_result = await db.execute(
+        select(AIConfig).where(AIConfig.workspace_id == project.workspace_id)
+    )
+    config = config_result.scalar_one_or_none()
+    if not config or not config.mistral_api_key_encrypted:
+        raise HTTPException(status_code=400, detail="Configuration IA non definie")
+
+    set_progress(_NS_SOUTENANCE, pid, {
+        "status": "running", "step": "starting", "progress": 0,
+        "message": "Demarrage de la preparation de soutenance...",
+    })
+    delete_export_result("soutenance_pptx", pid)
+    delete_export_result("soutenance_script", pid)
+
+    from ..tasks.export_tasks import export_soutenance_task
+    export_soutenance_task.delay(pid, str(project.workspace_id))
+
+    return {"success": True, "message": "Preparation de soutenance lancee en arriere-plan"}
+
+
+@router.get("/{project_id}/soutenance-status")
+async def get_soutenance_status(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress of soutenance generation."""
+    return get_or_idle(_NS_SOUTENANCE, str(project_id))
+
+
+@router.get("/{project_id}/soutenance-download-pptx")
+async def download_soutenance_pptx(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Download the generated soutenance PowerPoint."""
+    pid = str(project_id)
+    result = get_export_result("soutenance_pptx", pid)
+    if not result:
+        raise HTTPException(status_code=404, detail="Aucune presentation disponible. Lancez d'abord la generation.")
+
+    import io
+    file_buffer = io.BytesIO(result["bytes"])
+    file_buffer.seek(0)
+    filename = result["filename"]
+
+    return StreamingResponse(
+        file_buffer,
+        media_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
+
+
+@router.get("/{project_id}/soutenance-download-script")
+async def download_soutenance_script(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Download the generated soutenance script as JSON."""
+    import json as _json
+
+    pid = str(project_id)
+    result = get_export_result("soutenance_script", pid)
+    if not result:
+        raise HTTPException(status_code=404, detail="Aucun script disponible. Lancez d'abord la generation.")
+
+    script_data = _json.loads(result["bytes"].decode("utf-8"))
+    return script_data
+
+
+@router.post("/{project_id}/soutenance-cancel")
+async def cancel_soutenance(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Cancel a running soutenance generation."""
+    pid = str(project_id)
+    try:
+        from ..celery_app import celery as celery_app
+        celery_app.control.revoke(
+            f"soutenance-{pid}", terminate=True, signal="SIGTERM",
+        )
+    except Exception as e:
+        logger.warning("Could not revoke soutenance task %s: %s", pid, e)
+
+    delete_progress(_NS_SOUTENANCE, pid)
+    delete_export_result("soutenance_pptx", pid)
+    delete_export_result("soutenance_script", pid)
+    return {"cancelled": True}
+
+
+@router.delete("/{project_id}/soutenance-progress")
+async def clear_soutenance_progress(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Clear soutenance progress state."""
+    pid = str(project_id)
+    delete_progress(_NS_SOUTENANCE, pid)
+    delete_export_result("soutenance_pptx", pid)
+    delete_export_result("soutenance_script", pid)
+    return {"cleared": True}
+
+
+async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID):
+    """Background task for soutenance generation (called by Celery worker)."""
+    from ..database import create_task_engine
+    from ..services.ai_service import create_ai_service
+    import json as _json
+
+    pid = str(project_id)
+
+    def _update(step: str, progress: int, message: str):
+        set_progress(_NS_SOUTENANCE, pid, {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+        })
+
+    task_engine, TaskSession = create_task_engine()
+
+    try:
+        _update("loading", 5, "Chargement du projet et des chapitres...")
+
+        async with TaskSession() as db:
+            config_result = await db.execute(
+                select(AIConfig).where(AIConfig.workspace_id == workspace_id)
+            )
+            config = config_result.scalar_one()
+            ai_service = create_ai_service(config)
+
+            project_result = await db.execute(
+                select(RFPProject).where(RFPProject.id == project_id)
+            )
+            project = project_result.scalar_one()
+
+            chapters_result = await db.execute(
+                select(Chapter)
+                .where(Chapter.project_id == project_id)
+                .order_by(Chapter.order)
+            )
+            all_chapters = chapters_result.scalars().all()
+
+            deanon_map = await AnonymizationService.get_mappings_by_placeholder(db, project_id)
+
+            def _deanon(text: str) -> str:
+                if not text or not deanon_map:
+                    return text
+                for placeholder, original in deanon_map.items():
+                    text = text.replace(placeholder, original)
+                return text
+
+            # Build chapter tree
+            children_map = {}
+            root_chapters = []
+            for c in all_chapters:
+                if c.parent_id:
+                    children_map.setdefault(c.parent_id, []).append(c)
+                else:
+                    root_chapters.append(c)
+
+            def build_chapter_data(chapter) -> dict:
+                children = children_map.get(chapter.id, [])
+                return {
+                    "title": chapter.title,
+                    "content": _deanon(chapter.content or ""),
+                    "chapter_type": chapter.chapter_type.value if hasattr(chapter.chapter_type, 'value') else str(chapter.chapter_type),
+                    "numbering": chapter.numbering or "",
+                    "children": [
+                        build_chapter_data(child)
+                        for child in sorted(children, key=lambda x: x.order)
+                    ],
+                }
+
+            chapters_data = [build_chapter_data(c) for c in root_chapters]
+
+            proj_name = project.name
+            proj_client = project.client_name or ""
+            proj_company = getattr(project, 'company_name', '') or ''
+            proj_ref = project.rfp_reference or ""
+            proj_ai_context = project.ai_context or ""
+
+        _update("generating", 15, "Generation du contenu de soutenance par l'IA (cela peut prendre quelques minutes)...")
+
+        # Build and send prompt
+        system_prompt, user_prompt = build_soutenance_prompt(
+            project_name=proj_name,
+            client_name=proj_client,
+            company_name=proj_company,
+            rfp_reference=proj_ref,
+            chapters_data=chapters_data,
+            ai_context=proj_ai_context,
+        )
+
+        raw_response = await ai_service.generate_streaming(
+            system_prompt, user_prompt,
+            temperature=0.3,
+            max_tokens=8000,
+            timeout=600,
+        )
+
+        _update("parsing", 60, "Analyse de la reponse de l'IA...")
+
+        soutenance_data = parse_soutenance_json(raw_response)
+
+        _update("building_pptx", 70, "Construction du PowerPoint...")
+
+        def _generate_pptx():
+            return RFPPptxService.generate_presentation(
+                project_name=proj_name,
+                client_name=proj_client,
+                company_name=proj_company,
+                rfp_reference=proj_ref,
+                soutenance_data=soutenance_data,
+            )
+
+        pptx_stream = await asyncio.to_thread(_generate_pptx)
+
+        _update("saving", 90, "Sauvegarde des fichiers...")
+
+        # Store PPTX
+        pptx_bytes = pptx_stream.getvalue()
+        pptx_filename = f"soutenance_{proj_ref or proj_name}.pptx".replace(" ", "_").replace("/", "_")
+        store_export_result("soutenance_pptx", pid, pptx_bytes, pptx_filename)
+
+        # Store script data (as JSON in Redis)
+        script_data = soutenance_data.get("script", {})
+        script_data["project_name"] = proj_name
+        script_data["client_name"] = proj_client
+        script_data["company_name"] = proj_company
+        script_data["rfp_reference"] = proj_ref
+        script_data["sections_overview"] = [
+            {"title": s.get("title", ""), "duration": s.get("duration", "")}
+            for s in soutenance_data.get("sections", [])
+        ]
+        script_data["key_figures"] = soutenance_data.get("key_figures", [])
+        script_data["strengths"] = soutenance_data.get("strengths", [])
+
+        # Store script as JSON bytes with a special marker
+        script_json = _json.dumps(script_data, ensure_ascii=False, indent=2)
+        store_export_result("soutenance_script", pid, script_json.encode("utf-8"), "script.json")
+
+        # Count slides for the message
+        total_slides = 2  # cover + agenda
+        for section in soutenance_data.get("sections", []):
+            total_slides += 1  # divider
+            total_slides += len(section.get("slides", []))
+        if soutenance_data.get("key_figures"):
+            total_slides += 1
+        if soutenance_data.get("strengths"):
+            total_slides += 1
+        total_slides += 1  # closing
+
+        set_progress(_NS_SOUTENANCE, pid, {
+            "status": "completed", "step": "done", "progress": 100,
+            "message": f"Soutenance generee : {total_slides} slides + script complet ({len(pptx_bytes) // 1024} KB)",
+        })
+
+    except Exception as e:
+        logger.exception("Soutenance export failed for project %s", project_id)
+        set_progress(_NS_SOUTENANCE, pid, {
+            "status": "error", "step": "error", "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        })
+    finally:
+        await task_engine.dispose()

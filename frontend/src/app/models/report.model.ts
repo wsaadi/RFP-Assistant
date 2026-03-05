@@ -439,6 +439,46 @@ export interface SearchResult {
   score: number;
 }
 
+// ── Soutenance ──
+export interface SoutenanceQuestion {
+  question: string;
+  answer: string;
+  tips: string;
+}
+
+export interface SoutenanceDifficultTopic {
+  topic: string;
+  strategy: string;
+}
+
+export interface SoutenanceScriptSection {
+  title: string;
+  duration: string;
+  presenter_guide: string;
+  key_messages: string[];
+  anticipated_questions: string[];
+  suggested_answers: string[];
+}
+
+export interface SoutenanceScript {
+  project_name: string;
+  client_name: string;
+  company_name: string;
+  rfp_reference: string;
+  total_duration: string;
+  introduction: string;
+  sections: SoutenanceScriptSection[];
+  closing: string;
+  qa_preparation: {
+    expected_questions: SoutenanceQuestion[];
+    difficult_topics: SoutenanceDifficultTopic[];
+  };
+  general_tips: string[];
+  sections_overview: { title: string; duration: string }[];
+  key_figures: { value: string; label: string }[];
+  strengths: string[];
+}
+
 // ── Preview ──
 export interface DocumentPreview {
   project_name: string;
