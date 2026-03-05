@@ -1033,6 +1033,14 @@ La réponse peut contenir:
   structuré en chapitres (--- Titre du chapitre ---). C'est souvent le document PRINCIPAL de la réponse.
 - Des documents complémentaires uploadés (fiches techniques, attestations, tableaux Excel, etc.).
 
+## Contenu des images et schémas
+Les documents (AO et réponse) peuvent contenir des **images analysées** : schémas techniques, diagrammes,
+tableaux visuels, illustrations, photos, captures d'écran. Leur contenu est fourni sous forme de descriptions
+textuelles et de texte OCR extrait, dans des sections marquées "CONTENU EXTRAIT DES IMAGES/SCHEMAS".
+**IMPORTANT** : Ces images contiennent souvent des informations techniques critiques (architectures,
+organigrammes, plannings, tableaux de métriques, certifications) qui ne sont PAS présentes dans le texte.
+Tu DOIS les prendre en compte dans ton analyse au même titre que le contenu textuel.
+
 ## Règles d'analyse
 1. Extrais CHAQUE exigence significative des documents AO **QUI RELÈVE DU PÉRIMÈTRE DÉFINI CI-DESSUS**.
 2. Vérifie si cette exigence est couverte dans le contenu analysé.
@@ -1067,6 +1075,7 @@ IMPORTANT:
 - Respecte STRICTEMENT le périmètre d'analyse défini (ne signale PAS de manques sur des documents hors périmètre).
 - Parcours CHAQUE article/clause pertinent du CCTP et du CCAP pour vérifier sa couverture.
 - Indique pour chaque exigence le document AO source (CCTP art.X, CCAP art.Y) et le chapitre/document de réponse correspondant.
+- Prends en compte le CONTENU DES IMAGES ET SCHEMAS (descriptions, texte OCR, informations clés) au même titre que le texte. Les schémas techniques, diagrammes et illustrations peuvent contenir des exigences ou des réponses importantes.
 - Sois factuel et précis dans tes commentaires."""
 
         response = await self.generate_streaming(

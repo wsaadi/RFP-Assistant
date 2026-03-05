@@ -780,6 +780,61 @@ async def _get_all_chunks_anonymized_by_category(
     return "\n\n".join(parts)
 
 
+async def _get_image_analyses_by_category(
+    db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory
+) -> str:
+    """Get anonymized image analysis descriptions for documents in a category.
+
+    Returns a formatted text block with image descriptions, OCR text, and key
+    information extracted by the vision model during document processing.
+    Only includes images that were successfully analyzed (not decorative icons/logos).
+    """
+    from ..models.document import DocumentImage, ImageAnalysisStatus
+
+    result = await db.execute(
+        select(DocumentImage, Document.original_filename)
+        .join(Document, Document.id == DocumentImage.document_id)
+        .where(Document.project_id == project_id)
+        .where(Document.category == category)
+        .where(DocumentImage.analysis_status == ImageAnalysisStatus.COMPLETED.value)
+        .where(DocumentImage.image_type.notin_(["logo", "icone"]))
+        .order_by(Document.original_filename, DocumentImage.page_number)
+    )
+    rows = result.all()
+    if not rows:
+        return ""
+
+    parts = []
+    current_doc = None
+    for img, doc_name in rows:
+        # Skip non-informative images
+        desc = (img.anonymized_description or "").strip()
+        ocr = (img.anonymized_ocr_text or img.ocr_text or "").strip()
+        key_info = img.key_information or []
+        if not desc and not ocr and not key_info:
+            continue
+
+        if doc_name != current_doc:
+            current_doc = doc_name
+            parts.append(f"\n=== IMAGES DU DOCUMENT: {doc_name} ===")
+
+        img_parts = []
+        img_type = img.image_type or img.image_category or "autre"
+        img_parts.append(f"[Image page {img.page_number} — type: {img_type}]")
+        if desc:
+            img_parts.append(f"  Description: {desc}")
+        if key_info:
+            img_parts.append(f"  Informations clés: {', '.join(str(k) for k in key_info)}")
+        if ocr:
+            img_parts.append(f"  Texte extrait: {ocr[:500]}")
+        if img.suggested_usage:
+            img_parts.append(f"  Usage suggéré: {img.suggested_usage}")
+
+        parts.append("\n".join(img_parts))
+
+    return "\n\n".join(parts)
+
+
 async def _get_full_text_anonymized_by_category(
     db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory,
 ) -> str:
@@ -2256,6 +2311,22 @@ async def _run_compliance_analysis(project_id: uuid.UUID, workspace_id: uuid.UUI
                     "message": "Aucun document d'appel d'offres indexe",
                 })
                 return
+
+            # ── 1d. Load image analyses from documents (schemas, illustrations, etc.) ──
+            _update("loading_images", 20, "Chargement des analyses d'images des documents...")
+            rfp_images_text = await _get_image_analyses_by_category(
+                db, project_id, DocumentCategory.NEW_RFP
+            )
+            if rfp_images_text.strip():
+                anon_rfp += "\n\n--- CONTENU EXTRAIT DES IMAGES/SCHEMAS DES DOCUMENTS AO ---\n" + rfp_images_text
+
+            response_images_text = ""
+            if include_uploaded:
+                response_images_text = await _get_image_analyses_by_category(
+                    db, project_id, DocumentCategory.NEW_RESPONSE
+                )
+            if response_images_text.strip():
+                anon_response += "\n\n--- CONTENU EXTRAIT DES IMAGES/SCHEMAS DES DOCUMENTS DE REPONSE ---\n" + response_images_text
 
             _update("anonymizing", 25, "Preparation de l'analyse...")
         # DB released
