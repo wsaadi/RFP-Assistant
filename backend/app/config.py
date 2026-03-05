@@ -71,6 +71,9 @@ class Settings(BaseSettings):
     login_lockout_attempts: int = 10
     login_lockout_minutes: int = 15
 
+    # Security: cookie secure flag (set True when behind HTTPS)
+    cookie_secure: bool = False
+
     # Security: minimum password strength
     min_password_length: int = 10
 
