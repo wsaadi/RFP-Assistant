@@ -12,9 +12,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
-from ..models.project import RFPProject, AnonymizationMapping
+from ..models.project import RFPProject, AnonymizationMapping, ComplianceResult, GapAnalysisResult, ContentReuseResult
 from ..models.document import Document, DocumentChunk, DocumentImage
 from ..models.chapter import Chapter
+from ..models.response_document import ResponseDocument
 from ..config import settings
 
 
@@ -61,8 +62,40 @@ class ExportService:
             )
             images = result.scalars().all()
 
+        # Fetch response documents (deliverables)
+        result = await db.execute(
+            select(ResponseDocument)
+            .where(ResponseDocument.project_id == project_id)
+            .order_by(ResponseDocument.order)
+        )
+        response_documents = result.scalars().all()
+
+        # Fetch compliance results
+        result = await db.execute(
+            select(ComplianceResult)
+            .where(ComplianceResult.project_id == project_id)
+            .order_by(ComplianceResult.created_at)
+        )
+        compliance_results = result.scalars().all()
+
+        # Fetch gap analysis results
+        result = await db.execute(
+            select(GapAnalysisResult)
+            .where(GapAnalysisResult.project_id == project_id)
+            .order_by(GapAnalysisResult.created_at)
+        )
+        gap_analysis_results = result.scalars().all()
+
+        # Fetch content reuse results
+        result = await db.execute(
+            select(ContentReuseResult)
+            .where(ContentReuseResult.project_id == project_id)
+            .order_by(ContentReuseResult.created_at)
+        )
+        content_reuse_results = result.scalars().all()
+
         export_data = {
-            "version": "1.0",
+            "version": "2.0",
             "exported_at": datetime.now(timezone.utc).isoformat(),
             "project": {
                 "name": project.name,
@@ -78,6 +111,7 @@ class ExportService:
                 {
                     "id": str(c.id),
                     "parent_id": str(c.parent_id) if c.parent_id else None,
+                    "response_document_id": str(c.response_document_id) if c.response_document_id else None,
                     "title": c.title,
                     "description": c.description,
                     "order": c.order,
@@ -102,6 +136,10 @@ class ExportService:
                     "file_type": d.file_type.value if hasattr(d.file_type, 'value') else str(d.file_type),
                     "file_size": d.file_size,
                     "page_count": d.page_count,
+                    "chunk_count": d.chunk_count,
+                    "processing_status": d.processing_status if isinstance(d.processing_status, str) else (d.processing_status.value if hasattr(d.processing_status, 'value') else str(d.processing_status)),
+                    "full_text": d.full_text or "",
+                    "anonymized_full_text": d.anonymized_full_text or "",
                 }
                 for d in documents
             ],
@@ -123,8 +161,68 @@ class ExportService:
                     "page_number": img.page_number,
                     "context": img.context,
                     "tags": img.tags,
+                    "width": img.width,
+                    "height": img.height,
+                    "image_category": img.image_category,
+                    "selected": img.selected,
+                    "analysis_status": img.analysis_status,
+                    "image_type": img.image_type,
+                    "anonymized_description": img.anonymized_description,
+                    "key_information": img.key_information,
+                    "pii_detected": img.pii_detected,
+                    "ocr_text": img.ocr_text,
+                    "anonymized_ocr_text": img.anonymized_ocr_text,
+                    "suggested_usage": img.suggested_usage,
+                    "section_title": img.section_title,
                 }
                 for img in images
+            ],
+            "response_documents": [
+                {
+                    "id": str(rd.id),
+                    "title": rd.title,
+                    "description": rd.description,
+                    "expected_format": rd.expected_format.value if hasattr(rd.expected_format, 'value') else str(rd.expected_format),
+                    "content_type": rd.content_type.value if hasattr(rd.content_type, 'value') else str(rd.content_type),
+                    "is_selected": rd.is_selected,
+                    "order": rd.order,
+                    "rfp_source": rd.rfp_source,
+                    "fill_content": rd.fill_content,
+                    "fill_status": rd.fill_status,
+                }
+                for rd in response_documents
+            ],
+            "compliance_results": [
+                {
+                    "score": cr.score,
+                    "summary": cr.summary,
+                    "covered_requirements": cr.covered_requirements,
+                    "missing_elements": cr.missing_elements,
+                    "recommendations": cr.recommendations,
+                    "created_at": cr.created_at.isoformat() if cr.created_at else None,
+                }
+                for cr in compliance_results
+            ],
+            "gap_analysis_results": [
+                {
+                    "summary": gar.summary,
+                    "new_requirements": gar.new_requirements,
+                    "removed_requirements": gar.removed_requirements,
+                    "modified_requirements": gar.modified_requirements,
+                    "unchanged_requirements": gar.unchanged_requirements,
+                    "created_at": gar.created_at.isoformat() if gar.created_at else None,
+                }
+                for gar in gap_analysis_results
+            ],
+            "content_reuse_results": [
+                {
+                    "has_old_response": crr.has_old_response,
+                    "overall_reuse_percentage": crr.overall_reuse_percentage,
+                    "chapters": crr.chapters,
+                    "summary": crr.summary,
+                    "created_at": crr.created_at.isoformat() if crr.created_at else None,
+                }
+                for crr in content_reuse_results
             ],
         }
 
@@ -215,15 +313,37 @@ class ExportService:
                 rfp_reference=project_info.get("rfp_reference", ""),
                 deadline=project_info.get("deadline", ""),
                 improvement_axes=project_info.get("improvement_axes", ""),
+                status=project_info.get("status", "draft"),
                 created_by=user_id,
             )
             db.add(new_project)
             await db.flush()
 
+            # Import response documents (deliverables) first, so chapters can reference them
+            response_doc_id_map = {}
+            for rd_data in project_data.get("response_documents", []):
+                old_id = rd_data.get("id")
+                new_rd = ResponseDocument(
+                    project_id=new_project.id,
+                    title=rd_data["title"],
+                    description=rd_data.get("description", ""),
+                    expected_format=rd_data.get("expected_format", "docx"),
+                    content_type=rd_data.get("content_type", "redaction"),
+                    is_selected=rd_data.get("is_selected", True),
+                    order=rd_data.get("order", 0),
+                    rfp_source=rd_data.get("rfp_source", ""),
+                    fill_content=rd_data.get("fill_content", ""),
+                    fill_status=rd_data.get("fill_status", "pending"),
+                )
+                db.add(new_rd)
+                await db.flush()
+                if old_id:
+                    response_doc_id_map[old_id] = new_rd.id
+
             # Map old chapter IDs to new ones
             chapter_id_map = {}
 
-            # Import chapters (first pass - create all without parent_id)
+            # Import chapters (first pass - create all without parent_id and response_document_id)
             for ch_data in project_data.get("chapters", []):
                 old_id = ch_data["id"]
                 new_chapter = Chapter(
@@ -246,17 +366,28 @@ class ExportService:
                 await db.flush()
                 chapter_id_map[old_id] = new_chapter.id
 
-            # Second pass - set parent_ids
+            # Second pass - set parent_ids and response_document_ids
             for ch_data in project_data.get("chapters", []):
+                old_id = ch_data["id"]
                 old_parent = ch_data.get("parent_id")
+                old_rd_id = ch_data.get("response_document_id")
+                needs_update = False
+
                 if old_parent and old_parent in chapter_id_map:
-                    old_id = ch_data["id"]
+                    needs_update = True
+                if old_rd_id and old_rd_id in response_doc_id_map:
+                    needs_update = True
+
+                if needs_update:
                     new_id = chapter_id_map[old_id]
                     result = await db.execute(
                         select(Chapter).where(Chapter.id == new_id)
                     )
                     chapter = result.scalar_one()
-                    chapter.parent_id = chapter_id_map[old_parent]
+                    if old_parent and old_parent in chapter_id_map:
+                        chapter.parent_id = chapter_id_map[old_parent]
+                    if old_rd_id and old_rd_id in response_doc_id_map:
+                        chapter.response_document_id = response_doc_id_map[old_rd_id]
 
             # Import anonymization mappings
             for m_data in project_data.get("anonymization_mappings", []):
@@ -269,11 +400,15 @@ class ExportService:
                 )
                 db.add(mapping)
 
-            # Extract document files
+            # Extract document files and create DB records
             project_dir = os.path.join(settings.upload_dir, str(new_project.id))
             os.makedirs(project_dir, exist_ok=True)
 
+            # Map old document IDs to new ones (needed for images)
+            doc_id_map = {}
+
             for doc_data in project_data.get("documents", []):
+                old_doc_id = doc_data.get("id")
                 arcname = f"documents/{doc_data['original_filename']}"
                 try:
                     file_content = zf.read(arcname)
@@ -281,6 +416,13 @@ class ExportService:
                     filepath = os.path.join(project_dir, stored_name)
                     with open(filepath, "wb") as f:
                         f.write(file_content)
+
+                    # Use the backed-up processing status; default to completed for v2 backups
+                    backup_version = project_data.get("version", "1.0")
+                    if backup_version >= "2.0":
+                        processing_status = doc_data.get("processing_status", "completed")
+                    else:
+                        processing_status = "pending"
 
                     new_doc = Document(
                         project_id=new_project.id,
@@ -290,15 +432,21 @@ class ExportService:
                         file_type=doc_data.get("file_type", "other"),
                         file_size=doc_data.get("file_size", 0),
                         file_path=filepath,
-                        processing_status="pending",
+                        processing_status=processing_status,
                         page_count=doc_data.get("page_count", 0),
+                        chunk_count=doc_data.get("chunk_count", 0),
+                        full_text=doc_data.get("full_text", ""),
+                        anonymized_full_text=doc_data.get("anonymized_full_text", ""),
                         uploaded_by=user_id,
                     )
                     db.add(new_doc)
+                    await db.flush()
+                    if old_doc_id:
+                        doc_id_map[old_doc_id] = new_doc.id
                 except KeyError:
                     continue
 
-            # Extract images
+            # Extract images and create DB records
             images_dir = os.path.join(settings.images_dir, str(new_project.id))
             os.makedirs(images_dir, exist_ok=True)
 
@@ -309,8 +457,73 @@ class ExportService:
                     filepath = os.path.join(images_dir, img_data["stored_filename"])
                     with open(filepath, "wb") as f:
                         f.write(img_content)
+
+                    # Map old document_id to new one
+                    old_doc_id = img_data.get("document_id")
+                    new_doc_id = doc_id_map.get(old_doc_id)
+                    if not new_doc_id:
+                        continue
+
+                    new_image = DocumentImage(
+                        document_id=new_doc_id,
+                        stored_filename=img_data["stored_filename"],
+                        file_path=filepath,
+                        description=img_data.get("description", ""),
+                        page_number=img_data.get("page_number", 0),
+                        context=img_data.get("context", ""),
+                        tags=img_data.get("tags", []),
+                        width=img_data.get("width", 0),
+                        height=img_data.get("height", 0),
+                        image_category=img_data.get("image_category", "autre"),
+                        selected=img_data.get("selected", False),
+                        analysis_status=img_data.get("analysis_status", "pending"),
+                        image_type=img_data.get("image_type", ""),
+                        anonymized_description=img_data.get("anonymized_description", ""),
+                        key_information=img_data.get("key_information", []),
+                        pii_detected=img_data.get("pii_detected", []),
+                        ocr_text=img_data.get("ocr_text", ""),
+                        anonymized_ocr_text=img_data.get("anonymized_ocr_text", ""),
+                        suggested_usage=img_data.get("suggested_usage", ""),
+                        section_title=img_data.get("section_title", ""),
+                    )
+                    db.add(new_image)
                 except KeyError:
                     continue
+
+            # Import compliance results
+            for cr_data in project_data.get("compliance_results", []):
+                cr = ComplianceResult(
+                    project_id=new_project.id,
+                    score=cr_data.get("score", 0),
+                    summary=cr_data.get("summary", ""),
+                    covered_requirements=cr_data.get("covered_requirements", []),
+                    missing_elements=cr_data.get("missing_elements", []),
+                    recommendations=cr_data.get("recommendations", []),
+                )
+                db.add(cr)
+
+            # Import gap analysis results
+            for gar_data in project_data.get("gap_analysis_results", []):
+                gar = GapAnalysisResult(
+                    project_id=new_project.id,
+                    summary=gar_data.get("summary", ""),
+                    new_requirements=gar_data.get("new_requirements", []),
+                    removed_requirements=gar_data.get("removed_requirements", []),
+                    modified_requirements=gar_data.get("modified_requirements", []),
+                    unchanged_requirements=gar_data.get("unchanged_requirements", []),
+                )
+                db.add(gar)
+
+            # Import content reuse results
+            for crr_data in project_data.get("content_reuse_results", []):
+                crr = ContentReuseResult(
+                    project_id=new_project.id,
+                    has_old_response=crr_data.get("has_old_response", False),
+                    overall_reuse_percentage=crr_data.get("overall_reuse_percentage", 0.0),
+                    chapters=crr_data.get("chapters", []),
+                    summary=crr_data.get("summary", {}),
+                )
+                db.add(crr)
 
             await db.commit()
             return new_project
