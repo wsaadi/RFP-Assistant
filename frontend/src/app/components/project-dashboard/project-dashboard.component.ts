@@ -862,6 +862,11 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
               <p class="reuse-stats-hint">Compare le contenu de l'ancienne réponse avec le contenu généré pour mesurer le taux de réutilisation.</p>
 
+              <div *ngIf="reuseStats?.created_at" class="reuse-timestamp">
+                <mat-icon>schedule</mat-icon>
+                <span>Derniere analyse : {{ reuseStats.created_at | date:'medium' }}</span>
+              </div>
+
               <div *ngIf="reuseStats && reuseStats.has_old_response">
                 <div class="reuse-summary-grid">
                   <div class="reuse-summary-item">
@@ -1453,6 +1458,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .reuse-stats-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
     .reuse-stats-header h3 { display: flex; align-items: center; gap: 8px; color: #1B3A5C; margin: 0; font-size: 16px; }
     .reuse-stats-hint { color: #666; font-size: 13px; margin: 0 0 16px 0; }
+    .reuse-timestamp { display: flex; align-items: center; gap: 6px; font-size: 12px; color: #888; margin-bottom: 12px; }
+    .reuse-timestamp mat-icon { font-size: 16px; width: 16px; height: 16px; }
     .reuse-summary-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; margin-bottom: 20px; }
     .reuse-summary-item { text-align: center; padding: 12px; background: #f5f5f5; border-radius: 8px; }
     .reuse-big-number { display: block; font-size: 24px; font-weight: bold; color: #1B3A5C; }
@@ -1575,6 +1582,14 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   ngOnInit(): void {
     this.projectId = this.route.snapshot.paramMap.get('projectId') || '';
     this.loadAll();
+    // Load persisted content reuse stats on init
+    this.api.getContentReuseStatsLatest(this.projectId).subscribe({
+      next: (res) => {
+        if (res.result) {
+          this.reuseStats = res.result;
+        }
+      },
+    });
     // Resume generation polling if a task was already running (e.g. page refresh)
     this.api.getGenerationStatus(this.projectId).subscribe({
       next: (status) => {

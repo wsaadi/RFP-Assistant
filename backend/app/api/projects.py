@@ -14,7 +14,7 @@ from sqlalchemy import select, func
 from ..database import get_db
 from ..models.user import User
 from ..models.workspace import WorkspaceMember
-from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType, ComplianceResult, GapAnalysisResult, ProjectMember
+from ..models.project import RFPProject, AIConfig, AnonymizationMapping, ProjectStatus, EntityType, ComplianceResult, GapAnalysisResult, ProjectMember, ContentReuseResult
 from ..models.document import Document, DocumentChunk, DocumentCategory, ProcessingStatus
 from ..models.chapter import Chapter, ChapterType, ChapterStatus
 from ..models.response_document import ResponseDocument, DocumentFormat, ContentType
@@ -2454,6 +2454,8 @@ async def _run_rec_generation(
     DB connections are released during the slow AI call.
     """
     from ..database import task_session
+    from ..tasks.chapter_tasks import _load_project_images
+    from ..models.document import DocumentImage
 
     def _update(step: str, progress: int, message: str, **extra):
         set_progress(_NS_REC, task_id, {
@@ -2484,17 +2486,24 @@ async def _run_rec_generation(
 
             _update("searching", 10, "Recherche de contexte...")
 
-            # Get RFP context via vector search
+            # Get RFP context via vector search — use both recommendation and description
+            search_query = f"{recommendation} {missing_description}" if missing_description else recommendation
             rfp_chunks = VectorService.search(
-                str(project_id), recommendation, top_k=5, category_filter="new_rfp"
+                str(project_id), search_query, top_k=5, category_filter="new_rfp"
             )
             rfp_context = "\n\n".join([c["content"] for c in rfp_chunks]) if rfp_chunks else ""
 
             # Search old response documents for relevant content
             old_response_chunks = VectorService.search(
-                str(project_id), recommendation, top_k=5, category_filter="old_response"
+                str(project_id), search_query, top_k=5, category_filter="old_response"
             )
             old_response_context = "\n\n".join([c["content"] for c in old_response_chunks]) if old_response_chunks else ""
+
+            # Also search inspiration documents
+            inspiration_chunks = VectorService.search(
+                str(project_id), search_query, top_k=3, category_filter="inspiration"
+            )
+            inspiration_context = "\n\n".join([c["content"] for c in inspiration_chunks]) if inspiration_chunks else ""
 
             # Auto-detect or load target chapter
             _update("matching", 20, "Identification du meilleur chapitre...")
@@ -2507,28 +2516,35 @@ async def _run_rec_generation(
                 )
                 target_chapter = ch_result.scalar_one_or_none()
             elif inject:
-                search_text = f"{recommendation} {missing_description}"
-                target_chapter, _score = await _find_best_chapter(db, project_id, search_text)
+                target_chapter, _score = await _find_best_chapter(db, project_id, search_query)
 
             existing_chapter_content = ""
             chapter_title = ""
+            chapter_description = ""
             anon_chapter_title = ""
             resolved_chapter_id = None
             if target_chapter:
                 existing_chapter_content = target_chapter.content or ""
                 chapter_title = target_chapter.title or ""
+                chapter_description = target_chapter.description or ""
                 anon_chapter_title = await AnonymizationService.apply_existing_mappings(
                     chapter_title, project_id, db
                 )
                 resolved_chapter_id = str(target_chapter.id)
 
-            _update("anonymizing", 30, f"Preparation (chapitre: {chapter_title or 'auto'})...",
+            _update("anonymizing", 28, f"Preparation (chapitre: {chapter_title or 'auto'})...",
                     chapter_id=resolved_chapter_id, chapter_title=chapter_title)
+
+            # Load analyzed images for potential insertion
+            available_images = await _load_project_images(
+                db, project_id, chapter_title or recommendation, chapter_description or missing_description,
+            )
 
             # Anonymize all texts
             anon_rec = await AnonymizationService.anonymize_text(recommendation, project_id, db)
             anon_rfp = await AnonymizationService.anonymize_text(rfp_context, project_id, db) if rfp_context else ""
             anon_old_response = await AnonymizationService.anonymize_text(old_response_context, project_id, db) if old_response_context else ""
+            anon_inspiration = await AnonymizationService.anonymize_text(inspiration_context, project_id, db) if inspiration_context else ""
             anon_existing = await AnonymizationService.anonymize_text(existing_chapter_content, project_id, db) if existing_chapter_content else ""
             anon_missing = await AnonymizationService.anonymize_text(missing_description, project_id, db) if missing_description else ""
         # DB released
@@ -2539,17 +2555,27 @@ async def _run_rec_generation(
 
         system_prompt = """Tu es un expert senior en réponse aux appels d'offres.
 À partir d'une lacune ou recommandation identifiée lors d'une analyse de conformité,
-tu dois générer un contenu structuré qui comble cette lacune.
+tu dois générer un contenu structuré qui comble COMPLÈTEMENT et EXPLICITEMENT cette lacune.
 
-Règles:
+OBJECTIF CRITIQUE:
+Le contenu généré doit répondre DIRECTEMENT et DE MANIÈRE EXHAUSTIVE à l'exigence identifiée
+comme manquante. Lorsqu'une re-analyse de conformité sera effectuée, ce contenu doit permettre
+de passer l'exigence de "manquant" à "complet". Sois donc TRÈS SPÉCIFIQUE et CONCRET.
+
+Règles de rédaction:
 - Rédige en français, de manière professionnelle, argumentée et convaincante.
 - Utilise du markdown (sous-titres ##, listes à puces -, **gras**, tableaux si pertinent).
 - Le contenu doit être directement intégrable dans un mémoire technique de réponse.
+- COMMENCE par un sous-titre ## qui reprend clairement le sujet de l'exigence.
+- DÉTAILLE chaque point de l'exigence avec des éléments concrets: procédures, méthodologies,
+  engagements chiffrés, délais, moyens, outils, et responsabilités.
 - Si une ancienne réponse est fournie, EXPLOITE ces informations pour enrichir le contenu
   (méthodologies, références, expériences, chiffres clés). Adapte-les au contexte actuel.
 - Si l'ancienne réponse ne contient pas l'information nécessaire, complète avec un contenu
   pertinent et cohérent par rapport au contexte de l'appel d'offres et aux compétences attendues.
 - Ne répète PAS le contenu déjà présent dans le chapitre cible.
+- Si des images sont disponibles et pertinentes pour illustrer un point, insère le marqueur
+  [INSERT_IMAGE:identifiant] sur sa propre ligne à l'endroit approprié.
 
 Anonymisation:
 - Le texte peut contenir des marqueurs anonymisés comme [ENTREPRISE_1], [SOLUTION_1], etc.
@@ -2567,7 +2593,13 @@ Contexte de rédaction (informations sur notre société et notre approche):
 
         user_parts = []
         if missing_description:
-            user_parts.append(f"ÉLÉMENT MANQUANT IDENTIFIÉ:\nExigence: {anon_rec}\nCe qui manque: {anon_missing}")
+            user_parts.append(
+                f"ÉLÉMENT MANQUANT IDENTIFIÉ:\n"
+                f"Exigence: {anon_rec}\n"
+                f"Ce qui manque dans le mémoire actuel: {anon_missing}\n\n"
+                f"Tu DOIS produire un contenu qui couvre EXPLICITEMENT et COMPLÈTEMENT cette exigence, "
+                f"de sorte qu'un relecteur puisse valider que le mémoire répond désormais à ce point."
+            )
         else:
             user_parts.append(f"RECOMMANDATION À TRAITER:\n{anon_rec}")
 
@@ -2575,16 +2607,35 @@ Contexte de rédaction (informations sur notre société et notre approche):
             user_parts.append(f"CONTEXTE DU CAHIER DES CHARGES (extraits pertinents):\n{anon_rfp[:5000]}")
         if anon_old_response:
             user_parts.append(f"ÉLÉMENTS DE L'ANCIENNE RÉPONSE (à exploiter et adapter):\n{anon_old_response[:5000]}")
+        if anon_inspiration:
+            user_parts.append(f"DOCUMENTS D'INSPIRATION (exemples et bonnes pratiques):\n{anon_inspiration[:3000]}")
         if anon_existing and anon_chapter_title:
             user_parts.append(
                 f"CONTENU ACTUEL DU CHAPITRE \"{anon_chapter_title}\" (ne pas répéter, compléter):\n{anon_existing[:3000]}"
             )
+
+        # Add available images catalog
+        if available_images:
+            img_lines = ["IMAGES DISPONIBLES pour illustration (insère [INSERT_IMAGE:id] si pertinent) :"]
+            for img in available_images:
+                img_id = img.get("id", "")
+                img_desc = img.get("anonymized_description", img.get("description", ""))
+                img_type = img.get("image_type", img.get("type", ""))
+                img_usage = img.get("suggested_usage", "")
+                line = f"- `{img_id}` [{img_type}] : {img_desc}"
+                if img_usage:
+                    line += f" (usage suggéré: {img_usage})"
+                img_lines.append(line)
+            user_parts.append("\n".join(img_lines))
+
         user_parts.append(
-            "Génère un contenu structuré (1-2 pages) qui comble cette lacune. "
-            "Le contenu doit s'intégrer naturellement dans le mémoire technique."
+            "Génère un contenu structuré et DÉTAILLÉ (1-2 pages) qui comble COMPLÈTEMENT cette lacune. "
+            "Le contenu doit être suffisamment spécifique et exhaustif pour que l'exigence soit "
+            "considérée comme couverte lors d'une prochaine analyse de conformité. "
+            "Inclus des éléments concrets: modalités, procédures, engagements, délais, moyens."
         )
 
-        content = await ai_service.generate(system_prompt, "\n\n".join(user_parts), max_tokens=4096)
+        content = await ai_service.generate(system_prompt, "\n\n".join(user_parts), max_tokens=6000)
 
         # ── Phase 3: Deanonymize + save (short DB session) ──
         _update("deanonymizing", 80, "Deanonymisation...",
@@ -2592,6 +2643,22 @@ Contexte de rédaction (informations sur notre société et notre approche):
 
         async with task_session() as db:
             content = await AnonymizationService.deanonymize_text(content, project_id, db)
+
+            # Extract image references from the generated content
+            image_refs = re.findall(r'\[INSERT_IMAGE:([^\]]+)\]', content)
+            new_image_references = []
+            if image_refs and available_images:
+                img_lookup = {str(img["id"]): img for img in available_images}
+                for ref_id in image_refs:
+                    ref_id_clean = ref_id.strip()
+                    if ref_id_clean in img_lookup:
+                        img = img_lookup[ref_id_clean]
+                        new_image_references.append({
+                            "image_id": ref_id_clean,
+                            "file_path": img.get("file_path", ""),
+                            "description": img.get("description", ""),
+                            "image_type": img.get("image_type", ""),
+                        })
 
             if inject and resolved_chapter_id:
                 _update("saving", 90, f"Injection dans '{chapter_title}'...",
@@ -2603,6 +2670,14 @@ Contexte de rédaction (informations sur notre société et notre approche):
                 if chapter:
                     separator = "\n\n---\n\n" if chapter.content else ""
                     chapter.content = (chapter.content or "") + separator + content
+                    # Merge new image references with existing ones
+                    if new_image_references:
+                        existing_refs = chapter.image_references or []
+                        existing_ids = {r.get("image_id") for r in existing_refs}
+                        for ref in new_image_references:
+                            if ref["image_id"] not in existing_ids:
+                                existing_refs.append(ref)
+                        chapter.image_references = existing_refs
                     await db.commit()
 
         set_progress(_NS_REC, task_id, {
@@ -4039,7 +4114,7 @@ async def get_content_reuse_stats(
         sum(c["reuse_percentage"] for c in chapter_stats) / len(chapter_stats), 1
     ) if chapter_stats else 0
 
-    return {
+    result_data = {
         "has_old_response": True,
         "overall_reuse_percentage": overall_pct,
         "chapters": chapter_stats,
@@ -4050,6 +4125,51 @@ async def get_content_reuse_stats(
             "old_response_word_count": old_word_count,
             "new_content_word_count": total_new_words,
         },
+    }
+
+    # Persist the results to database
+    try:
+        reuse_result = ContentReuseResult(
+            project_id=project_id,
+            has_old_response=True,
+            overall_reuse_percentage=overall_pct,
+            chapters=chapter_stats,
+            summary=result_data["summary"],
+        )
+        db.add(reuse_result)
+        await db.commit()
+        result_data["created_at"] = reuse_result.created_at.isoformat() if reuse_result.created_at else None
+    except Exception as exc:
+        logger.warning("Failed to persist content reuse results: %s", exc)
+        await db.rollback()
+
+    return result_data
+
+
+@router.get("/{project_id}/content-reuse-stats/latest")
+async def get_content_reuse_stats_latest(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Return the most recently persisted content reuse analysis, or null."""
+    result = await db.execute(
+        select(ContentReuseResult)
+        .where(ContentReuseResult.project_id == project_id)
+        .order_by(ContentReuseResult.created_at.desc())
+        .limit(1)
+    )
+    cr = result.scalar_one_or_none()
+    if not cr:
+        return {"result": None}
+    return {
+        "result": {
+            "has_old_response": cr.has_old_response,
+            "overall_reuse_percentage": cr.overall_reuse_percentage,
+            "chapters": cr.chapters or [],
+            "summary": cr.summary or {},
+            "created_at": cr.created_at.isoformat() if cr.created_at else None,
+        }
     }
 
 

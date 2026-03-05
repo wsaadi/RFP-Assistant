@@ -201,7 +201,7 @@ interface RecGenProgress {
                       <mat-icon>content_copy</mat-icon>
                     </button>
                   </div>
-                  <div class="generated-body" [innerHTML]="renderMarkdown(missingDone[mi].content)"></div>
+                  <div class="generated-body" [innerHTML]="renderMd(missingDone[mi].content)"></div>
                 </div>
               </div>
             </div>
@@ -274,7 +274,7 @@ interface RecGenProgress {
                     <mat-icon>content_copy</mat-icon>
                   </button>
                 </div>
-                <div class="generated-body" [innerHTML]="renderMarkdown(recDone[i].content)"></div>
+                <div class="generated-body" [innerHTML]="renderMd(recDone[i].content)"></div>
               </div>
             </div>
 
@@ -287,7 +287,7 @@ interface RecGenProgress {
                   <mat-icon>content_copy</mat-icon>
                 </button>
               </div>
-              <div class="generated-body" [innerHTML]="renderMarkdown(recPreviews[i])"></div>
+              <div class="generated-body" [innerHTML]="renderMd(recPreviews[i])"></div>
             </div>
             <mat-divider *ngIf="i < analysis.recommendations.length - 1"></mat-divider>
           </div>
@@ -390,6 +390,8 @@ interface RecGenProgress {
     .gen-progress-header { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; font-size: 13px; color: #555; }
     .gen-progress-pct { text-align: right; font-size: 12px; color: #888; margin-top: 3px; }
     .queued-icon { font-size: 18px; width: 18px; height: 18px; color: #1565c0; }
+    .generated-body .inserted-image { margin: 12px 0; text-align: center; }
+    .generated-body .inserted-image img { max-width: 100%; height: auto; border-radius: 6px; border: 1px solid #e0e0e0; }
   `],
 })
 export class ComplianceComponent implements OnInit, OnDestroy {
@@ -399,7 +401,8 @@ export class ComplianceComponent implements OnInit, OnDestroy {
   loadingExisting = false;
   error = '';
   targetScope = 'all';
-  renderMarkdown = renderMarkdown;
+  renderMd = (text: string) =>
+    renderMarkdown(text, (id: string) => this.api.getImageUrl(id));
   analysisProgress: { status: string; step: string; progress: number; message: string } | null = null;
   exportingPdf = false;
   private pollSub: Subscription | null = null;
