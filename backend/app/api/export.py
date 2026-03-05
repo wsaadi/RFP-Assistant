@@ -941,9 +941,14 @@ Reponds en citant tes sources."""
 # ── Soutenance (PowerPoint + Script) ──
 
 
+class SoutenanceRequest(BaseModel):
+    slide_count: int = Field(default=35, ge=15, le=60)
+
+
 @router.post("/{project_id}/soutenance")
 async def export_soutenance(
     project_id: uuid.UUID,
+    body: SoutenanceRequest = SoutenanceRequest(),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
@@ -974,9 +979,30 @@ async def export_soutenance(
     delete_export_result("soutenance_script", pid)
 
     from ..tasks.export_tasks import export_soutenance_task
-    export_soutenance_task.delay(pid, str(project.workspace_id))
+    export_soutenance_task.delay(pid, str(project.workspace_id), body.slide_count)
 
     return {"success": True, "message": "Preparation de soutenance lancee en arriere-plan"}
+
+
+@router.get("/{project_id}/soutenance-exists")
+async def check_soutenance_exists(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Check if a previously generated soutenance exists (Redis or filesystem)."""
+    import os
+    pid = str(project_id)
+
+    # Check Redis first
+    if get_export_result("soutenance_script", pid):
+        return {"exists": True}
+
+    # Check filesystem
+    script_path = os.path.join(settings.export_dir, "soutenance", pid, "script.json")
+    if os.path.exists(script_path):
+        return {"exists": True}
+
+    return {"exists": False}
 
 
 @router.get("/{project_id}/soutenance-status")
@@ -1083,7 +1109,7 @@ async def clear_soutenance_progress(
     return {"cleared": True}
 
 
-async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID):
+async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID, slide_count: int = 35):
     """Background task for soutenance generation (called by Celery worker)."""
     from ..database import create_task_engine
     from ..services.ai_service import create_ai_service
@@ -1170,6 +1196,7 @@ async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID)
             rfp_reference=proj_ref,
             chapters_data=chapters_data,
             ai_context=proj_ai_context,
+            slide_count=slide_count,
         )
 
         raw_response = await ai_service.generate_streaming(

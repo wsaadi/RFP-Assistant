@@ -88,7 +88,7 @@ REGLES IMPORTANTES:
 6. Anticipe les questions difficiles du jury (au moins 8-10 questions)
 7. Mets en avant les elements differenciants par rapport a la concurrence
 8. Les speaker_notes doivent contenir ce que le presentateur doit DIRE mot pour mot
-9. IMPORTANT: Genere entre 30 et 45 slides de contenu au total (hors slides de titre et de transition). Chaque section doit avoir entre 3 et 8 slides. Il faut suffisamment de slides pour couvrir 45 minutes de presentation
+9. IMPORTANT: Genere environ {slide_count} slides de contenu au total (hors slides de titre et de transition). Chaque section doit avoir entre 3 et 8 slides. Repartis bien les slides entre les sections pour couvrir l'ensemble de la presentation
 10. Chaque slide doit avoir 3 a 5 bullet points detailles
 11. Chaque section doit avoir une duree estimee
 12. Les key_figures doivent etre des chiffres extraits du contenu (pas inventes) - au moins 4 chiffres
@@ -106,12 +106,13 @@ def build_soutenance_prompt(
     rfp_reference: str,
     chapters_data: list,
     ai_context: str = "",
+    slide_count: int = 35,
 ) -> tuple:
     """Build the system and user prompts for soutenance generation.
 
     Returns (system_prompt, user_prompt).
     """
-    system = SOUTENANCE_SYSTEM_PROMPT
+    system = SOUTENANCE_SYSTEM_PROMPT.replace("{slide_count}", str(slide_count))
 
     if company_name and client_name:
         system += f"""
