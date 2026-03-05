@@ -1,7 +1,9 @@
-"""Security utilities: password hashing, JWT tokens, and API key encryption."""
+"""Security utilities: password hashing, JWT tokens, API key & PII encryption, image tokens."""
 import base64
 import hashlib
+import hmac
 import logging
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
@@ -90,4 +92,79 @@ def decrypt_api_key(stored_value: str) -> str:
             logger.error("Failed to decrypt API key — SECRET_KEY may have changed")
             return ""
     # Legacy: return plaintext value as-is (will be re-encrypted on next save)
+    return stored_value
+
+
+# ── Short-lived image access tokens (HMAC-signed, no JWT overhead) ──
+_IMAGE_TOKEN_TTL = 300  # 5 minutes
+
+def create_image_token(image_id: str, user_id: str) -> str:
+    """Create a short-lived HMAC-signed token for image access.
+
+    Format: <expiry_ts>.<hmac_hex>
+    The token is scoped to a specific image and user, and expires in 5 minutes.
+    """
+    expiry = int(time.time()) + _IMAGE_TOKEN_TTL
+    message = f"{image_id}:{user_id}:{expiry}"
+    signature = hmac.new(
+        settings.secret_key.encode("utf-8"),
+        message.encode("utf-8"),
+        hashlib.sha256,
+    ).hexdigest()
+    return f"{user_id}:{expiry}:{signature}"
+
+
+def verify_image_token(image_id: str, token: str) -> Optional[str]:
+    """Verify an image access token. Returns user_id if valid, None otherwise."""
+    try:
+        parts = token.split(":")
+        if len(parts) != 3:
+            return None
+        user_id, expiry_str, provided_sig = parts
+        expiry = int(expiry_str)
+        if time.time() > expiry:
+            return None  # Token expired
+        message = f"{image_id}:{user_id}:{expiry}"
+        expected_sig = hmac.new(
+            settings.secret_key.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        if not hmac.compare_digest(provided_sig, expected_sig):
+            return None
+        return user_id
+    except (ValueError, TypeError):
+        return None
+
+
+# ── PII encryption (for anonymization_mappings.original_value) ──
+
+def encrypt_pii(plaintext: str) -> str:
+    """Encrypt a PII value for database storage.
+
+    Returns the encrypted value prefixed with 'pii:'.
+    """
+    if not plaintext:
+        return ""
+    f = _get_fernet()
+    encrypted = f.encrypt(plaintext.encode("utf-8"))
+    return "pii:" + encrypted.decode("utf-8")
+
+
+def decrypt_pii(stored_value: str) -> str:
+    """Decrypt a PII value from database storage.
+
+    Handles both encrypted (prefixed with 'pii:') and legacy plaintext values.
+    """
+    if not stored_value:
+        return ""
+    if stored_value.startswith("pii:"):
+        try:
+            f = _get_fernet()
+            decrypted = f.decrypt(stored_value[4:].encode("utf-8"))
+            return decrypted.decode("utf-8")
+        except InvalidToken:
+            logger.error("Failed to decrypt PII value — SECRET_KEY may have changed")
+            return ""
+    # Legacy plaintext value — returned as-is (will be encrypted on next save)
     return stored_value

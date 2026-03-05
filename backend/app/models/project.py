@@ -3,11 +3,34 @@ import uuid
 import enum
 from datetime import datetime, timezone
 
-from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text, Enum as SAEnum, Boolean, JSON
+from sqlalchemy import String, Integer, Float, DateTime, ForeignKey, Text, Enum as SAEnum, Boolean, JSON, TypeDecorator
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from ..database import Base
+
+
+class EncryptedPII(TypeDecorator):
+    """SQLAlchemy type that transparently encrypts/decrypts PII values.
+
+    Values are stored encrypted in the database (prefixed with 'pii:').
+    Legacy plaintext values are read transparently and will be encrypted
+    on the next write.
+    """
+    impl = Text
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None or value == "":
+            return value
+        from ..security import encrypt_pii
+        return encrypt_pii(value)
+
+    def process_result_value(self, value, dialect):
+        if value is None or value == "":
+            return value
+        from ..security import decrypt_pii
+        return decrypt_pii(value)
 
 
 class ProjectStatus(str, enum.Enum):
@@ -127,7 +150,7 @@ class AnonymizationMapping(Base):
     entity_type: Mapped[EntityType] = mapped_column(
         SAEnum(EntityType, name="entity_type"), nullable=False
     )
-    original_value: Mapped[str] = mapped_column(Text, nullable=False)
+    original_value: Mapped[str] = mapped_column(EncryptedPII(), nullable=False)
     anonymized_value: Mapped[str] = mapped_column(String(255), nullable=False)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(

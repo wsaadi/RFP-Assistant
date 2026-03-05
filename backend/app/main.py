@@ -167,6 +167,28 @@ async def lifespan(app: FastAPI):
             await db.commit()
             print(f"Default admin created: {settings.admin_email}")
 
+    # Migrate legacy plaintext PII values to encrypted storage
+    from .security import encrypt_pii
+    async with async_session() as db:
+        from sqlalchemy import text as sql_text
+        result = await db.execute(
+            sql_text(
+                "SELECT id, original_value FROM anonymization_mappings "
+                "WHERE original_value != '' AND original_value NOT LIKE 'pii:%'"
+            )
+        )
+        rows = result.all()
+        if rows:
+            print(f"Encrypting {len(rows)} legacy PII values...")
+            for row_id, plaintext in rows:
+                encrypted = encrypt_pii(plaintext)
+                await db.execute(
+                    sql_text("UPDATE anonymization_mappings SET original_value = :enc WHERE id = :id"),
+                    {"enc": encrypted, "id": row_id},
+                )
+            await db.commit()
+            print(f"PII encryption migration complete.")
+
     yield
 
     # Shutdown

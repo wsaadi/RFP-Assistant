@@ -6,7 +6,7 @@ import os
 from collections import OrderedDict
 from datetime import datetime, timezone, timedelta
 from typing import Optional
-from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, Query
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File, Form, Query
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -92,6 +92,38 @@ async def upload_document(
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Fichier trop volumineux (max 50MB)")
+
+    # ── Per-user upload quota check ──
+    if settings.max_upload_size_per_user_mb > 0:
+        from sqlalchemy import func
+        total_result = await db.execute(
+            select(func.coalesce(func.sum(Document.file_size), 0))
+            .where(Document.uploaded_by == current_user.id)
+        )
+        total_bytes = total_result.scalar() or 0
+        quota_bytes = settings.max_upload_size_per_user_mb * 1024 * 1024
+        if total_bytes + len(content) > quota_bytes:
+            used_mb = round(total_bytes / (1024 * 1024), 1)
+            raise HTTPException(
+                status_code=413,
+                detail=f"Quota de stockage dépassé. Utilisé: {used_mb} MB / {settings.max_upload_size_per_user_mb} MB. "
+                       f"Supprimez des fichiers ou contactez un administrateur.",
+            )
+
+    # ── Per-project file count limit ──
+    if settings.max_files_per_project > 0:
+        from sqlalchemy import func
+        file_count_result = await db.execute(
+            select(func.count())
+            .where(Document.project_id == project_id)
+        )
+        file_count = file_count_result.scalar() or 0
+        if file_count >= settings.max_files_per_project:
+            raise HTTPException(
+                status_code=413,
+                detail=f"Nombre maximum de fichiers par projet atteint ({settings.max_files_per_project}). "
+                       f"Supprimez des fichiers avant d'en ajouter.",
+            )
 
     # Validate file content matches extension (magic bytes check)
     if not _validate_magic_bytes(content, ext):
@@ -342,43 +374,82 @@ async def list_project_images(
     return _consolidate_images(all_images)
 
 
+@router.post("/image-token/{image_id}")
+async def create_image_access_token(
+    image_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Generate a short-lived signed token for accessing an image via <img src>.
+
+    This avoids exposing the full JWT in image URLs. The token is scoped
+    to a single image, bound to the user, and expires in 5 minutes.
+    """
+    from ..security import create_image_token
+
+    # Verify image exists
+    result = await db.execute(select(DocumentImage).where(DocumentImage.id == image_id))
+    image = result.scalar_one_or_none()
+    if not image:
+        raise HTTPException(status_code=404, detail="Image non trouvée")
+
+    token = create_image_token(str(image_id), str(current_user.id))
+    return {"token": token}
+
+
+@router.post("/image-tokens")
+async def create_image_access_tokens(
+    image_ids: list[str],
+    current_user: User = Depends(get_current_user),
+):
+    """Generate short-lived signed tokens for multiple images at once."""
+    from ..security import create_image_token
+
+    tokens = {}
+    for img_id in image_ids:
+        tokens[img_id] = create_image_token(img_id, str(current_user.id))
+    return {"tokens": tokens}
+
+
 @router.get("/image-file/{image_id}")
 async def get_image_file(
     image_id: uuid.UUID,
+    req: Request,
     token: Optional[str] = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     """Serve an image file.
 
-    Accepts auth via Bearer header (normal API calls) or ``?token=`` query
-    parameter (for ``<img src>`` tags where the browser can't set headers).
+    Accepts auth via:
+    1. ``?token=`` short-lived HMAC image token (for ``<img src>`` tags)
+    2. rfp_access_token httpOnly cookie (browser requests)
     """
-    from ..security import decode_access_token
+    from ..security import verify_image_token, decode_access_token
 
-    # Try query-param token first, then fall back to header-based auth
     user = None
+
+    # 1. Try short-lived HMAC image token (scoped, 5-min TTL)
     if token:
-        payload = decode_access_token(token)
-        if payload and payload.get("sub"):
+        user_id = verify_image_token(str(image_id), token)
+        if user_id:
             result = await db.execute(
-                select(User).where(User.id == uuid.UUID(payload["sub"]))
+                select(User).where(User.id == uuid.UUID(user_id))
             )
             user = result.scalar_one_or_none()
 
+    # 2. Try httpOnly cookie
     if not user:
-        # Fall back to standard Bearer header auth
-        try:
-            from fastapi.security import HTTPBearer
-            from starlette.requests import Request
-            # Can't easily inject Depends here, so just validate token param
-            pass
-        except Exception:
-            pass
+        cookie_token = req.cookies.get("rfp_access_token")
+        if cookie_token:
+            payload = decode_access_token(cookie_token)
+            if payload and payload.get("sub"):
+                result = await db.execute(
+                    select(User).where(User.id == uuid.UUID(payload["sub"]))
+                )
+                user = result.scalar_one_or_none()
 
-    if not user and not token:
-        raise HTTPException(status_code=401, detail="Token requis")
     if not user:
-        raise HTTPException(status_code=401, detail="Token invalide")
+        raise HTTPException(status_code=401, detail="Token requis ou invalide")
 
     result = await db.execute(select(DocumentImage).where(DocumentImage.id == image_id))
     image = result.scalar_one_or_none()

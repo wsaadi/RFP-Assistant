@@ -3320,14 +3320,14 @@ async def create_anonymization_mapping(
     except ValueError:
         raise HTTPException(status_code=400, detail=f"Type d'entité invalide: {request.entity_type}")
 
-    # Check for duplicate original_value
+    # Check for duplicate original_value (done in Python since values are encrypted at rest)
     existing = await db.execute(
         select(AnonymizationMapping)
         .where(AnonymizationMapping.project_id == project_id)
-        .where(AnonymizationMapping.original_value == request.original_value)
     )
-    if existing.scalars().first():
-        raise HTTPException(status_code=409, detail="Cette valeur originale existe déjà dans les mappings")
+    for m in existing.scalars().all():
+        if m.original_value == request.original_value:
+            raise HTTPException(status_code=409, detail="Cette valeur originale existe déjà dans les mappings")
 
     # Auto-generate placeholder if not provided
     anonymized_value = request.anonymized_value
