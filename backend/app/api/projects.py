@@ -3853,16 +3853,45 @@ async def get_content_reuse_stats(
         """Normalize text for comparison."""
         return re.sub(r'\s+', ' ', text.lower().strip())
 
-    def _get_ngrams(text: str, n: int = 5) -> set:
+    def _get_ngrams(text: str, n: int = 3) -> set:
         """Get word-level n-grams from text."""
         words = text.split()
         if len(words) < n:
             return {tuple(words)} if words else set()
         return {tuple(words[i:i+n]) for i in range(len(words) - n + 1)}
 
+    # French stop words to exclude from word-overlap metric
+    _stop_words = {
+        "le", "la", "les", "de", "du", "des", "un", "une", "et", "en",
+        "à", "au", "aux", "ce", "ces", "est", "sont", "a", "ont", "il",
+        "elle", "nous", "vous", "ils", "elles", "qui", "que", "dans",
+        "par", "pour", "sur", "avec", "pas", "ne", "se", "sa", "son",
+        "ses", "ou", "mais", "donc", "car", "ni", "si", "je", "tu",
+        "leur", "leurs", "cette", "cet", "tout", "tous", "plus",
+        "être", "avoir", "faire", "comme", "peut", "aussi", "bien",
+        "d", "l", "n", "s", "qu", "c", "j", "m", "t", "y",
+        "the", "of", "and", "to", "in", "is", "for", "a", "an", "on",
+        "this", "that", "with", "are", "be", "was", "were", "been",
+    }
+
+    def _get_content_words(text: str) -> set:
+        """Get meaningful words (excluding stop words and short tokens)."""
+        words = text.split()
+        return {w for w in words if len(w) > 2 and w not in _stop_words}
+
     old_normalized = _normalize(old_response_text)
     old_words = old_normalized.split()
-    old_ngrams = _get_ngrams(old_normalized, 5)
+    old_ngrams_3 = _get_ngrams(old_normalized, 3)
+    old_ngrams_5 = _get_ngrams(old_normalized, 5)
+    old_content_words = _get_content_words(old_normalized)
+
+    # Build a word-to-positions index for finding relevant sections
+    old_word_positions = {}
+    for i, w in enumerate(old_words):
+        if w not in _stop_words and len(w) > 2:
+            if w not in old_word_positions:
+                old_word_positions[w] = []
+            old_word_positions[w].append(i)
 
     # Load chapters
     chapters_result = await db.execute(
@@ -3888,28 +3917,76 @@ async def get_content_reuse_stats(
         if not ch_words:
             continue
 
-        ch_ngrams = _get_ngrams(ch_normalized, 5)
+        # Metric 1: 3-gram matching (catches partial phrase reuse)
+        ch_ngrams_3 = _get_ngrams(ch_normalized, 3)
+        matching_3 = ch_ngrams_3 & old_ngrams_3
+        reuse_3gram = round(len(matching_3) / len(ch_ngrams_3) * 100, 1) if ch_ngrams_3 else 0
 
-        # Count matching n-grams
-        matching = ch_ngrams & old_ngrams
-        if ch_ngrams:
-            reuse_pct = round(len(matching) / len(ch_ngrams) * 100, 1)
+        # Metric 2: 5-gram matching (catches exact phrase reuse)
+        ch_ngrams_5 = _get_ngrams(ch_normalized, 5)
+        matching_5 = ch_ngrams_5 & old_ngrams_5
+        reuse_5gram = round(len(matching_5) / len(ch_ngrams_5) * 100, 1) if ch_ngrams_5 else 0
+
+        # Metric 3: Word-level overlap (Jaccard-like, catches vocabulary reuse)
+        ch_content_words = _get_content_words(ch_normalized)
+        if ch_content_words:
+            common_words = ch_content_words & old_content_words
+            # Measure as coverage of chapter words found in old response
+            word_overlap = round(len(common_words) / len(ch_content_words) * 100, 1)
         else:
-            reuse_pct = 0
+            word_overlap = 0
 
-        reused_words = int(ch_word_count * reuse_pct / 100)
+        # Metric 4: SequenceMatcher on relevant section of old response
+        # Find the best-matching region by looking for word position density
+        seq_ratio = 0.0
+        if ch_content_words and old_word_positions:
+            # Collect positions in old text where chapter words appear
+            hit_positions = []
+            sample_words = list(ch_content_words)[:200]  # Sample for speed
+            for w in sample_words:
+                if w in old_word_positions:
+                    hit_positions.extend(old_word_positions[w][:10])
+
+            if hit_positions:
+                # Find the densest region of hits using a sliding window
+                hit_positions.sort()
+                window_size = min(len(old_words), max(500, ch_word_count * 2))
+                best_start = 0
+                best_count = 0
+                left = 0
+                for right in range(len(hit_positions)):
+                    while hit_positions[right] - hit_positions[left] > window_size:
+                        left += 1
+                    count = right - left + 1
+                    if count > best_count:
+                        best_count = count
+                        best_start = hit_positions[left]
+
+                # Extract the relevant section and compare
+                section_start = max(0, best_start - 100)
+                section_end = min(len(old_words), best_start + window_size + 100)
+                old_section = " ".join(old_words[section_start:section_end])
+
+                ch_sample = ch_normalized[:5000]
+                old_sample = old_section[:15000]
+                seq_ratio = round(
+                    difflib.SequenceMatcher(None, ch_sample, old_sample).ratio() * 100, 1
+                )
+
+        # Combine metrics: weighted blend focusing on n-gram and word overlap
+        # 3-gram: primary signal for phrase-level reuse
+        # 5-gram: bonus for exact reuse
+        # word overlap: catches paraphrased reuse but discount it
+        # sequence match: structural similarity
+        final_pct = round(max(
+            reuse_3gram,
+            reuse_5gram,
+            word_overlap * 0.5,  # Discount word overlap (too generous alone)
+            seq_ratio,
+        ), 1)
+
+        reused_words = int(ch_word_count * final_pct / 100)
         total_reused_words += reused_words
-
-        # Also compute a quick SequenceMatcher ratio on truncated texts
-        # for a second data point
-        ch_sample = ch_normalized[:3000]
-        old_sample = old_normalized[:10000]
-        seq_ratio = round(
-            difflib.SequenceMatcher(None, ch_sample, old_sample).ratio() * 100, 1
-        )
-
-        # Use the higher of the two metrics as approximate reuse
-        final_pct = max(reuse_pct, seq_ratio)
 
         chapter_stats.append({
             "chapter_id": str(ch.id),
@@ -3917,7 +3994,9 @@ async def get_content_reuse_stats(
             "numbering": ch.numbering or "",
             "word_count": ch_word_count,
             "reuse_percentage": final_pct,
-            "ngram_match": reuse_pct,
+            "ngram_match": reuse_3gram,
+            "ngram_5_match": reuse_5gram,
+            "word_overlap": word_overlap,
             "sequence_match": seq_ratio,
         })
 
