@@ -3788,13 +3788,29 @@ async def get_content_reuse_stats(
 ):
     """Compute content reuse statistics between old response and generated chapters.
 
-    Compares old response document content with the current chapter content
-    to determine how much of the original content was reused by the AI.
-    Uses n-gram similarity (sequences of words) for robust matching.
+    Uses semantic embedding similarity (via the project's ChromaDB index) to
+    detect content reuse even when the AI has paraphrased or reformulated the
+    original text.  Each chapter is split into ~300-word chunks, each chunk is
+    compared to the OLD_RESPONSE embeddings, and the average of the best-match
+    similarity scores gives the chapter-level reuse percentage.
     """
-    import difflib
 
-    # Load old response documents text
+    _EMPTY_RESPONSE = {
+        "has_old_response": False,
+        "overall_reuse_percentage": 0,
+        "chapters": [],
+        "summary": {
+            "total_chapters": 0,
+            "chapters_with_reuse": 0,
+            "avg_reuse_percentage": 0,
+            "old_response_word_count": 0,
+            "new_content_word_count": 0,
+        },
+    }
+
+    # ------------------------------------------------------------------
+    # 1. Check that OLD_RESPONSE documents exist and are indexed
+    # ------------------------------------------------------------------
     old_docs_result = await db.execute(
         select(Document)
         .where(Document.project_id == project_id)
@@ -3804,37 +3820,37 @@ async def get_content_reuse_stats(
     old_docs = old_docs_result.scalars().all()
 
     if not old_docs:
-        return {
-            "has_old_response": False,
-            "overall_reuse_percentage": 0,
-            "chapters": [],
-            "summary": {
-                "total_chapters": 0,
-                "chapters_with_reuse": 0,
-                "avg_reuse_percentage": 0,
-                "old_response_word_count": 0,
-                "new_content_word_count": 0,
-            },
-        }
+        return _EMPTY_RESPONSE
 
-    # Gather old response text from chunks
-    old_text_parts = []
+    # Count old response words for the summary
+    old_word_count = 0
     for doc in old_docs:
         if doc.full_text:
-            old_text_parts.append(doc.full_text)
+            old_word_count += len(doc.full_text.split())
         else:
             chunks_result = await db.execute(
                 select(DocumentChunk)
                 .where(DocumentChunk.document_id == doc.id)
-                .order_by(DocumentChunk.page_number, DocumentChunk.chunk_index)
             )
-            chunks = chunks_result.scalars().all()
-            for chunk in chunks:
+            for chunk in chunks_result.scalars().all():
                 if chunk.content:
-                    old_text_parts.append(chunk.content)
+                    old_word_count += len(chunk.content.split())
 
-    old_response_text = "\n".join(old_text_parts)
-    if not old_response_text.strip():
+    if old_word_count == 0:
+        _EMPTY_RESPONSE["has_old_response"] = True
+        return _EMPTY_RESPONSE
+
+    # ------------------------------------------------------------------
+    # 2. Load chapters
+    # ------------------------------------------------------------------
+    chapters_result = await db.execute(
+        select(Chapter)
+        .where(Chapter.project_id == project_id)
+        .order_by(Chapter.order)
+    )
+    chapters = chapters_result.scalars().all()
+
+    if not chapters:
         return {
             "has_old_response": True,
             "overall_reuse_percentage": 0,
@@ -3843,148 +3859,172 @@ async def get_content_reuse_stats(
                 "total_chapters": 0,
                 "chapters_with_reuse": 0,
                 "avg_reuse_percentage": 0,
-                "old_response_word_count": 0,
+                "old_response_word_count": old_word_count,
                 "new_content_word_count": 0,
             },
         }
 
-    # Build n-grams from old response for matching
-    def _normalize(text: str) -> str:
-        """Normalize text for comparison."""
-        return re.sub(r'\s+', ' ', text.lower().strip())
+    # ------------------------------------------------------------------
+    # 3. Split chapters into ~300-word chunks for embedding comparison
+    # ------------------------------------------------------------------
+    CHUNK_SIZE = 300   # words
+    CHUNK_OVERLAP = 50  # words
 
-    def _get_ngrams(text: str, n: int = 3) -> set:
-        """Get word-level n-grams from text."""
+    def _split_into_chunks(text: str) -> list[str]:
+        """Split text into overlapping word-level chunks."""
         words = text.split()
-        if len(words) < n:
-            return {tuple(words)} if words else set()
-        return {tuple(words[i:i+n]) for i in range(len(words) - n + 1)}
+        if len(words) <= CHUNK_SIZE:
+            return [text] if words else []
+        chunks = []
+        start = 0
+        while start < len(words):
+            end = start + CHUNK_SIZE
+            chunks.append(" ".join(words[start:end]))
+            start += CHUNK_SIZE - CHUNK_OVERLAP
+        return chunks
 
-    # French stop words to exclude from word-overlap metric
-    _stop_words = {
-        "le", "la", "les", "de", "du", "des", "un", "une", "et", "en",
-        "à", "au", "aux", "ce", "ces", "est", "sont", "a", "ont", "il",
-        "elle", "nous", "vous", "ils", "elles", "qui", "que", "dans",
-        "par", "pour", "sur", "avec", "pas", "ne", "se", "sa", "son",
-        "ses", "ou", "mais", "donc", "car", "ni", "si", "je", "tu",
-        "leur", "leurs", "cette", "cet", "tout", "tous", "plus",
-        "être", "avoir", "faire", "comme", "peut", "aussi", "bien",
-        "d", "l", "n", "s", "qu", "c", "j", "m", "t", "y",
-        "the", "of", "and", "to", "in", "is", "for", "a", "an", "on",
-        "this", "that", "with", "are", "be", "was", "were", "been",
-    }
+    # Collect all chunks across all chapters (with back-references)
+    all_chunks: list[str] = []
+    chunk_to_chapter: list[int] = []  # index -> chapter list position
+    chapter_infos: list[dict] = []
 
-    def _get_content_words(text: str) -> set:
-        """Get meaningful words (excluding stop words and short tokens)."""
-        words = text.split()
-        return {w for w in words if len(w) > 2 and w not in _stop_words}
+    for idx, ch in enumerate(chapters):
+        if not ch.content or not ch.content.strip():
+            continue
+        ch_word_count = len(ch.content.split())
+        ch_chunks = _split_into_chunks(ch.content)
+        chapter_infos.append({
+            "chapter": ch,
+            "word_count": ch_word_count,
+            "chunk_start": len(all_chunks),
+            "chunk_count": len(ch_chunks),
+        })
+        for chunk_text in ch_chunks:
+            all_chunks.append(chunk_text)
+            chunk_to_chapter.append(len(chapter_infos) - 1)
 
-    old_normalized = _normalize(old_response_text)
-    old_words = old_normalized.split()
-    old_ngrams_3 = _get_ngrams(old_normalized, 3)
-    old_ngrams_5 = _get_ngrams(old_normalized, 5)
-    old_content_words = _get_content_words(old_normalized)
+    if not all_chunks:
+        return {
+            "has_old_response": True,
+            "overall_reuse_percentage": 0,
+            "chapters": [],
+            "summary": {
+                "total_chapters": 0,
+                "chapters_with_reuse": 0,
+                "avg_reuse_percentage": 0,
+                "old_response_word_count": old_word_count,
+                "new_content_word_count": 0,
+            },
+        }
 
-    # Build a word-to-positions index for finding relevant sections
-    old_word_positions = {}
-    for i, w in enumerate(old_words):
-        if w not in _stop_words and len(w) > 2:
-            if w not in old_word_positions:
-                old_word_positions[w] = []
-            old_word_positions[w].append(i)
+    # ------------------------------------------------------------------
+    # 4. Embed all chapter chunks in one batch & query ChromaDB
+    # ------------------------------------------------------------------
+    project_str = str(project_id)
 
-    # Load chapters
-    chapters_result = await db.execute(
-        select(Chapter)
-        .where(Chapter.project_id == project_id)
-        .order_by(Chapter.order)
-    )
-    chapters = chapters_result.scalars().all()
+    def _compute_semantic_scores() -> list[float]:
+        """Run embedding + ChromaDB queries (CPU-bound, run in executor)."""
+        collection = VectorService.get_collection(project_str)
+        embed_fn = VectorService.get_embedding_function()
+
+        # Embed chapter chunks using the E5 "query:" prefix
+        prefixed = [f"query: {c}" for c in all_chunks]
+        embeddings = embed_fn(prefixed)
+
+        # Query ChromaDB for each chunk's best match in OLD_RESPONSE
+        scores: list[float] = []
+        QUERY_BATCH = 32
+        for start in range(0, len(embeddings), QUERY_BATCH):
+            batch_embs = embeddings[start:start + QUERY_BATCH]
+            try:
+                results = collection.query(
+                    query_embeddings=batch_embs,
+                    n_results=3,
+                    where={"category": "OLD_RESPONSE"},
+                )
+            except Exception:
+                # Fallback: no filter (in case metadata key differs)
+                try:
+                    results = collection.query(
+                        query_embeddings=batch_embs,
+                        n_results=3,
+                    )
+                except Exception:
+                    scores.extend([0.0] * len(batch_embs))
+                    continue
+
+            for i in range(len(batch_embs)):
+                if (results and results["distances"]
+                        and i < len(results["distances"])
+                        and results["distances"][i]):
+                    # ChromaDB returns cosine distances; similarity = 1 - distance
+                    best_distance = min(results["distances"][i])
+                    similarity = max(0.0, 1.0 - best_distance)
+                    scores.append(similarity)
+                else:
+                    scores.append(0.0)
+
+        return scores
+
+    loop = asyncio.get_event_loop()
+    chunk_scores = await loop.run_in_executor(None, _compute_semantic_scores)
+
+    # ------------------------------------------------------------------
+    # 5. Convert similarity scores to reuse percentages per chapter
+    # ------------------------------------------------------------------
+    # Similarity calibration for E5 multilingual embeddings:
+    #   >= 0.90  → near-identical text (copy-paste)
+    #   0.75-0.90 → clearly paraphrased / reformulated same content
+    #   0.60-0.75 → same topic, partial overlap
+    #   < 0.60   → different content
+    #
+    # We map [LOW_THRESHOLD, HIGH_THRESHOLD] → [0%, 100%] linearly.
+    LOW_THRESHOLD = 0.55   # below this = 0% reuse
+    HIGH_THRESHOLD = 0.92  # above this = 100% reuse
+
+    def _similarity_to_reuse(sim: float) -> float:
+        """Map a cosine similarity score to a reuse percentage."""
+        if sim <= LOW_THRESHOLD:
+            return 0.0
+        if sim >= HIGH_THRESHOLD:
+            return 100.0
+        return (sim - LOW_THRESHOLD) / (HIGH_THRESHOLD - LOW_THRESHOLD) * 100.0
 
     chapter_stats = []
     total_new_words = 0
     total_reused_words = 0
 
-    for ch in chapters:
-        if not ch.content or not ch.content.strip():
-            continue
-
-        ch_normalized = _normalize(ch.content)
-        ch_words = ch_normalized.split()
-        ch_word_count = len(ch_words)
+    for info in chapter_infos:
+        ch = info["chapter"]
+        ch_word_count = info["word_count"]
         total_new_words += ch_word_count
 
-        if not ch_words:
+        # Get scores for this chapter's chunks
+        start = info["chunk_start"]
+        count = info["chunk_count"]
+        ch_scores = chunk_scores[start:start + count]
+
+        if not ch_scores:
+            chapter_stats.append({
+                "chapter_id": str(ch.id),
+                "title": ch.title,
+                "numbering": ch.numbering or "",
+                "word_count": ch_word_count,
+                "reuse_percentage": 0,
+                "semantic_similarity": 0,
+                "ngram_match": 0,
+                "sequence_match": 0,
+            })
             continue
 
-        # Metric 1: 3-gram matching (catches partial phrase reuse)
-        ch_ngrams_3 = _get_ngrams(ch_normalized, 3)
-        matching_3 = ch_ngrams_3 & old_ngrams_3
-        reuse_3gram = round(len(matching_3) / len(ch_ngrams_3) * 100, 1) if ch_ngrams_3 else 0
+        # Convert each chunk score to reuse % and average
+        reuse_values = [_similarity_to_reuse(s) for s in ch_scores]
+        avg_reuse = sum(reuse_values) / len(reuse_values)
 
-        # Metric 2: 5-gram matching (catches exact phrase reuse)
-        ch_ngrams_5 = _get_ngrams(ch_normalized, 5)
-        matching_5 = ch_ngrams_5 & old_ngrams_5
-        reuse_5gram = round(len(matching_5) / len(ch_ngrams_5) * 100, 1) if ch_ngrams_5 else 0
+        # Also report raw average similarity for transparency
+        avg_similarity = sum(ch_scores) / len(ch_scores)
 
-        # Metric 3: Word-level overlap (Jaccard-like, catches vocabulary reuse)
-        ch_content_words = _get_content_words(ch_normalized)
-        if ch_content_words:
-            common_words = ch_content_words & old_content_words
-            # Measure as coverage of chapter words found in old response
-            word_overlap = round(len(common_words) / len(ch_content_words) * 100, 1)
-        else:
-            word_overlap = 0
-
-        # Metric 4: SequenceMatcher on relevant section of old response
-        # Find the best-matching region by looking for word position density
-        seq_ratio = 0.0
-        if ch_content_words and old_word_positions:
-            # Collect positions in old text where chapter words appear
-            hit_positions = []
-            sample_words = list(ch_content_words)[:200]  # Sample for speed
-            for w in sample_words:
-                if w in old_word_positions:
-                    hit_positions.extend(old_word_positions[w][:10])
-
-            if hit_positions:
-                # Find the densest region of hits using a sliding window
-                hit_positions.sort()
-                window_size = min(len(old_words), max(500, ch_word_count * 2))
-                best_start = 0
-                best_count = 0
-                left = 0
-                for right in range(len(hit_positions)):
-                    while hit_positions[right] - hit_positions[left] > window_size:
-                        left += 1
-                    count = right - left + 1
-                    if count > best_count:
-                        best_count = count
-                        best_start = hit_positions[left]
-
-                # Extract the relevant section and compare
-                section_start = max(0, best_start - 100)
-                section_end = min(len(old_words), best_start + window_size + 100)
-                old_section = " ".join(old_words[section_start:section_end])
-
-                ch_sample = ch_normalized[:5000]
-                old_sample = old_section[:15000]
-                seq_ratio = round(
-                    difflib.SequenceMatcher(None, ch_sample, old_sample).ratio() * 100, 1
-                )
-
-        # Combine metrics: weighted blend focusing on n-gram and word overlap
-        # 3-gram: primary signal for phrase-level reuse
-        # 5-gram: bonus for exact reuse
-        # word overlap: catches paraphrased reuse but discount it
-        # sequence match: structural similarity
-        final_pct = round(max(
-            reuse_3gram,
-            reuse_5gram,
-            word_overlap * 0.5,  # Discount word overlap (too generous alone)
-            seq_ratio,
-        ), 1)
-
+        final_pct = round(avg_reuse, 1)
         reused_words = int(ch_word_count * final_pct / 100)
         total_reused_words += reused_words
 
@@ -3994,10 +4034,9 @@ async def get_content_reuse_stats(
             "numbering": ch.numbering or "",
             "word_count": ch_word_count,
             "reuse_percentage": final_pct,
-            "ngram_match": reuse_3gram,
-            "ngram_5_match": reuse_5gram,
-            "word_overlap": word_overlap,
-            "sequence_match": seq_ratio,
+            "semantic_similarity": round(avg_similarity * 100, 1),
+            "ngram_match": final_pct,  # Keep for frontend compatibility
+            "sequence_match": round(avg_similarity * 100, 1),  # Keep for frontend compat
         })
 
     overall_pct = round(total_reused_words / total_new_words * 100, 1) if total_new_words else 0
@@ -4014,7 +4053,7 @@ async def get_content_reuse_stats(
             "total_chapters": len(chapter_stats),
             "chapters_with_reuse": chapters_with_reuse,
             "avg_reuse_percentage": avg_reuse,
-            "old_response_word_count": len(old_words),
+            "old_response_word_count": old_word_count,
             "new_content_word_count": total_new_words,
         },
     }
