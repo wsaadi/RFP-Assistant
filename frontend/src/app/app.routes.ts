@@ -64,6 +64,12 @@ export const routes: Routes = [
           import('./components/statistics/statistics.component').then((m) => m.StatisticsComponent),
       },
       {
+        path: 'project/:projectId/cost-tracking',
+        canActivate: [adminGuard],
+        loadComponent: () =>
+          import('./components/cost-tracking/cost-tracking.component').then((m) => m.CostTrackingComponent),
+      },
+      {
         path: 'admin',
         canActivate: [adminGuard],
         children: [

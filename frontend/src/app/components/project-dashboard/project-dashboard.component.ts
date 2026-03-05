@@ -902,122 +902,19 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
             </mat-card>
 
-            <!-- AI Cost Tracking (admin only) -->
-            <mat-card *ngIf="isAdmin" class="cost-tracking-card" style="margin-top: 16px;">
-              <div class="cost-tracking-header">
-                <h3><mat-icon>payments</mat-icon> Suivi des coûts IA</h3>
-                <button mat-raised-button (click)="loadAICostTracking()" [disabled]="loadingCostTracking">
-                  <mat-spinner *ngIf="loadingCostTracking" diameter="18"></mat-spinner>
-                  <mat-icon *ngIf="!loadingCostTracking">refresh</mat-icon> Actualiser
+            <!-- AI Cost Tracking link (admin only) -->
+            <mat-card *ngIf="isAdmin" class="cost-tracking-link-card" style="margin-top: 16px;">
+              <div class="cost-link-content">
+                <div class="cost-link-left">
+                  <mat-icon class="cost-link-icon">payments</mat-icon>
+                  <div>
+                    <h3>Suivi des coûts IA</h3>
+                    <p>Tarification, consommation par modèle, coûts quotidiens et logs des requêtes IA</p>
+                  </div>
+                </div>
+                <button mat-raised-button color="primary" [routerLink]="['/project', projectId, 'cost-tracking']">
+                  <mat-icon>open_in_new</mat-icon> Ouvrir
                 </button>
-              </div>
-
-              <div *ngIf="costTracking">
-                <!-- Summary cards -->
-                <div class="cost-summary-grid">
-                  <div class="cost-summary-item">
-                    <span class="cost-big-number">{{ costTracking.total_requests }}</span>
-                    <span class="cost-label">Requêtes IA</span>
-                  </div>
-                  <div class="cost-summary-item">
-                    <span class="cost-big-number">{{ costTracking.total_input_tokens | number }}</span>
-                    <span class="cost-label">Tokens en entrée</span>
-                  </div>
-                  <div class="cost-summary-item">
-                    <span class="cost-big-number">{{ costTracking.total_output_tokens | number }}</span>
-                    <span class="cost-label">Tokens en sortie</span>
-                  </div>
-                  <div class="cost-summary-item cost-total">
-                    <span class="cost-big-number">{{ costTracking.total_cost | number:'1.2-4' }} €</span>
-                    <span class="cost-label">Coût total estimé</span>
-                  </div>
-                </div>
-
-                <!-- By model breakdown -->
-                <div *ngIf="costTracking.by_model.length > 0" class="cost-by-model">
-                  <h4>Par modèle</h4>
-                  <table class="cost-table">
-                    <thead>
-                      <tr><th>Provider</th><th>Modèle</th><th>Requêtes</th><th>Tokens in</th><th>Tokens out</th><th>Coût</th></tr>
-                    </thead>
-                    <tbody>
-                      <tr *ngFor="let m of costTracking.by_model">
-                        <td>{{ m.provider }}</td>
-                        <td>{{ m.model }}</td>
-                        <td>{{ m.requests }}</td>
-                        <td>{{ m.input_tokens | number }}</td>
-                        <td>{{ m.output_tokens | number }}</td>
-                        <td>{{ m.cost | number:'1.2-4' }} €</td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                <!-- Daily chart (simple bar chart) -->
-                <div *ngIf="costTracking.daily.length > 0" class="cost-daily-chart">
-                  <h4>Coûts par jour</h4>
-                  <div class="cost-chart-container">
-                    <div *ngFor="let d of costTracking.daily" class="cost-day-bar" [matTooltip]="d.date + ': ' + d.requests + ' req, ' + (d.cost | number:'1.2-4') + ' €'">
-                      <div class="cost-day-fill" [style.height.%]="maxDailyCost > 0 ? (d.cost / maxDailyCost * 100) : 0"></div>
-                      <span class="cost-day-label">{{ d.date | slice:5 }}</span>
-                    </div>
-                  </div>
-                </div>
-
-                <!-- Pricing table (editable) -->
-                <div class="cost-pricing">
-                  <h4>Tarification par modèle (€ / 1K tokens)</h4>
-                  <table class="cost-table">
-                    <thead>
-                      <tr><th>Provider</th><th>Modèle</th><th>Prix input (/1K)</th><th>Prix output (/1K)</th><th></th></tr>
-                    </thead>
-                    <tbody>
-                      <tr *ngFor="let p of costTracking.pricing; let i = index">
-                        <td><input class="pricing-input" [(ngModel)]="p.provider" /></td>
-                        <td><input class="pricing-input" [(ngModel)]="p.model_name" /></td>
-                        <td><input class="pricing-input pricing-num" type="number" step="0.0001" [(ngModel)]="p.price_per_1k_input" /></td>
-                        <td><input class="pricing-input pricing-num" type="number" step="0.0001" [(ngModel)]="p.price_per_1k_output" /></td>
-                        <td><button mat-icon-button color="warn" (click)="deletePricing(p)" matTooltip="Supprimer"><mat-icon>delete</mat-icon></button></td>
-                      </tr>
-                      <tr class="new-pricing-row">
-                        <td><input class="pricing-input" [(ngModel)]="newPricing.provider" placeholder="Provider" /></td>
-                        <td><input class="pricing-input" [(ngModel)]="newPricing.model_name" placeholder="Modèle" /></td>
-                        <td><input class="pricing-input pricing-num" type="number" step="0.0001" [(ngModel)]="newPricing.price_per_1k_input" /></td>
-                        <td><input class="pricing-input pricing-num" type="number" step="0.0001" [(ngModel)]="newPricing.price_per_1k_output" /></td>
-                        <td><button mat-icon-button color="primary" (click)="addPricing()" matTooltip="Ajouter"><mat-icon>add</mat-icon></button></td>
-                      </tr>
-                    </tbody>
-                  </table>
-                  <button mat-raised-button color="primary" (click)="savePricing()" style="margin-top: 8px;" [disabled]="savingPricing">
-                    <mat-icon>save</mat-icon> Sauvegarder les tarifs
-                  </button>
-                </div>
-
-                <!-- Recent logs -->
-                <div *ngIf="costTracking.recent_logs.length > 0" class="cost-recent-logs">
-                  <h4>Dernières requêtes IA</h4>
-                  <div class="cost-logs-scroll">
-                    <table class="cost-table cost-table-small">
-                      <thead>
-                        <tr><th>Date</th><th>Opération</th><th>Modèle</th><th>In</th><th>Out</th></tr>
-                      </thead>
-                      <tbody>
-                        <tr *ngFor="let log of $any(costTracking.recent_logs) | slice:0:20">
-                          <td>{{ $any(log).created_at | date:'dd/MM HH:mm' }}</td>
-                          <td>{{ $any(log).operation }}</td>
-                          <td>{{ $any(log).provider }}/{{ $any(log).model_name }}</td>
-                          <td>{{ $any(log).input_tokens | number }}</td>
-                          <td>{{ $any(log).output_tokens | number }}</td>
-                        </tr>
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              </div>
-
-              <div *ngIf="!costTracking && !loadingCostTracking" class="cost-empty">
-                <mat-icon>info</mat-icon>
-                <span>Cliquez sur "Actualiser" pour charger les données de suivi des coûts.</span>
               </div>
             </mat-card>
 
@@ -1570,34 +1467,12 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .reuse-empty mat-icon { color: #1565c0; }
 
     /* AI Cost Tracking */
-    .cost-tracking-card { padding: 24px; }
-    .cost-tracking-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
-    .cost-tracking-header h3 { display: flex; align-items: center; gap: 8px; color: #1B3A5C; margin: 0; font-size: 16px; }
-    .cost-summary-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr)); gap: 12px; margin-bottom: 20px; }
-    .cost-summary-item { text-align: center; padding: 12px; background: #f5f5f5; border-radius: 8px; }
-    .cost-summary-item.cost-total { background: #e3f2fd; border: 2px solid #1976d2; }
-    .cost-big-number { display: block; font-size: 22px; font-weight: bold; color: #1B3A5C; }
-    .cost-label { display: block; font-size: 12px; color: #888; margin-top: 4px; }
-    .cost-by-model { margin-bottom: 20px; }
-    .cost-by-model h4, .cost-daily-chart h4, .cost-pricing h4, .cost-recent-logs h4 { color: #1B3A5C; font-size: 14px; margin: 16px 0 8px 0; }
-    .cost-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-    .cost-table th { background: #f5f5f5; padding: 8px 12px; text-align: left; font-weight: 600; color: #555; border-bottom: 2px solid #e0e0e0; }
-    .cost-table td { padding: 8px 12px; border-bottom: 1px solid #eee; }
-    .cost-table-small { font-size: 12px; }
-    .cost-table-small th, .cost-table-small td { padding: 4px 8px; }
-    .cost-daily-chart { margin-bottom: 20px; }
-    .cost-chart-container { display: flex; gap: 4px; align-items: flex-end; height: 120px; padding: 8px 0; overflow-x: auto; }
-    .cost-day-bar { display: flex; flex-direction: column; align-items: center; justify-content: flex-end; min-width: 32px; height: 100%; }
-    .cost-day-fill { width: 24px; background: #1976d2; border-radius: 4px 4px 0 0; min-height: 2px; transition: height 0.3s; }
-    .cost-day-label { font-size: 10px; color: #888; margin-top: 4px; white-space: nowrap; }
-    .cost-pricing { margin-bottom: 20px; }
-    .pricing-input { border: 1px solid #e0e0e0; border-radius: 4px; padding: 4px 8px; font-size: 13px; width: 100%; box-sizing: border-box; }
-    .pricing-num { width: 100px; text-align: right; }
-    .new-pricing-row { background: #f9f9f9; }
-    .cost-recent-logs { margin-top: 16px; }
-    .cost-logs-scroll { max-height: 300px; overflow-y: auto; }
-    .cost-empty { display: flex; align-items: center; gap: 8px; color: #666; font-size: 13px; }
-    .cost-empty mat-icon { color: #1565c0; }
+    .cost-tracking-link-card { padding: 24px; }
+    .cost-link-content { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+    .cost-link-left { display: flex; align-items: center; gap: 16px; }
+    .cost-link-icon { font-size: 36px; width: 36px; height: 36px; color: #1976d2; }
+    .cost-link-content h3 { margin: 0; color: #1B3A5C; font-size: 16px; }
+    .cost-link-content p { margin: 4px 0 0; color: #888; font-size: 13px; }
   `],
 })
 export class ProjectDashboardComponent implements OnInit, OnDestroy {
@@ -1677,16 +1552,6 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   reuseStats: any = null;
   loadingReuseStats = false;
 
-  // AI Cost Tracking
-  costTracking: any = null;
-  loadingCostTracking = false;
-  savingPricing = false;
-  newPricing = { provider: '', model_name: '', price_per_1k_input: 0, price_per_1k_output: 0 };
-
-  get maxDailyCost(): number {
-    if (!this.costTracking?.daily?.length) return 0;
-    return Math.max(...this.costTracking.daily.map((d: any) => d.cost));
-  }
 
   allCategories = [
     { value: 'old_rfp', label: 'Ancien AO', desc: 'Documents de l\'ancien appel d\'offres', icon: 'history', color: '#1976d2' },
@@ -3157,60 +3022,4 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
-  // ── AI Cost Tracking ──
-
-  loadAICostTracking(): void {
-    this.loadingCostTracking = true;
-    this.api.getAICostTracking(this.projectId).subscribe({
-      next: (res) => {
-        this.costTracking = res;
-        this.loadingCostTracking = false;
-      },
-      error: (err) => {
-        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 4000 });
-        this.loadingCostTracking = false;
-      },
-    });
-  }
-
-  savePricing(): void {
-    if (!this.costTracking) return;
-    this.savingPricing = true;
-    this.api.updateAIPricing(this.projectId, this.costTracking.pricing).subscribe({
-      next: () => {
-        this.snackBar.open('Tarifs sauvegardés', 'OK', { duration: 2000 });
-        this.savingPricing = false;
-        this.loadAICostTracking();
-      },
-      error: (err) => {
-        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 4000 });
-        this.savingPricing = false;
-      },
-    });
-  }
-
-  addPricing(): void {
-    if (!this.newPricing.provider || !this.newPricing.model_name) return;
-    if (!this.costTracking) this.costTracking = { pricing: [] };
-    this.costTracking.pricing.push({
-      id: '',
-      ...this.newPricing,
-      currency: 'EUR',
-    });
-    this.newPricing = { provider: '', model_name: '', price_per_1k_input: 0, price_per_1k_output: 0 };
-  }
-
-  deletePricing(p: any): void {
-    if (p.id) {
-      this.api.deleteAIPricing(this.projectId, p.id).subscribe({
-        next: () => {
-          this.snackBar.open('Tarif supprimé', 'OK', { duration: 2000 });
-          this.loadAICostTracking();
-        },
-        error: () => this.snackBar.open('Erreur', 'OK', { duration: 3000 }),
-      });
-    } else {
-      this.costTracking.pricing = this.costTracking.pricing.filter((x: any) => x !== p);
-    }
-  }
 }
