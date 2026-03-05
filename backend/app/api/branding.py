@@ -16,7 +16,7 @@ from .deps import get_admin_user
 router = APIRouter(prefix="/branding", tags=["Branding"])
 audit_log = logging.getLogger("security.audit")
 
-BRANDING_DIR = os.path.join(settings.images_dir, "branding")
+BRANDING_DIR = settings.export_dir
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/svg+xml", "image/x-icon", "image/vnd.microsoft.icon", "image/webp"}
 MAX_FILE_SIZE = 2 * 1024 * 1024  # 2 MB
 
@@ -89,8 +89,6 @@ async def upload_logo(
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Le fichier est trop volumineux (max 2 Mo).")
 
-    os.makedirs(BRANDING_DIR, exist_ok=True)
-
     ext = os.path.splitext(file.filename or "logo.png")[1] or ".png"
     filename = f"logo_{uuid.uuid4().hex[:8]}{ext}"
     filepath = os.path.join(BRANDING_DIR, filename)
@@ -126,8 +124,6 @@ async def upload_favicon(
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Le fichier est trop volumineux (max 2 Mo).")
-
-    os.makedirs(BRANDING_DIR, exist_ok=True)
 
     ext = os.path.splitext(file.filename or "favicon.ico")[1] or ".ico"
     filename = f"favicon_{uuid.uuid4().hex[:8]}{ext}"
