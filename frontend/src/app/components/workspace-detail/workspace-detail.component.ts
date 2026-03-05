@@ -52,10 +52,10 @@ import { Workspace, RFPProject, WorkspaceMember, UserInfo } from '../../models/r
           </div>
         </div>
         <div class="header-actions">
-          <button mat-icon-button (click)="startEditWorkspace()" matTooltip="Modifier le workspace" *ngIf="!editingWorkspace">
+          <button mat-icon-button (click)="startEditWorkspace()" matTooltip="Modifier le workspace" *ngIf="!editingWorkspace && canManageWorkspace">
             <mat-icon>edit</mat-icon>
           </button>
-          <button mat-icon-button color="warn" (click)="deleteWorkspace()" matTooltip="Supprimer le workspace" *ngIf="!editingWorkspace">
+          <button mat-icon-button color="warn" (click)="deleteWorkspace()" matTooltip="Supprimer le workspace" *ngIf="!editingWorkspace && canManageWorkspace">
             <mat-icon>delete</mat-icon>
           </button>
           <button mat-raised-button color="accent" (click)="onImportBackup()" *ngIf="isAdmin">
@@ -182,8 +182,8 @@ import { Workspace, RFPProject, WorkspaceMember, UserInfo } from '../../models/r
                   </mat-card-content>
                 </div>
 
-                <!-- Action buttons -->
-                <div class="project-card-actions" *ngIf="editingProject?.id !== p.id">
+                <!-- Action buttons (project owner or workspace admin only) -->
+                <div class="project-card-actions" *ngIf="editingProject?.id !== p.id && (canManageWorkspace || p.current_user_role === 'owner')">
                   <button mat-icon-button (click)="startEditProject(p, $event)" matTooltip="Modifier">
                     <mat-icon>edit</mat-icon>
                   </button>
@@ -230,7 +230,7 @@ import { Workspace, RFPProject, WorkspaceMember, UserInfo } from '../../models/r
               </div>
             </mat-card>
 
-            <button mat-raised-button color="primary" (click)="openAddMember()" *ngIf="!showAddMember" style="margin-bottom:16px">
+            <button mat-raised-button color="primary" (click)="openAddMember()" *ngIf="!showAddMember && canManageWorkspace" style="margin-bottom:16px">
               <mat-icon>person_add</mat-icon> Ajouter un membre
             </button>
 
@@ -240,14 +240,15 @@ import { Workspace, RFPProject, WorkspaceMember, UserInfo } from '../../models/r
                 <span matListItemTitle>{{ m.full_name }} ({{ m.username }})</span>
                 <span matListItemLine>{{ m.email }}</span>
                 <div class="member-actions">
-                  <mat-form-field appearance="outline" class="role-inline-field">
+                  <mat-form-field *ngIf="canManageWorkspace" appearance="outline" class="role-inline-field">
                     <mat-select [value]="m.role" (selectionChange)="changeMemberRole(m, $event.value)">
                       <mat-option value="owner">Proprietaire</mat-option>
                       <mat-option value="editor">Editeur</mat-option>
                       <mat-option value="viewer">Lecteur</mat-option>
                     </mat-select>
                   </mat-form-field>
-                  <button mat-icon-button color="warn" (click)="removeMember(m)" matTooltip="Retirer ce membre">
+                  <mat-chip *ngIf="!canManageWorkspace">{{ m.role === 'owner' ? 'Proprietaire' : m.role === 'editor' ? 'Editeur' : 'Lecteur' }}</mat-chip>
+                  <button *ngIf="canManageWorkspace" mat-icon-button color="warn" (click)="removeMember(m)" matTooltip="Retirer ce membre">
                     <mat-icon>person_remove</mat-icon>
                   </button>
                 </div>
@@ -337,6 +338,9 @@ export class WorkspaceDetailComponent implements OnInit {
   editWsDescription = '';
   editingProject: { id: string; name: string; description: string; client_name: string; company_name: string; rfp_reference: string; deadline: string } | null = null;
 
+  // Access control
+  canManageWorkspace = false;
+
   // Member management
   showAddMember = false;
   newMemberUserId = '';
@@ -368,7 +372,12 @@ export class WorkspaceDetailComponent implements OnInit {
       next: (p) => this.projects = p,
     });
     this.api.getWorkspaceMembers(this.workspaceId).subscribe({
-      next: (m) => this.members = m,
+      next: (m) => {
+        this.members = m;
+        const currentUser = this.authService.getCurrentUser();
+        const myMembership = currentUser ? m.find(mem => mem.user_id === currentUser.id) : null;
+        this.canManageWorkspace = this.isAdmin || (myMembership?.role === 'owner');
+      },
     });
   }
 
@@ -506,12 +515,25 @@ export class WorkspaceDetailComponent implements OnInit {
     this.showAddMember = true;
     this.newMemberUserId = '';
     this.newMemberRole = 'editor';
-    // Load users not already members
+    // Load users not already members (admin can see all users)
     if (this.isAdmin) {
       this.api.getUsers().subscribe({
         next: (users) => {
           const memberUserIds = new Set(this.members.map(m => m.user_id));
           this.availableUsers = users.filter(u => !memberUserIds.has(u.id) && u.is_active);
+        },
+      });
+    } else if (this.canManageWorkspace) {
+      // Workspace owner but not admin - can only see existing users list through admin endpoint
+      // For now, show a message or use a search endpoint
+      this.api.getUsers().subscribe({
+        next: (users) => {
+          const memberUserIds = new Set(this.members.map(m => m.user_id));
+          this.availableUsers = users.filter(u => !memberUserIds.has(u.id) && u.is_active);
+        },
+        error: () => {
+          this.snackBar.open('Seul un administrateur peut ajouter des membres au workspace', 'OK', { duration: 3000 });
+          this.showAddMember = false;
         },
       });
     }

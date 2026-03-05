@@ -5,11 +5,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from ..database import get_db
-from ..models.user import User
+from ..models.user import User, UserRole
 from ..models.workspace import Workspace, WorkspaceMember, MemberRole
 from ..models.project import RFPProject
 from ..schemas.workspace import WorkspaceCreate, WorkspaceUpdate, WorkspaceOut, WorkspaceMemberOut, AddMemberRequest, UpdateMemberRequest
-from .deps import get_current_user
+from .deps import get_current_user, get_admin_user, require_workspace_owner_or_admin
 
 router = APIRouter(prefix="/workspaces", tags=["Workspaces"])
 
@@ -20,23 +20,24 @@ async def list_workspaces(
     db: AsyncSession = Depends(get_db),
 ):
     """List workspaces the current user has access to."""
-    result = await db.execute(
-        select(Workspace)
-        .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
-        .where(WorkspaceMember.user_id == current_user.id)
-        .order_by(Workspace.updated_at.desc())
-    )
+    if current_user.role == UserRole.ADMIN:
+        result = await db.execute(select(Workspace).order_by(Workspace.updated_at.desc()))
+    else:
+        result = await db.execute(
+            select(Workspace)
+            .join(WorkspaceMember, WorkspaceMember.workspace_id == Workspace.id)
+            .where(WorkspaceMember.user_id == current_user.id)
+            .order_by(Workspace.updated_at.desc())
+        )
     workspaces = result.scalars().all()
 
     workspace_list = []
     for ws in workspaces:
-        # Count members
         member_count_result = await db.execute(
             select(func.count()).where(WorkspaceMember.workspace_id == ws.id)
         )
         member_count = member_count_result.scalar() or 0
 
-        # Count projects
         project_count_result = await db.execute(
             select(func.count()).where(RFPProject.workspace_id == ws.id)
         )
@@ -59,10 +60,10 @@ async def list_workspaces(
 @router.post("", response_model=WorkspaceOut, status_code=status.HTTP_201_CREATED)
 async def create_workspace(
     request: WorkspaceCreate,
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(get_admin_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new workspace."""
+    """Create a new workspace (admin only)."""
     workspace = Workspace(
         name=request.name,
         description=request.description,
@@ -100,14 +101,15 @@ async def get_workspace(
     db: AsyncSession = Depends(get_db),
 ):
     """Get workspace details."""
-    # Check access
-    result = await db.execute(
-        select(WorkspaceMember)
-        .where(WorkspaceMember.workspace_id == workspace_id)
-        .where(WorkspaceMember.user_id == current_user.id)
-    )
-    if not result.scalar_one_or_none():
-        raise HTTPException(status_code=403, detail="Accès non autorisé")
+    # Check access: must be workspace member or admin
+    if current_user.role != UserRole.ADMIN:
+        result = await db.execute(
+            select(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == workspace_id)
+            .where(WorkspaceMember.user_id == current_user.id)
+        )
+        if not result.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Accès non autorisé")
 
     result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
     workspace = result.scalar_one_or_none()
@@ -140,7 +142,9 @@ async def update_workspace(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update workspace details."""
+    """Update workspace details (owner or admin only)."""
+    await require_workspace_owner_or_admin(workspace_id, current_user, db)
+
     result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
     workspace = result.scalar_one_or_none()
     if not workspace:
@@ -170,16 +174,8 @@ async def delete_workspace(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a workspace and all its projects (owner only)."""
-    # Check that current user is owner
-    result = await db.execute(
-        select(WorkspaceMember)
-        .where(WorkspaceMember.workspace_id == workspace_id)
-        .where(WorkspaceMember.user_id == current_user.id)
-    )
-    membership = result.scalar_one_or_none()
-    if not membership or membership.role != MemberRole.OWNER:
-        raise HTTPException(status_code=403, detail="Seul le proprietaire peut supprimer le workspace")
+    """Delete a workspace and all its projects (owner or admin only)."""
+    await require_workspace_owner_or_admin(workspace_id, current_user, db)
 
     result = await db.execute(select(Workspace).where(Workspace.id == workspace_id))
     workspace = result.scalar_one_or_none()
@@ -196,7 +192,16 @@ async def list_members(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """List workspace members."""
+    """List workspace members (must be a workspace member or admin)."""
+    if current_user.role != UserRole.ADMIN:
+        check = await db.execute(
+            select(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == workspace_id)
+            .where(WorkspaceMember.user_id == current_user.id)
+        )
+        if not check.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Accès non autorisé")
+
     result = await db.execute(
         select(WorkspaceMember, User)
         .join(User, User.id == WorkspaceMember.user_id)
@@ -225,7 +230,9 @@ async def add_member(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Add a member to the workspace."""
+    """Add a member to the workspace (owner or admin only)."""
+    await require_workspace_owner_or_admin(workspace_id, current_user, db)
+
     # Check user exists
     result = await db.execute(select(User).where(User.id == uuid.UUID(request.user_id)))
     user = result.scalar_one_or_none()
@@ -260,7 +267,9 @@ async def update_member_role(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a member's role in the workspace."""
+    """Update a member's role in the workspace (owner or admin only)."""
+    await require_workspace_owner_or_admin(workspace_id, current_user, db)
+
     result = await db.execute(
         select(WorkspaceMember)
         .where(WorkspaceMember.workspace_id == workspace_id)
@@ -298,7 +307,9 @@ async def remove_member(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove a member from the workspace."""
+    """Remove a member from the workspace (owner or admin only)."""
+    await require_workspace_owner_or_admin(workspace_id, current_user, db)
+
     result = await db.execute(
         select(WorkspaceMember)
         .where(WorkspaceMember.workspace_id == workspace_id)

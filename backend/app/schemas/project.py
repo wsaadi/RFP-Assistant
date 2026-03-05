@@ -49,6 +49,7 @@ class ProjectOut(BaseModel):
     updated_at: datetime
     document_count: int = 0
     chapter_count: int = 0
+    current_user_role: Optional[str] = None  # "owner", "editor", "viewer" or None (admin without membership)
 
     model_config = {"from_attributes": True}
 

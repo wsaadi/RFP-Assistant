@@ -11,6 +11,7 @@ import { MatChipsModule } from '@angular/material/chips';
 import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
 import { MatMenuModule } from '@angular/material/menu';
 import { ApiService } from '../../services/api.service';
+import { AuthService } from '../../services/auth.service';
 import { Workspace } from '../../models/report.model';
 
 @Component({
@@ -25,7 +26,7 @@ import { Workspace } from '../../models/report.model';
     <div class="page-container">
       <div class="page-header">
         <h1>Espaces de travail</h1>
-        <button mat-raised-button color="primary" (click)="showCreateForm = !showCreateForm">
+        <button mat-raised-button color="primary" (click)="showCreateForm = !showCreateForm" *ngIf="isAdmin">
           <mat-icon>add</mat-icon> Nouveau workspace
         </button>
       </div>
@@ -91,8 +92,8 @@ import { Workspace } from '../../models/report.model';
             </mat-card-content>
           </div>
 
-          <!-- Action buttons -->
-          <div class="ws-card-actions" *ngIf="editingWorkspace?.id !== ws.id">
+          <!-- Action buttons (admin only) -->
+          <div class="ws-card-actions" *ngIf="editingWorkspace?.id !== ws.id && isAdmin">
             <button mat-icon-button (click)="startEditWorkspace(ws, $event)" matTooltip="Modifier">
               <mat-icon>edit</mat-icon>
             </button>
@@ -137,8 +138,11 @@ export class WorkspaceListComponent implements OnInit {
   newName = '';
   newDescription = '';
   editingWorkspace: { id: string; name: string; description: string } | null = null;
+  isAdmin = false;
 
-  constructor(private api: ApiService, private snackBar: MatSnackBar) {}
+  constructor(private api: ApiService, private authService: AuthService, private snackBar: MatSnackBar) {
+    this.isAdmin = this.authService.isAdmin();
+  }
 
   ngOnInit(): void {
     this.loadWorkspaces();

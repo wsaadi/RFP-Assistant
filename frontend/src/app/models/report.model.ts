@@ -79,6 +79,7 @@ export interface RFPProject {
   updated_at: string;
   document_count: number;
   chapter_count: number;
+  current_user_role: string | null;
 }
 
 export interface ProjectCreate {

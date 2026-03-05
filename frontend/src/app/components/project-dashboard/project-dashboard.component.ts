@@ -760,7 +760,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                   <h3><mat-icon>psychology</mat-icon> Contexte IA du projet</h3>
                   <p class="ai-context-hint">Ce contexte sera utilisé par l'IA pour orienter la rédaction de tous les contenus (chapitres, enrichissement, etc.)</p>
                 </div>
-                <button mat-icon-button (click)="editingAiContext = !editingAiContext" [matTooltip]="editingAiContext ? 'Annuler' : 'Modifier'">
+                <button *ngIf="canManageProject" mat-icon-button (click)="editingAiContext = !editingAiContext" [matTooltip]="editingAiContext ? 'Annuler' : 'Modifier'">
                   <mat-icon>{{ editingAiContext ? 'close' : 'edit' }}</mat-icon>
                 </button>
               </div>
@@ -769,7 +769,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
               <div *ngIf="!editingAiContext && !project.ai_context" class="ai-context-empty">
                 <mat-icon>info_outline</mat-icon>
-                <span>Aucun contexte défini. <a (click)="editingAiContext = true" class="link">Ajouter un contexte</a> pour guider l'IA dans la rédaction.</span>
+                <span>Aucun contexte défini. <a *ngIf="canManageProject" (click)="editingAiContext = true" class="link">Ajouter un contexte</a><span *ngIf="!canManageProject">Contactez un administrateur ou le propriétaire du projet pour configurer le contexte IA.</span></span>
               </div>
               <div *ngIf="editingAiContext" class="ai-context-edit">
                 <mat-form-field appearance="outline" class="full-width">
@@ -793,7 +793,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               </div>
               <div style="display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px;">
                 <mat-card [class.selected-mode]="project.context_mode !== 'full'"
-                  (click)="setContextMode('rag')"
+                  (click)="canManageProject && setContextMode('rag')"
+                  [style.cursor]="canManageProject ? 'pointer' : 'default'"
                   style="flex: 1; min-width: 220px; cursor: pointer; padding: 16px; border: 2px solid transparent; transition: all 0.2s;"
                   [style.borderColor]="project.context_mode !== 'full' ? '#1976d2' : 'transparent'"
                   [style.background]="project.context_mode !== 'full' ? '#e3f2fd' : ''">
@@ -807,8 +808,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                   </p>
                 </mat-card>
                 <mat-card [class.selected-mode]="project.context_mode === 'full'"
-                  (click)="setContextMode('full')"
-                  style="flex: 1; min-width: 220px; cursor: pointer; padding: 16px; border: 2px solid transparent; transition: all 0.2s;"
+                  (click)="canManageProject && setContextMode('full')"
+                  style="flex: 1; min-width: 220px; padding: 16px; border: 2px solid transparent; transition: all 0.2s;"
+                  [style.cursor]="canManageProject ? 'pointer' : 'default'"
                   [style.borderColor]="project.context_mode === 'full' ? '#7b1fa2' : 'transparent'"
                   [style.background]="project.context_mode === 'full' ? '#f3e5f5' : ''">
                   <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px;">
@@ -997,7 +999,7 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           <div class="tab-content">
             <div class="member-source-info">
               <mat-icon>info</mat-icon>
-              <span>L'acces au projet est gere individuellement. Seuls les membres de l'espace de travail peuvent etre ajoutes a un projet. Si aucun membre n'est ajoute, tous les membres de l'espace de travail ont acces.</span>
+              <span>L'acces au projet est gere individuellement. Seuls les membres de l'espace de travail peuvent etre ajoutes a un projet par un proprietaire ou administrateur.</span>
             </div>
 
             <!-- Project-specific members section -->
@@ -1010,26 +1012,27 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                 <span matListItemTitle>{{ m.full_name }} ({{ m.username }})</span>
                 <span matListItemLine>{{ m.email }}</span>
                 <div class="member-actions">
-                  <mat-form-field appearance="outline" class="role-inline-field">
+                  <mat-form-field *ngIf="canManageProject" appearance="outline" class="role-inline-field">
                     <mat-select [value]="m.role" (selectionChange)="changeProjectMemberRole(m, $event.value)">
                       <mat-option value="owner">Proprietaire</mat-option>
                       <mat-option value="editor">Editeur</mat-option>
                       <mat-option value="viewer">Lecteur</mat-option>
                     </mat-select>
                   </mat-form-field>
-                  <button mat-icon-button color="warn" (click)="removeProjectMember(m)" matTooltip="Retirer du projet">
+                  <mat-chip *ngIf="!canManageProject">{{ m.role === 'owner' ? 'Proprietaire' : m.role === 'editor' ? 'Editeur' : 'Lecteur' }}</mat-chip>
+                  <button *ngIf="canManageProject" mat-icon-button color="warn" (click)="removeProjectMember(m)" matTooltip="Retirer du projet">
                     <mat-icon>person_remove</mat-icon>
                   </button>
                 </div>
               </mat-list-item>
             </mat-list>
 
-            <!-- Workspace members (not yet project members) -->
-            <h3 class="members-section-title" *ngIf="getWorkspaceOnlyMembers().length > 0">
+            <!-- Workspace members (not yet project members) - only visible to project owner/admin -->
+            <h3 class="members-section-title" *ngIf="canManageProject && getWorkspaceOnlyMembers().length > 0">
               <mat-icon>business</mat-icon> Membres de l'espace de travail
               <span class="section-subtitle">(pas encore ajoutes au projet)</span>
             </h3>
-            <mat-list class="members-list" *ngIf="getWorkspaceOnlyMembers().length > 0">
+            <mat-list class="members-list" *ngIf="canManageProject && getWorkspaceOnlyMembers().length > 0">
               <mat-list-item *ngFor="let m of getWorkspaceOnlyMembers()" class="member-item ws-member-item">
                 <mat-icon matListItemIcon>person_outline</mat-icon>
                 <span matListItemTitle>{{ m.full_name }} ({{ m.username }})</span>
@@ -1446,9 +1449,11 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   qaInput = '';
   qaLoading = false;
 
-  // Project members
+  // Project members & access control
   projectMembers: any[] = [];
   isAdmin = false;
+  isProjectOwner = false;
+  canManageProject = false;  // owner or admin
 
   allCategories = [
     { value: 'old_rfp', label: 'Ancien AO', desc: 'Documents de l\'ancien appel d\'offres', icon: 'history', color: '#1976d2' },
@@ -1557,6 +1562,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       next: (p) => {
         this.project = p;
         this.aiContextDraft = p.ai_context || '';
+        this.isProjectOwner = p.current_user_role === 'owner';
+        this.canManageProject = this.isAdmin || this.isProjectOwner;
         this.loading = false;
         if (p.enabled_categories && p.enabled_categories.length) {
           this.categories = this.allCategories.filter(c => p.enabled_categories.includes(c.value));

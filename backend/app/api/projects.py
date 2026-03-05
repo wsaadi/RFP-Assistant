@@ -33,7 +33,7 @@ from ..services.ai_service import MistralAIService, create_ai_service
 from ..services.vector_service import VectorService
 from ..services.anonymization_service import AnonymizationService
 from ..services.progress_service import set_progress, get_or_idle
-from .deps import get_current_user
+from .deps import get_current_user, require_project_owner_or_admin, get_workspace_membership, get_project_membership
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
 logger = logging.getLogger(__name__)
@@ -78,53 +78,39 @@ async def list_projects(
     """List projects in a workspace that the current user has access to.
 
     A user can see a project if:
-    - They are an admin, OR
-    - They are a direct project member, OR
-    - The project has no project-specific members (open to all workspace members)
+    - They are a system admin, OR
+    - They are an explicit project member (ProjectMember)
     """
     from ..models.user import UserRole
 
     # Verify workspace membership first
-    ws_member_result = await db.execute(
-        select(WorkspaceMember)
-        .where(WorkspaceMember.workspace_id == workspace_id)
-        .where(WorkspaceMember.user_id == current_user.id)
-    )
-    is_ws_member = ws_member_result.scalar_one_or_none() is not None
     is_admin = current_user.role == UserRole.ADMIN
+    if not is_admin:
+        ws_member_result = await db.execute(
+            select(WorkspaceMember)
+            .where(WorkspaceMember.workspace_id == workspace_id)
+            .where(WorkspaceMember.user_id == current_user.id)
+        )
+        if not ws_member_result.scalar_one_or_none():
+            raise HTTPException(status_code=403, detail="Accès non autorisé à cet espace de travail")
 
-    if not is_ws_member and not is_admin:
-        raise HTTPException(status_code=403, detail="Accès non autorisé à cet espace de travail")
-
-    result = await db.execute(
-        select(RFPProject)
-        .where(RFPProject.workspace_id == workspace_id)
-        .order_by(RFPProject.updated_at.desc())
-    )
-    all_projects = result.scalars().all()
-
-    # Filter projects by access
-    projects = []
-    for p in all_projects:
-        if is_admin:
-            projects.append(p)
-            continue
-        # Check if project has specific members
-        member_count = (await db.execute(
-            select(func.count()).where(ProjectMember.project_id == p.id)
-        )).scalar() or 0
-        if member_count == 0:
-            # No project-specific members → open to all workspace members
-            projects.append(p)
-        else:
-            # Check if current user is a project member
-            pm = await db.execute(
-                select(ProjectMember)
-                .where(ProjectMember.project_id == p.id)
-                .where(ProjectMember.user_id == current_user.id)
-            )
-            if pm.scalar_one_or_none():
-                projects.append(p)
+    if is_admin:
+        result = await db.execute(
+            select(RFPProject)
+            .where(RFPProject.workspace_id == workspace_id)
+            .order_by(RFPProject.updated_at.desc())
+        )
+        projects = list(result.scalars().all())
+    else:
+        # Only show projects where user is an explicit member
+        result = await db.execute(
+            select(RFPProject)
+            .join(ProjectMember, ProjectMember.project_id == RFPProject.id)
+            .where(RFPProject.workspace_id == workspace_id)
+            .where(ProjectMember.user_id == current_user.id)
+            .order_by(RFPProject.updated_at.desc())
+        )
+        projects = list(result.scalars().all())
 
     project_list = []
     for p in projects:
@@ -134,6 +120,15 @@ async def list_projects(
         ch_count = (await db.execute(
             select(func.count()).where(Chapter.project_id == p.id)
         )).scalar() or 0
+
+        # Get current user's role in this project
+        pm_result = await db.execute(
+            select(ProjectMember)
+            .where(ProjectMember.project_id == p.id)
+            .where(ProjectMember.user_id == current_user.id)
+        )
+        pm = pm_result.scalar_one_or_none()
+        user_role = pm.role if pm else None
 
         project_list.append(ProjectOut(
             id=str(p.id),
@@ -154,6 +149,7 @@ async def list_projects(
             updated_at=p.updated_at,
             document_count=doc_count,
             chapter_count=ch_count,
+            current_user_role=user_role,
         ))
     return project_list
 
@@ -165,7 +161,10 @@ async def create_project(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Create a new RFP project."""
+    """Create a new RFP project. Any workspace member can create a project."""
+    # Verify workspace membership
+    await get_workspace_membership(workspace_id, current_user, db)
+
     project = RFPProject(
         workspace_id=workspace_id,
         name=request.name,
@@ -180,6 +179,15 @@ async def create_project(
         created_by=current_user.id,
     )
     db.add(project)
+    await db.flush()
+
+    # Auto-add creator as project owner
+    project_member = ProjectMember(
+        project_id=project.id,
+        user_id=current_user.id,
+        role="owner",
+    )
+    db.add(project_member)
     await db.commit()
     await db.refresh(project)
 
@@ -219,28 +227,9 @@ async def get_project(
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    # Check access: admin, or workspace member with project access
-    is_admin = current_user.role == UserRole.ADMIN
-    if not is_admin:
-        ws_check = await db.execute(
-            select(WorkspaceMember)
-            .where(WorkspaceMember.workspace_id == project.workspace_id)
-            .where(WorkspaceMember.user_id == current_user.id)
-        )
-        if not ws_check.scalar_one_or_none():
-            raise HTTPException(status_code=403, detail="Accès non autorisé")
-        # Check project-level access if project has specific members
-        pm_count = (await db.execute(
-            select(func.count()).where(ProjectMember.project_id == project_id)
-        )).scalar() or 0
-        if pm_count > 0:
-            pm_check = await db.execute(
-                select(ProjectMember)
-                .where(ProjectMember.project_id == project_id)
-                .where(ProjectMember.user_id == current_user.id)
-            )
-            if not pm_check.scalar_one_or_none():
-                raise HTTPException(status_code=403, detail="Accès non autorisé à ce projet")
+    # Check access: admin or explicit project member
+    membership = await get_project_membership(project_id, current_user, db)
+    user_role = membership.role if membership else None
 
     doc_count = (await db.execute(
         select(func.count()).where(Document.project_id == project_id)
@@ -268,6 +257,7 @@ async def get_project(
         updated_at=project.updated_at,
         document_count=doc_count,
         chapter_count=ch_count,
+        current_user_role=user_role,
     )
 
 
@@ -279,15 +269,40 @@ async def update_project(
     db: AsyncSession = Depends(get_db),
 ):
     """Update project details."""
+    from ..models.user import UserRole
+
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    for field in ["name", "description", "client_name", "company_name", "rfp_reference", "deadline", "improvement_axes", "ai_context", "enabled_categories", "context_mode"]:
+    # Check project membership
+    membership = await get_project_membership(project_id, current_user, db)
+    is_admin = current_user.role == UserRole.ADMIN
+    is_owner = membership and membership.role == "owner"
+
+    # AI config fields are restricted to project owner or admin
+    ai_config_fields = {"ai_context", "enabled_categories", "context_mode"}
+    general_fields = {"name", "description", "client_name", "company_name", "rfp_reference", "deadline", "improvement_axes"}
+
+    # Non-owner/non-admin editors can only update general fields
+    if not is_admin and not is_owner:
+        # Viewers cannot update at all
+        if membership and membership.role == "viewer":
+            raise HTTPException(status_code=403, detail="Les lecteurs ne peuvent pas modifier le projet")
+
+    for field in general_fields:
         value = getattr(request, field, None)
         if value is not None:
             setattr(project, field, value)
+
+    for field in ai_config_fields:
+        value = getattr(request, field, None)
+        if value is not None:
+            if not is_admin and not is_owner:
+                raise HTTPException(status_code=403, detail="Seul un administrateur ou le propriétaire du projet peut modifier la configuration IA")
+            setattr(project, field, value)
+
     if request.status is not None:
         project.status = request.status
 
@@ -303,7 +318,9 @@ async def delete_project(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Delete a project and all its data."""
+    """Delete a project and all its data (owner or admin only)."""
+    await require_project_owner_or_admin(project_id, current_user, db)
+
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
@@ -3763,12 +3780,17 @@ async def list_project_members(
     db: AsyncSession = Depends(get_db),
 ):
     """List project members and workspace members with source indication."""
+    from ..models.user import UserRole
+
     project_result = await db.execute(
         select(RFPProject).where(RFPProject.id == project_id)
     )
     project = project_result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
+
+    # Check access: must be project member or admin
+    await get_project_membership(project_id, current_user, db)
 
     # Get project-specific members
     result = await db.execute(
@@ -3778,6 +3800,16 @@ async def list_project_members(
     )
     project_rows = result.all()
     project_member_user_ids = {user.id for _, user in project_rows}
+
+    # Determine if current user can manage members (owner or admin)
+    is_admin = current_user.role == UserRole.ADMIN
+    current_pm = await db.execute(
+        select(ProjectMember)
+        .where(ProjectMember.project_id == project_id)
+        .where(ProjectMember.user_id == current_user.id)
+    )
+    current_membership = current_pm.scalar_one_or_none()
+    can_manage = is_admin or (current_membership and current_membership.role == "owner")
 
     members = [
         {
@@ -3794,24 +3826,26 @@ async def list_project_members(
     ]
 
     # Also return workspace members (not already project members) for reference
-    ws_result = await db.execute(
-        select(WorkspaceMember, User)
-        .join(User, User.id == WorkspaceMember.user_id)
-        .where(WorkspaceMember.workspace_id == project.workspace_id)
-    )
-    ws_rows = ws_result.all()
-    for wm, user in ws_rows:
-        if user.id not in project_member_user_ids:
-            members.append({
-                "id": str(wm.id),
-                "user_id": str(user.id),
-                "username": user.username,
-                "email": user.email,
-                "full_name": user.full_name,
-                "role": wm.role.value,
-                "joined_at": wm.joined_at.isoformat(),
-                "source": "workspace",
-            })
+    # Only if current user can manage members (so they can add them)
+    if can_manage:
+        ws_result = await db.execute(
+            select(WorkspaceMember, User)
+            .join(User, User.id == WorkspaceMember.user_id)
+            .where(WorkspaceMember.workspace_id == project.workspace_id)
+        )
+        ws_rows = ws_result.all()
+        for wm, user in ws_rows:
+            if user.id not in project_member_user_ids:
+                members.append({
+                    "id": str(wm.id),
+                    "user_id": str(user.id),
+                    "username": user.username,
+                    "email": user.email,
+                    "full_name": user.full_name,
+                    "role": wm.role.value,
+                    "joined_at": wm.joined_at.isoformat(),
+                    "source": "workspace",
+                })
 
     return members
 
@@ -3823,7 +3857,9 @@ async def add_project_member(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Add a member to a project. The user must be a workspace member first."""
+    """Add a member to a project (project owner or admin only). The user must be a workspace member first."""
+    await require_project_owner_or_admin(project_id, current_user, db)
+
     user_id = request.get("user_id")
     role = request.get("role", "editor")
 
@@ -3875,7 +3911,9 @@ async def update_project_member_role(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Update a project member's role."""
+    """Update a project member's role (project owner or admin only)."""
+    await require_project_owner_or_admin(project_id, current_user, db)
+
     result = await db.execute(
         select(ProjectMember)
         .where(ProjectMember.project_id == project_id)
@@ -3912,7 +3950,9 @@ async def remove_project_member(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Remove a member from a project."""
+    """Remove a member from a project (project owner or admin only)."""
+    await require_project_owner_or_admin(project_id, current_user, db)
+
     result = await db.execute(
         select(ProjectMember)
         .where(ProjectMember.project_id == project_id)
