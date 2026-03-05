@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libpq-dev \
     libreoffice-writer-nogui \
+    gosu \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements first for better caching
@@ -26,11 +27,13 @@ RUN mkdir -p /app/data/uploads /app/data/exports /app/data/images /app/data/chro
 # Copy application code
 COPY app/ ./app/
 
-# Switch to non-root user
-USER appuser
+# Copy entrypoint script
+COPY entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/entrypoint.sh
 
 # Expose port
 EXPOSE 8000
 
-# Run the application
+# Entrypoint fixes volume permissions then drops to appuser
+ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
