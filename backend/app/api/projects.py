@@ -3940,18 +3940,12 @@ async def get_content_reuse_stats(
                 results = collection.query(
                     query_embeddings=batch_embs,
                     n_results=3,
-                    where={"category": "OLD_RESPONSE"},
+                    where={"category": DocumentCategory.OLD_RESPONSE.value},
                 )
-            except Exception:
-                # Fallback: no filter (in case metadata key differs)
-                try:
-                    results = collection.query(
-                        query_embeddings=batch_embs,
-                        n_results=3,
-                    )
-                except Exception:
-                    scores.extend([0.0] * len(batch_embs))
-                    continue
+            except Exception as exc:
+                logger.warning("ChromaDB query failed for reuse stats: %s", exc)
+                scores.extend([0.0] * len(batch_embs))
+                continue
 
             for i in range(len(batch_embs)):
                 if (results and results["distances"]
