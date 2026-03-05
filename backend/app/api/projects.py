@@ -2847,7 +2847,12 @@ async def list_improvement_axes(
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    items = _parse_improvement_axes(project.improvement_axes or "")
+    raw = project.improvement_axes or ""
+    items = _parse_improvement_axes(raw)
+    # Persist JSON format if data was in legacy text format so IDs remain stable
+    if items and not raw.strip().startswith("["):
+        project.improvement_axes = _serialize_improvement_axes(items)
+        await db.commit()
     return {"axes": items}
 
 
