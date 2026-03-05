@@ -146,8 +146,21 @@ async def lifespan(app: FastAPI):
             ALTER TABLE ai_configs ALTER COLUMN mistral_api_key_encrypted DROP NOT NULL
         """))
 
+        # Create branding_settings table if not exists
+        await conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS branding_settings (
+                id UUID PRIMARY KEY,
+                app_name VARCHAR(255) DEFAULT 'RFP Assistant',
+                logo_filename VARCHAR(500) DEFAULT '',
+                favicon_filename VARCHAR(500) DEFAULT '',
+                primary_color VARCHAR(20) DEFAULT '#1B3A5C',
+                updated_at TIMESTAMPTZ DEFAULT NOW()
+            )
+        """))
+
     # Create data directories
-    for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir]:
+    for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir,
+                      os.path.join(settings.upload_dir, "branding")]:
         os.makedirs(dir_path, exist_ok=True)
 
     # Create default admin if not exists
