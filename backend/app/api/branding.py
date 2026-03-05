@@ -16,7 +16,7 @@ from .deps import get_admin_user
 router = APIRouter(prefix="/branding", tags=["Branding"])
 audit_log = logging.getLogger("security.audit")
 
-BRANDING_DIR = os.path.join(settings.upload_dir, "branding")
+BRANDING_DIR = os.path.join(settings.images_dir, "branding")
 ALLOWED_IMAGE_TYPES = {"image/png", "image/jpeg", "image/svg+xml", "image/x-icon", "image/vnd.microsoft.icon", "image/webp"}
 MAX_FILE_SIZE = 2 * 1024 * 1024  # 2 MB
 
