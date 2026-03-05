@@ -236,11 +236,12 @@ async def _process_document_async(document_id: str, project_id: str):
                     )
                     ai_config = ai_cfg_result.scalar_one_or_none()
                     if ai_config:
+                        from ..security import decrypt_api_key
                         _api_key = ""
                         if ai_config.ner_provider == "mistral":
-                            _api_key = ai_config.mistral_api_key_encrypted or ""
+                            _api_key = decrypt_api_key(ai_config.mistral_api_key_encrypted or "")
                         elif ai_config.ner_provider == "scaleway":
-                            _api_key = ai_config.scaleway_api_key_encrypted or ""
+                            _api_key = decrypt_api_key(ai_config.scaleway_api_key_encrypted or "")
                         AnonymizationService.configure(ProviderConfig(
                             provider=ai_config.ner_provider or "ollama",
                             base_url=ai_config.ollama_base_url if ai_config.ner_provider == "ollama" else "",
@@ -579,12 +580,13 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
                 )
                 ai_config = ai_cfg_result.scalar_one_or_none()
                 if ai_config:
+                    from ..security import decrypt_api_key as _dk
                     # Vision provider
                     _v_key = ""
                     if ai_config.vision_provider == "mistral":
-                        _v_key = ai_config.mistral_api_key_encrypted or ""
+                        _v_key = _dk(ai_config.mistral_api_key_encrypted or "")
                     elif ai_config.vision_provider == "scaleway":
-                        _v_key = ai_config.scaleway_api_key_encrypted or ""
+                        _v_key = _dk(ai_config.scaleway_api_key_encrypted or "")
                     _scw_pid = ai_config.scaleway_project_id or ""
                     ImageAnalysisService.configure(ProviderConfig(
                         provider=ai_config.vision_provider or "ollama",
@@ -596,9 +598,9 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
                     # NER provider (used for OCR anonymization)
                     _n_key = ""
                     if ai_config.ner_provider == "mistral":
-                        _n_key = ai_config.mistral_api_key_encrypted or ""
+                        _n_key = _dk(ai_config.mistral_api_key_encrypted or "")
                     elif ai_config.ner_provider == "scaleway":
-                        _n_key = ai_config.scaleway_api_key_encrypted or ""
+                        _n_key = _dk(ai_config.scaleway_api_key_encrypted or "")
                     AnonymizationService.configure(ProviderConfig(
                         provider=ai_config.ner_provider or "ollama",
                         base_url=ai_config.ollama_base_url if ai_config.ner_provider == "ollama" else "",

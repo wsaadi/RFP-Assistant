@@ -3,3 +3,10 @@ __pycache__/
 node_modules/
 frontend/.angular/
 frontend/dist/
+
+# Secrets - NEVER commit
+.env
+.env.local
+.env.production
+*.pem
+*.key

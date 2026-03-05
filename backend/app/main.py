@@ -176,17 +176,33 @@ async def lifespan(app: FastAPI):
 # Rate limiter
 limiter = Limiter(key_func=get_remote_address)
 
+# Disable Swagger/ReDoc in production (only available when DEBUG=true)
+_docs_url = "/api/docs" if settings.debug else None
+_redoc_url = "/api/redoc" if settings.debug else None
+
 app = FastAPI(
     title=settings.app_name,
     description="Assistant IA pour la rédaction de réponses aux appels d'offres",
     version="2.0.0",
-    docs_url="/api/docs",
-    redoc_url="/api/redoc",
+    docs_url=_docs_url,
+    redoc_url=_redoc_url,
+    openapi_url="/api/openapi.json" if settings.debug else None,
     lifespan=lifespan,
 )
 
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
+import logging
+_security_logger = logging.getLogger("security")
+
+# Global exception handler: prevent stack trace leakage in production
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    _security_logger.error("Unhandled exception on %s %s: %s", request.method, request.url.path, exc, exc_info=True)
+    if settings.debug:
+        return JSONResponse(status_code=500, content={"detail": str(exc)})
+    return JSONResponse(status_code=500, content={"detail": "Erreur interne du serveur"})
 
 # Security headers middleware
 @app.middleware("http")
@@ -197,6 +213,7 @@ async def add_security_headers(request: Request, call_next):
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=()"
     response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -224,51 +241,50 @@ app.include_router(export_router, prefix="/api")
 @app.get("/")
 async def root():
     """Root endpoint."""
-    return {
-        "message": "RFP Response Assistant API",
-        "docs": "/api/docs",
-        "version": "2.0.0",
-    }
+    return {"message": "RFP Response Assistant API", "version": "2.0.0"}
 
 
 @app.get("/api/health")
-async def health_check():
-    """Health check endpoint with component status."""
+async def health_check(request: Request):
+    """Health check endpoint.
+
+    Returns minimal info publicly. Detailed component status requires
+    admin authentication (checked via Bearer token).
+    """
     from .services.progress_service import redis_health_check
 
     redis_ok = redis_health_check()
-    # Check Ollama availability (non-blocking, uses cached status)
-    ollama_status = "unknown"
-    try:
-        from .services.anonymization_service import AnonymizationService
-        ollama_ok = await AnonymizationService._check_ollama()
-        ollama_status = "connected" if ollama_ok else "unavailable"
-    except Exception:
-        ollama_status = "error"
-
-    # Get detailed NER diagnostic
-    ner_detail = {}
-    try:
-        ner_detail = AnonymizationService.get_ner_diagnostic()
-    except Exception:
-        pass
-
-    # Check Vision model availability for image analysis
-    vision_status = {}
-    try:
-        from .services.image_analysis_service import ImageAnalysisService
-        vision_status = await ImageAnalysisService.check_vision_model_available()
-    except Exception:
-        vision_status = {"vision_available": False, "failure_reason": "check failed"}
-
     overall = "healthy" if redis_ok else "degraded"
-    return {
-        "status": overall,
-        "service": settings.app_name,
-        "components": {
-            "redis": "connected" if redis_ok else "disconnected",
-            "ollama_ner": ollama_status,
-            "ollama_ner_detail": ner_detail,
-            "ollama_vision": vision_status,
-        },
-    }
+
+    # Minimal public response (for Docker healthcheck / load balancer)
+    response = {"status": overall}
+
+    # Only expose component details to authenticated admins
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.startswith("Bearer "):
+        from .security import decode_access_token
+        payload = decode_access_token(auth_header[7:])
+        if payload and payload.get("role") == "admin":
+            ollama_status = "unknown"
+            try:
+                from .services.anonymization_service import AnonymizationService
+                ollama_ok = await AnonymizationService._check_ollama()
+                ollama_status = "connected" if ollama_ok else "unavailable"
+            except Exception:
+                ollama_status = "error"
+
+            vision_status = {}
+            try:
+                from .services.image_analysis_service import ImageAnalysisService
+                vision_status = await ImageAnalysisService.check_vision_model_available()
+            except Exception:
+                vision_status = {"vision_available": False}
+
+            response["service"] = settings.app_name
+            response["components"] = {
+                "redis": "connected" if redis_ok else "disconnected",
+                "ollama_ner": ollama_status,
+                "ollama_vision": vision_status,
+            }
+
+    return response

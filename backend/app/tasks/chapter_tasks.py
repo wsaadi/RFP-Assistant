@@ -80,11 +80,12 @@ async def _run_chapter_generation(
 
             # Configure NER provider from AIConfig
             if config:
+                from ..security import decrypt_api_key
                 _n_key = ""
                 if config.ner_provider == "mistral":
-                    _n_key = config.mistral_api_key_encrypted or ""
+                    _n_key = decrypt_api_key(config.mistral_api_key_encrypted or "")
                 elif config.ner_provider == "scaleway":
-                    _n_key = config.scaleway_api_key_encrypted or ""
+                    _n_key = decrypt_api_key(config.scaleway_api_key_encrypted or "")
                 AnonymizationService.configure(ProviderConfig(
                     provider=config.ner_provider or "ollama",
                     base_url=config.ollama_base_url if (config.ner_provider or "ollama") == "ollama" else "",
