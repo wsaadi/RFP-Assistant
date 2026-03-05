@@ -63,6 +63,11 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           <button mat-raised-button color="accent" [routerLink]="['/project', projectId, 'preview']">
             <mat-icon>visibility</mat-icon> Aperçu
           </button>
+          <button mat-raised-button color="primary" (click)="exportSoutenance()" [disabled]="exportingSoutenance" matTooltip="Generer PowerPoint + script de soutenance">
+            <mat-spinner *ngIf="exportingSoutenance" diameter="18"></mat-spinner>
+            <mat-icon *ngIf="!exportingSoutenance">co_present</mat-icon>
+            {{ exportingSoutenance ? 'Generation...' : 'Soutenance' }}
+          </button>
         </div>
       </div>
 
@@ -96,6 +101,24 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
           <span class="gen-pct">{{ backupProgress.progress }}%</span>
         </div>
         <p class="gen-message">{{ backupProgress.message }}</p>
+      </mat-card>
+
+      <!-- Soutenance progress -->
+      <mat-card *ngIf="soutenanceProgress" class="gen-progress-card soutenance-progress-card">
+        <div class="gen-progress-header">
+          <mat-spinner diameter="20" class="spin-icon"></mat-spinner>
+          <h3>Preparation de la soutenance en cours...</h3>
+          <span style="flex:1"></span>
+          <button mat-icon-button color="warn" (click)="cancelSoutenance()" matTooltip="Annuler">
+            <mat-icon>close</mat-icon>
+          </button>
+        </div>
+        <mat-progress-bar mode="determinate" [value]="soutenanceProgress.progress"></mat-progress-bar>
+        <div class="gen-progress-details">
+          <span class="gen-step">{{ soutenanceProgress.step }}</span>
+          <span class="gen-pct">{{ soutenanceProgress.progress }}%</span>
+        </div>
+        <p class="gen-message">{{ soutenanceProgress.message }}</p>
       </mat-card>
 
       <!-- Quick stats -->
@@ -1354,6 +1377,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .backup-progress-card { border-left-color: #00695c; }
     .backup-progress-card .gen-progress-header h3 { color: #00695c; }
     .backup-progress-card .spin-icon { color: #00695c; }
+    .soutenance-progress-card { border-left-color: #e65100; }
+    .soutenance-progress-card .gen-progress-header h3 { color: #e65100; }
+    .soutenance-progress-card .spin-icon { color: #e65100; }
     .prefill-step { color: #7b1fa2 !important; }
     .prefill-progress-card .spin-icon { color: #7b1fa2; }
     @keyframes spin { 100% { transform: rotate(360deg); } }
@@ -1649,6 +1675,16 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         }
       },
     });
+    // Resume soutenance polling if already running
+    this.api.getSoutenanceStatus(this.projectId).subscribe({
+      next: (status) => {
+        if (status.status === 'running') {
+          this.exportingSoutenance = true;
+          this.soutenanceProgress = status;
+          this.startSoutenancePolling();
+        }
+      },
+    });
   }
 
   ngOnDestroy(): void {
@@ -1659,6 +1695,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.stopFillPolling();
     this.stopBackupPolling();
     this.stopWordPolling();
+    this.stopSoutenancePolling();
     // Stop all per-chapter AI polls
     for (const sub of Object.values(this.aiPollSubs)) {
       sub.unsubscribe();
@@ -2900,6 +2937,64 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   private stopBackupPolling(): void {
     this.backupPollSub?.unsubscribe();
     this.backupPollSub = null;
+  }
+
+  // ── Soutenance ──
+  exportingSoutenance = false;
+  soutenanceProgress: { status: string; step: string; progress: number; message: string } | null = null;
+  private soutenancePollSub: Subscription | null = null;
+
+  exportSoutenance(): void {
+    this.exportingSoutenance = true;
+    this.soutenanceProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de la preparation de soutenance...' };
+    this.api.exportSoutenance(this.projectId).subscribe({
+      next: () => {
+        this.startSoutenancePolling();
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur generation soutenance', 'OK', { duration: 5000 });
+        this.exportingSoutenance = false;
+        this.soutenanceProgress = null;
+      },
+    });
+  }
+
+  cancelSoutenance(): void {
+    this.stopSoutenancePolling();
+    this.api.cancelSoutenance(this.projectId).subscribe();
+    this.exportingSoutenance = false;
+    this.soutenanceProgress = null;
+    this.snackBar.open('Generation soutenance annulee', 'OK', { duration: 3000 });
+  }
+
+  private startSoutenancePolling(): void {
+    this.stopSoutenancePolling();
+    this.soutenancePollSub = timer(500, 2000).pipe(
+      switchMap(() => this.api.getSoutenanceStatus(this.projectId))
+    ).subscribe({
+      next: (status) => {
+        if (status.status === 'completed') {
+          this.stopSoutenancePolling();
+          this.exportingSoutenance = false;
+          this.soutenanceProgress = null;
+          this.snackBar.open('Soutenance generee ! Redirection...', 'OK', { duration: 3000 });
+          this.router.navigate(['/project', this.projectId, 'soutenance']);
+        } else if (status.status === 'error') {
+          this.stopSoutenancePolling();
+          this.exportingSoutenance = false;
+          this.snackBar.open(status.message || 'Erreur generation soutenance', 'OK', { duration: 5000 });
+          this.soutenanceProgress = null;
+          this.api.clearSoutenanceProgress(this.projectId).subscribe();
+        } else if (status.status === 'running') {
+          this.soutenanceProgress = status;
+        }
+      },
+    });
+  }
+
+  private stopSoutenancePolling(): void {
+    this.soutenancePollSub?.unsubscribe();
+    this.soutenancePollSub = null;
   }
 
   formatSize(bytes: number): string {

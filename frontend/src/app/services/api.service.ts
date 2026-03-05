@@ -14,6 +14,7 @@ import {
   UserInfo, UserCreate, UserUpdate,
   FieldsToComplete,
   ImageAnalysisStatus,
+  SoutenanceScript,
 } from '../models/report.model';
 
 @Injectable({ providedIn: 'root' })
@@ -531,6 +532,31 @@ export class ApiService {
 
   documentQA(projectId: string, question: string): Observable<{ answer: string; sources: { document_name: string; category: string; category_label: string; page_number: number; score: number; excerpt: string }[] }> {
     return this.http.post<any>(`${this.baseUrl}/export/${projectId}/document-qa`, { question });
+  }
+
+  // ── Soutenance ──
+  exportSoutenance(projectId: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/soutenance`, {});
+  }
+
+  getSoutenanceStatus(projectId: string): Observable<{ status: string; step: string; progress: number; message: string }> {
+    return this.http.get<any>(`${this.baseUrl}/export/${projectId}/soutenance-status`);
+  }
+
+  downloadSoutenancePptx(projectId: string): Observable<Blob> {
+    return this.http.get(`${this.baseUrl}/export/${projectId}/soutenance-download-pptx`, { responseType: 'blob' });
+  }
+
+  getSoutenanceScript(projectId: string): Observable<SoutenanceScript> {
+    return this.http.get<SoutenanceScript>(`${this.baseUrl}/export/${projectId}/soutenance-download-script`);
+  }
+
+  cancelSoutenance(projectId: string): Observable<any> {
+    return this.http.post(`${this.baseUrl}/export/${projectId}/soutenance-cancel`, {});
+  }
+
+  clearSoutenanceProgress(projectId: string): Observable<any> {
+    return this.http.delete(`${this.baseUrl}/export/${projectId}/soutenance-progress`);
   }
 
   // ── Admin ──
