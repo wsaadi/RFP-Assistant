@@ -1,5 +1,8 @@
 """Configuration settings for the application."""
+import secrets
+import sys
 from pydantic_settings import BaseSettings
+from pydantic import field_validator
 from typing import Optional
 
 
@@ -63,8 +66,50 @@ class Settings(BaseSettings):
     # Rate limiting
     rate_limit: str = "60/minute"
 
+    # Security: login brute-force protection
+    login_rate_limit: str = "5/minute"
+    login_lockout_attempts: int = 10
+    login_lockout_minutes: int = 15
+
+    # Security: minimum password strength
+    min_password_length: int = 10
+
     class Config:
         env_file = ".env"
+
+    @field_validator("secret_key")
+    @classmethod
+    def validate_secret_key(cls, v: str) -> str:
+        """Reject the placeholder secret key in non-test environments."""
+        dangerous_defaults = {
+            "change-this-to-a-very-long-random-secret-key-in-production",
+            "changeme",
+            "secret",
+        }
+        if v.lower() in dangerous_defaults:
+            # Allow in tests; block in production
+            if "pytest" not in sys.modules:
+                print(
+                    "\n*** SECURITY WARNING ***\n"
+                    "SECRET_KEY is still set to the default placeholder.\n"
+                    "Generate a strong key: python -c \"import secrets; print(secrets.token_urlsafe(64))\"\n"
+                    "Set it in your .env file before deploying.\n"
+                )
+        return v
+
+    @field_validator("admin_password")
+    @classmethod
+    def validate_admin_password(cls, v: str) -> str:
+        """Warn if admin password is weak."""
+        weak = {"admin123", "admin", "password", "123456", "changeme"}
+        if v.lower() in weak:
+            if "pytest" not in sys.modules:
+                print(
+                    "\n*** SECURITY WARNING ***\n"
+                    "ADMIN_PASSWORD is set to a weak default.\n"
+                    "Set a strong password (12+ chars, mixed case, numbers, symbols) in .env\n"
+                )
+        return v
 
 
 settings = Settings()

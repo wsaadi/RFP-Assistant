@@ -257,8 +257,10 @@ class MistralAIService:
     @classmethod
     def from_config(cls, config: AIConfig, decrypted_key: str = "") -> "MistralAIService":
         """Create from DB config. Prefer using create_ai_service() factory instead."""
+        from ..security import decrypt_api_key
+        api_key = decrypted_key or decrypt_api_key(config.mistral_api_key_encrypted or "")
         return cls(
-            api_key=decrypted_key or config.mistral_api_key_encrypted or "",
+            api_key=api_key,
             model=config.model_name,
             temperature=config.temperature,
             max_tokens=config.max_tokens,
@@ -1693,6 +1695,8 @@ def create_ai_service(config: AIConfig) -> MistralAIService:
     Returns a MistralAIService (Mistral API) or OllamaAIService (local Ollama).
     Both expose the same interface (OllamaAIService inherits MistralAIService).
     """
+    from ..security import decrypt_api_key
+
     provider = getattr(config, "provider", "mistral") or "mistral"
     if provider == "ollama":
         base_url = getattr(config, "ollama_base_url", None) or "http://host.docker.internal:11434"
@@ -1703,9 +1707,10 @@ def create_ai_service(config: AIConfig) -> MistralAIService:
             temperature=config.temperature,
             max_tokens=config.max_tokens,
         )
-    # Default: Mistral
+    # Default: Mistral — decrypt API key from storage
+    api_key = decrypt_api_key(config.mistral_api_key_encrypted or "")
     return MistralAIService(
-        api_key=config.mistral_api_key_encrypted or "",
+        api_key=api_key,
         model=config.model_name,
         temperature=config.temperature,
         max_tokens=config.max_tokens,

@@ -33,6 +33,24 @@ router = APIRouter(prefix="/documents", tags=["Documents"])
 ALLOWED_EXTENSIONS = {"pdf", "docx", "doc", "xlsx", "xls", "pptx"}
 MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
 
+# Magic bytes for file type validation (prevents extension spoofing)
+MAGIC_BYTES = {
+    "pdf": [b"%PDF"],
+    "docx": [b"PK\x03\x04"],  # ZIP-based format
+    "doc": [b"\xd0\xcf\x11\xe0"],  # OLE2 compound document
+    "xlsx": [b"PK\x03\x04"],  # ZIP-based format
+    "xls": [b"\xd0\xcf\x11\xe0"],  # OLE2 compound document
+    "pptx": [b"PK\x03\x04"],  # ZIP-based format
+}
+
+
+def _validate_magic_bytes(content: bytes, extension: str) -> bool:
+    """Validate file content matches expected magic bytes for the extension."""
+    expected = MAGIC_BYTES.get(extension, [])
+    if not expected:
+        return True
+    return any(content[:len(magic)] == magic for magic in expected)
+
 
 @router.post("/upload/{project_id}", response_model=DocumentOut)
 async def upload_document(
@@ -74,6 +92,13 @@ async def upload_document(
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
         raise HTTPException(status_code=400, detail="Fichier trop volumineux (max 50MB)")
+
+    # Validate file content matches extension (magic bytes check)
+    if not _validate_magic_bytes(content, ext):
+        raise HTTPException(
+            status_code=400,
+            detail="Le contenu du fichier ne correspond pas à son extension. Fichier potentiellement corrompu ou falsifié.",
+        )
 
     # Compute content hash for duplicate detection
     content_hash = hashlib.sha256(content).hexdigest()
@@ -357,10 +382,16 @@ async def get_image_file(
 
     result = await db.execute(select(DocumentImage).where(DocumentImage.id == image_id))
     image = result.scalar_one_or_none()
-    if not image or not os.path.exists(image.file_path):
+    if not image or not image.file_path or not os.path.exists(image.file_path):
         raise HTTPException(status_code=404, detail="Image non trouvée")
 
-    return FileResponse(image.file_path)
+    # Path traversal protection: ensure file is within images directory
+    real_path = os.path.realpath(image.file_path)
+    allowed_dirs = [os.path.realpath(settings.images_dir), os.path.realpath(settings.upload_dir)]
+    if not any(real_path.startswith(d) for d in allowed_dirs):
+        raise HTTPException(status_code=403, detail="Accès non autorisé")
+
+    return FileResponse(real_path)
 
 
 @router.put("/image/{image_id}", response_model=DocumentImageOut)

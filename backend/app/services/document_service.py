@@ -449,11 +449,25 @@ class DocumentProcessor:
 
         Returns the file path.
         """
-        project_dir = os.path.join(settings.upload_dir, project_id)
+        # Sanitize project_id and filename to prevent path traversal
+        safe_project_id = os.path.basename(project_id)
+        safe_filename = os.path.basename(filename)
+        # Remove any remaining path separators or null bytes
+        safe_filename = safe_filename.replace("\x00", "").replace("/", "").replace("\\", "")
+        if not safe_filename:
+            safe_filename = "upload"
+
+        project_dir = os.path.join(settings.upload_dir, safe_project_id)
         os.makedirs(project_dir, exist_ok=True)
 
-        stored_name = f"{uuid.uuid4().hex}_{filename}"
+        stored_name = f"{uuid.uuid4().hex}_{safe_filename}"
         filepath = os.path.join(project_dir, stored_name)
+
+        # Final safety check: ensure path stays within upload_dir
+        real_upload = os.path.realpath(settings.upload_dir)
+        real_filepath = os.path.realpath(filepath)
+        if not real_filepath.startswith(real_upload):
+            raise ValueError("Path traversal detected")
 
         with open(filepath, "wb") as f:
             f.write(file_content)

@@ -16,11 +16,18 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt \
     && rm -rf /root/.cache/pip
 
-# Create data directories
-RUN mkdir -p /app/data/uploads /app/data/exports /app/data/images /app/data/chroma
+# Create non-root user
+RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuser
+
+# Create data directories and set ownership
+RUN mkdir -p /app/data/uploads /app/data/exports /app/data/images /app/data/chroma \
+    && chown -R appuser:appuser /app/data
 
 # Copy application code
 COPY app/ ./app/
+
+# Switch to non-root user
+USER appuser
 
 # Expose port
 EXPOSE 8000

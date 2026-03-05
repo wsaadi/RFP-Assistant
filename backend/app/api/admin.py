@@ -1,11 +1,12 @@
 """Admin API routes for user management and settings."""
+import logging
 import uuid
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func
 
 from ..database import get_db
-from ..security import hash_password
+from ..security import hash_password, encrypt_api_key
 from ..models.user import User, UserRole
 from ..models.workspace import Workspace, WorkspaceMember
 from ..models.project import AIConfig
@@ -14,6 +15,7 @@ from ..schemas.project import AIConfigUpdate, AIConfigOut
 from .deps import get_admin_user
 
 router = APIRouter(prefix="/admin", tags=["Administration"])
+audit_log = logging.getLogger("security.audit")
 
 
 @router.get("/users", response_model=list[UserOut])
@@ -56,6 +58,10 @@ async def create_user(
             detail="Email ou nom d'utilisateur déjà utilisé",
         )
 
+    # Validate password strength
+    from .auth import validate_password_strength
+    validate_password_strength(request.password)
+
     user = User(
         email=request.email,
         username=request.username,
@@ -66,6 +72,8 @@ async def create_user(
     db.add(user)
     await db.commit()
     await db.refresh(user)
+
+    audit_log.info("User created: email=%s role=%s by admin=%s", user.email, user.role.value, admin.email)
 
     return UserOut(
         id=str(user.id),
@@ -99,8 +107,11 @@ async def update_user(
         user.full_name = request.full_name
     if request.is_active is not None:
         user.is_active = request.is_active
+        if not request.is_active:
+            audit_log.warning("User deactivated: email=%s by admin=%s", user.email, admin.email)
     if request.role is not None and request.role in [r.value for r in UserRole]:
         user.role = UserRole(request.role)
+        audit_log.info("User role changed: email=%s new_role=%s by admin=%s", user.email, request.role, admin.email)
 
     await db.commit()
     await db.refresh(user)
@@ -134,6 +145,7 @@ async def delete_user(
     if not user:
         raise HTTPException(status_code=404, detail="Utilisateur non trouvé")
 
+    audit_log.warning("User deleted: email=%s (id=%s) by admin=%s", user.email, user_id, admin.email)
     await db.delete(user)
     await db.commit()
 
@@ -155,8 +167,9 @@ async def update_ai_config(
         config.provider = request.provider
         # Only update API keys when a non-empty value is provided,
         # so reloading the settings page doesn't wipe stored keys.
+        # Keys are encrypted before storage.
         if request.mistral_api_key:
-            config.mistral_api_key_encrypted = request.mistral_api_key
+            config.mistral_api_key_encrypted = encrypt_api_key(request.mistral_api_key)
         config.model_name = request.model_name
         config.temperature = request.temperature
         config.max_tokens = request.max_tokens
@@ -167,13 +180,13 @@ async def update_ai_config(
         config.vision_provider = request.vision_provider
         config.vision_model = request.vision_model
         if request.scaleway_api_key:
-            config.scaleway_api_key_encrypted = request.scaleway_api_key
+            config.scaleway_api_key_encrypted = encrypt_api_key(request.scaleway_api_key)
         config.scaleway_project_id = request.scaleway_project_id
     else:
         config = AIConfig(
             workspace_id=workspace_id,
             provider=request.provider,
-            mistral_api_key_encrypted=request.mistral_api_key,
+            mistral_api_key_encrypted=encrypt_api_key(request.mistral_api_key) if request.mistral_api_key else "",
             model_name=request.model_name,
             temperature=request.temperature,
             max_tokens=request.max_tokens,
@@ -183,13 +196,15 @@ async def update_ai_config(
             ner_model=request.ner_model,
             vision_provider=request.vision_provider,
             vision_model=request.vision_model,
-            scaleway_api_key_encrypted=request.scaleway_api_key,
+            scaleway_api_key_encrypted=encrypt_api_key(request.scaleway_api_key) if request.scaleway_api_key else "",
             scaleway_project_id=request.scaleway_project_id,
         )
         db.add(config)
 
     await db.commit()
     await db.refresh(config)
+
+    audit_log.info("AI config updated: workspace=%s provider=%s by admin=%s", workspace_id, request.provider, admin.email)
 
     return _config_to_out(config)
 
