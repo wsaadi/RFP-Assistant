@@ -174,8 +174,8 @@ class VectorService:
     @classmethod
     def delete_document_chunks(cls, project_id: str, document_id: str):
         """Delete all chunks for a specific document from the vector DB."""
-        collection = cls.get_collection(project_id)
         try:
+            collection = cls.get_collection(project_id)
             # Get all chunk IDs for this document
             results = collection.get(
                 where={"document_id": document_id},
