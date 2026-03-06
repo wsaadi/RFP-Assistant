@@ -218,6 +218,13 @@ class MetricsCollector:
         if report is None:
             report = self.generate_report()
 
+        if "error" in report or "summary" not in report:
+            return {
+                "status": "FAIL",
+                "message": report.get("error", "No data collected — is the server running?"),
+                "pass": False,
+            }
+
         s = report["summary"]
         lat = report["latency"]
         j = report["journeys"]

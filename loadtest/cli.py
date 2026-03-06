@@ -126,15 +126,31 @@ def main():
         print("  Generating test fixtures...")
         generate_fixtures()
 
+    base_url = args.url.rstrip("/")
+
     print("\n" + "=" * 72)
     print("  RFP ASSISTANT - LOAD TEST")
     print("=" * 72)
-    print(f"  Target:         {args.url}")
+    print(f"  Target:         {base_url}")
     print(f"  Concurrent users: {args.users}")
     print(f"  Think time:     {args.think_time[0]}s - {args.think_time[1]}s")
     print(f"  Stagger delay:  {args.stagger}s")
     print(f"  Admin:          {args.admin_email}")
     print("=" * 72)
+
+    # Pre-flight connectivity check
+    import httpx
+    print(f"\n  Checking connectivity to {base_url} ...")
+    try:
+        resp = httpx.get(f"{base_url}/api/health", timeout=10)
+        print(f"  Health check: HTTP {resp.status_code}")
+    except httpx.ConnectError:
+        print(f"\n  ERROR: Cannot connect to {base_url}")
+        print(f"  Make sure the backend is running (docker compose up, or uvicorn).")
+        print(f"  If running inside Docker, use the host-accessible URL (e.g. http://localhost:8000).\n")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n  WARNING: Health check failed ({e}), proceeding anyway...\n")
 
     collector = MetricsCollector()
 
@@ -142,7 +158,7 @@ def main():
         asyncio.run(
             run_concurrent_users(
                 num_users=args.users,
-                base_url=args.url.rstrip("/"),
+                base_url=base_url,
                 admin_email=args.admin_email,
                 admin_password=args.admin_password,
                 collector=collector,
