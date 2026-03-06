@@ -1,4 +1,5 @@
 """Vector database service using ChromaDB for document indexing and search."""
+import logging
 import uuid
 from typing import List, Optional, Dict
 
@@ -7,6 +8,8 @@ from chromadb.api.types import Documents, EmbeddingFunction, Embeddings
 from sentence_transformers import SentenceTransformer
 
 from ..config import settings
+
+logger = logging.getLogger(__name__)
 
 # Max sequence length supported by multilingual-e5-base
 _MODEL_MAX_SEQ_LENGTH = 512
@@ -35,9 +38,14 @@ class VectorService:
     def get_client(cls) -> chromadb.ClientAPI:
         """Get or create ChromaDB client (singleton)."""
         if cls._client is None:
-            cls._client = chromadb.PersistentClient(
-                path=settings.chroma_persist_dir,
-            )
+            try:
+                cls._client = chromadb.PersistentClient(
+                    path=settings.chroma_persist_dir,
+                )
+            except Exception as exc:
+                cls._client = None
+                logger.error("Failed to initialise ChromaDB client: %s", exc)
+                raise
         return cls._client
 
     @classmethod

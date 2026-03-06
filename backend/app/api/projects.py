@@ -4191,7 +4191,11 @@ async def get_content_reuse_stats(
         return scores
 
     loop = asyncio.get_event_loop()
-    chunk_scores = await loop.run_in_executor(None, _compute_semantic_scores)
+    try:
+        chunk_scores = await loop.run_in_executor(None, _compute_semantic_scores)
+    except Exception as exc:
+        logger.warning("ChromaDB unavailable for reuse stats (possibly readonly): %s", exc)
+        chunk_scores = [0.0] * len(all_chunks)
 
     # ------------------------------------------------------------------
     # 5. Convert similarity scores to reuse percentages per chapter
