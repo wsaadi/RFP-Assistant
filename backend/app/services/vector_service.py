@@ -1,6 +1,8 @@
 """Vector database service using ChromaDB for document indexing and search."""
 import logging
+import shutil
 import uuid
+from pathlib import Path
 from typing import List, Optional, Dict
 
 import chromadb
@@ -33,20 +35,56 @@ class VectorService:
 
     _client = None
     _embedding_fn = None
+    needs_reindex: bool = False
 
     @classmethod
     def get_client(cls) -> chromadb.ClientAPI:
-        """Get or create ChromaDB client (singleton)."""
-        if cls._client is None:
-            try:
-                cls._client = chromadb.PersistentClient(
-                    path=settings.chroma_persist_dir,
-                )
-            except Exception as exc:
-                cls._client = None
-                logger.error("Failed to initialise ChromaDB client: %s", exc)
-                raise
-        return cls._client
+        """Get or create ChromaDB client (singleton).
+
+        If the persisted data is corrupt or unreadable (e.g. readonly SQLite,
+        broken Rust bindings), the directory is wiped and a fresh client is
+        created.  Indexed data will need to be rebuilt afterwards — the
+        ``needs_reindex`` flag is set so callers can trigger that.
+        """
+        if cls._client is not None:
+            return cls._client
+
+        chroma_dir = Path(settings.chroma_persist_dir)
+
+        # --- First attempt ---------------------------------------------------
+        try:
+            cls._client = chromadb.PersistentClient(path=str(chroma_dir))
+            cls.needs_reindex = False
+            return cls._client
+        except Exception as first_err:
+            logger.warning(
+                "ChromaDB init failed (%s), attempting recovery…", first_err,
+            )
+
+        # --- Recovery: move corrupt data aside and retry ----------------------
+        backup = chroma_dir.with_name(f"{chroma_dir.name}_corrupt")
+        try:
+            if backup.exists():
+                shutil.rmtree(backup)
+            if chroma_dir.exists():
+                chroma_dir.rename(backup)
+                logger.info("Moved corrupt ChromaDB data to %s", backup)
+            chroma_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as mv_err:
+            logger.error("Could not move corrupt ChromaDB dir: %s", mv_err)
+
+        # --- Second attempt with clean directory ------------------------------
+        try:
+            cls._client = chromadb.PersistentClient(path=str(chroma_dir))
+            cls.needs_reindex = True
+            logger.warning(
+                "ChromaDB recovered with empty database — documents need re-indexing",
+            )
+            return cls._client
+        except Exception as second_err:
+            cls._client = None
+            logger.error("ChromaDB init failed even after reset: %s", second_err)
+            raise
 
     @classmethod
     def get_embedding_function(cls):
@@ -115,6 +153,15 @@ class VectorService:
             )
 
         return ids
+
+    @classmethod
+    def collection_count(cls, project_id: str) -> int:
+        """Return the number of embeddings in a project's collection."""
+        try:
+            collection = cls.get_collection(project_id)
+            return collection.count()
+        except Exception:
+            return 0
 
     @classmethod
     def search(
