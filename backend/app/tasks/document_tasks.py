@@ -557,9 +557,6 @@ def analyze_images_task(self, project_id: str, image_ids: list[str]):
             logger.error("[project:%s] Failed to finalize after timeout", project_id, exc_info=True)
 
 
-# Maximum wall-clock time allowed for a single image (analysis + retries + model load).
-_PER_IMAGE_TIMEOUT = 300  # 5 minutes
-
 
 async def _analyze_images_async(project_id: str, image_ids: list[str]):
     """Run Vision AI on the given image IDs, saving each result to DB immediately."""
@@ -659,23 +656,11 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
             status = ImageAnalysisStatus.COMPLETED.value
 
             try:
-                analysis = await asyncio.wait_for(
-                    ImageAnalysisService.analyze_image(
-                        file_path=img_meta["file_path"],
-                        page_context=img_meta.get("context", ""),
-                        section_title=img_meta.get("section_title", ""),
-                    ),
-                    timeout=_PER_IMAGE_TIMEOUT,
+                analysis = await ImageAnalysisService.analyze_image(
+                    file_path=img_meta["file_path"],
+                    page_context=img_meta.get("context", ""),
+                    section_title=img_meta.get("section_title", ""),
                 )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "[project:%s] Image %s timed out after %ds",
-                    project_id, db_id, _PER_IMAGE_TIMEOUT,
-                )
-                analysis = ImageAnalysisService._empty_analysis(
-                    f"Timeout après {_PER_IMAGE_TIMEOUT}s"
-                )
-                status = ImageAnalysisStatus.FAILED.value
             except Exception as e:
                 logger.error(
                     "[project:%s] Image %s analysis error: %s",
