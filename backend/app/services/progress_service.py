@@ -23,7 +23,18 @@ from redis.exceptions import ConnectionError as RedisConnectionError, TimeoutErr
 
 logger = logging.getLogger(__name__)
 
-_REDIS_URL = os.environ.get("REDIS_URL", "redis://redis:6379/0")
+
+def _build_redis_url() -> str:
+    explicit = os.environ.get("REDIS_URL")
+    if explicit:
+        return explicit
+    password = os.environ.get("REDIS_PASSWORD", "")
+    if password:
+        return f"redis://:{password}@redis:6379/0"
+    return "redis://redis:6379/0"
+
+
+_REDIS_URL = _build_redis_url()
 _redis: Optional[redis.Redis] = None
 
 # TTL for progress keys (1 hour — enough for any task + polling)
