@@ -4152,6 +4152,52 @@ async def get_content_reuse_stats(
     # ------------------------------------------------------------------
     project_str = str(project_id)
 
+    # --- Auto-reindex if ChromaDB collection is empty but DB has chunks ---
+    try:
+        col_count = await asyncio.to_thread(
+            VectorService.collection_count, project_str,
+        )
+    except Exception:
+        col_count = -1  # ChromaDB unreachable — skip reindex, fall back to zeros
+
+    if col_count == 0:
+        # Collection exists but is empty — rebuild from DB chunks
+        all_doc_chunks_result = await db.execute(
+            select(DocumentChunk)
+            .join(Document, DocumentChunk.document_id == Document.id)
+            .where(Document.project_id == project_id)
+            .where(Document.processing_status == ProcessingStatus.COMPLETED)
+        )
+        db_chunks = all_doc_chunks_result.scalars().all()
+
+        if db_chunks:
+            vector_chunks = []
+            for chunk in db_chunks:
+                meta = chunk.metadata_json or {}
+                vector_chunks.append({
+                    "id": str(chunk.id),
+                    "content": chunk.content or "",
+                    "document_id": str(chunk.document_id),
+                    "document_name": meta.get("document_name", ""),
+                    "category": meta.get("category", ""),
+                    "page_number": chunk.page_number or 0,
+                    "section_title": chunk.section_title or "",
+                    "chunk_index": chunk.chunk_index or 0,
+                })
+
+            try:
+                await asyncio.to_thread(
+                    VectorService.index_chunks, project_str, vector_chunks,
+                )
+                logger.info(
+                    "[reuse-stats] Re-indexed %d chunks for project %s",
+                    len(vector_chunks), project_str,
+                )
+            except Exception as idx_err:
+                logger.warning("[reuse-stats] Re-indexing failed: %s", idx_err)
+
+    loop = asyncio.get_event_loop()
+
     def _compute_semantic_scores() -> list[float]:
         """Run embedding + ChromaDB queries (CPU-bound, run in executor)."""
         collection = VectorService.get_collection(project_str)
