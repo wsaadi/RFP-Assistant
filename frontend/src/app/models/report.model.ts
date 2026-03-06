@@ -480,11 +480,19 @@ export interface SoutenanceScript {
 }
 
 // ── Preview ──
+export interface PreviewDocumentGroup {
+  id: string | null;
+  title: string;
+  description: string;
+  chapters: PreviewChapter[];
+}
+
 export interface DocumentPreview {
   project_name: string;
   client_name: string;
   rfp_reference: string;
   chapters: PreviewChapter[];
+  documents?: PreviewDocumentGroup[];
 }
 
 export interface PreviewChapter {

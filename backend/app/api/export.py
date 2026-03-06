@@ -14,6 +14,7 @@ from ..models.user import User
 from ..models.project import RFPProject, AIConfig
 from ..models.chapter import Chapter
 from ..models.document import Document, DocumentImage
+from ..models.response_document import ResponseDocument
 from ..services.word_service import RFPWordService
 from ..services.export_service import ExportService
 from ..services.anonymization_service import AnonymizationService
@@ -90,7 +91,7 @@ async def download_word(
     project_id: uuid.UUID,
     current_user: User = Depends(get_current_user),
 ):
-    """Download the completed Word document."""
+    """Download the completed Word document (or ZIP if multiple documents)."""
     pid = str(project_id)
     result = get_export_result("word", pid)
     if not result:
@@ -103,9 +104,14 @@ async def download_word(
 
     delete_export_result("word", pid)
 
+    if filename.endswith(".zip"):
+        media_type = "application/zip"
+    else:
+        media_type = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+
     return StreamingResponse(
         file_buffer,
-        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        media_type=media_type,
         headers={"Content-Disposition": f"attachment; filename={filename}"},
     )
 
@@ -134,6 +140,14 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
                 .order_by(Chapter.order)
             )
             all_chapters = chapters_result.scalars().all()
+
+            # Fetch response documents
+            rd_result = await db.execute(
+                select(ResponseDocument)
+                .where(ResponseDocument.project_id == project_id)
+                .order_by(ResponseDocument.order)
+            )
+            response_docs = rd_result.scalars().all()
 
             _update("building", 25, "Construction du document...")
 
@@ -194,36 +208,115 @@ async def _run_word_export(project_id: uuid.UUID, filename: str):
                     ],
                 }
 
-            chapters_data = [build_chapter_data(c) for c in root_chapters]
+            # Collect metadata needed for generation (before session closes)
+            project_name = project.name
+            client_name = project.client_name
+            rfp_reference = project.rfp_reference
+            company_name = getattr(project, 'company_name', '') or ''
+
+            # Group chapters by response document if multiple docs exist
+            if len(response_docs) > 1:
+                doc_groups = []
+                for rd in response_docs:
+                    rd_chapters = [c for c in root_chapters if c.response_document_id == rd.id]
+                    if rd_chapters:
+                        doc_groups.append({
+                            "title": rd.title,
+                            "chapters": [build_chapter_data(c) for c in rd_chapters],
+                        })
+                # Orphan chapters (no response_document_id)
+                orphan_chapters = [c for c in root_chapters if not c.response_document_id]
+                if orphan_chapters:
+                    doc_groups.append({
+                        "title": "Autres sections",
+                        "chapters": [build_chapter_data(c) for c in orphan_chapters],
+                    })
+            else:
+                doc_groups = None
+                chapters_data = [build_chapter_data(c) for c in root_chapters]
 
         _update("generating", 40, "Generation du document Word...")
 
-        def _generate_word():
-            import asyncio as _asyncio
-            loop = _asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(RFPWordService.generate_full_document(
-                    project_name=project.name,
-                    client_name=project.client_name,
-                    rfp_reference=project.rfp_reference,
-                    chapters=chapters_data,
-                    company_name=getattr(project, 'company_name', '') or '',
-                    image_lookup=image_lookup,
-                ))
-            finally:
-                loop.close()
+        if doc_groups and len(doc_groups) > 1:
+            # Multiple response documents → generate separate DOCX files in a ZIP
+            import io as _io
+            import zipfile as _zipfile
 
-        file_stream = await asyncio.to_thread(_generate_word)
+            def _generate_multi_word():
+                import asyncio as _asyncio
+                loop = _asyncio.new_event_loop()
+                try:
+                    results = []
+                    for idx, group in enumerate(doc_groups):
+                        doc_stream = loop.run_until_complete(
+                            RFPWordService.generate_full_document(
+                                project_name=group["title"],
+                                client_name=client_name,
+                                rfp_reference=rfp_reference,
+                                chapters=group["chapters"],
+                                company_name=company_name,
+                                image_lookup=image_lookup,
+                            )
+                        )
+                        safe_title = group["title"].replace(" ", "_").replace("/", "_").replace("\\", "_")
+                        doc_filename = f"{safe_title}.docx"
+                        results.append((doc_filename, doc_stream.getvalue()))
+                    return results
+                finally:
+                    loop.close()
 
-        _update("finalizing", 90, "Finalisation...")
+            doc_files = await asyncio.to_thread(_generate_multi_word)
 
-        word_bytes = file_stream.getvalue()
-        store_export_result("word", pid, word_bytes, filename)
+            _update("finalizing", 90, "Finalisation...")
 
-        set_progress(_NS_WORD, pid, {
-            "status": "completed", "step": "done", "progress": 100,
-            "message": f"Export Word termine ({len(word_bytes) // 1024} KB)",
-        })
+            # Package into a ZIP
+            zip_buffer = _io.BytesIO()
+            with _zipfile.ZipFile(zip_buffer, "w", _zipfile.ZIP_DEFLATED) as zf:
+                for doc_filename, doc_bytes in doc_files:
+                    zf.writestr(doc_filename, doc_bytes)
+            zip_buffer.seek(0)
+
+            zip_bytes = zip_buffer.getvalue()
+            zip_filename = filename.replace(".docx", ".zip")
+            store_export_result("word", pid, zip_bytes, zip_filename)
+
+            set_progress(_NS_WORD, pid, {
+                "status": "completed", "step": "done", "progress": 100,
+                "message": f"Export Word termine - {len(doc_files)} documents ({len(zip_bytes) // 1024} KB)",
+                "multi_document": True,
+                "document_count": len(doc_files),
+            })
+        else:
+            # Single document → generate a single DOCX as before
+            if doc_groups and len(doc_groups) == 1:
+                chapters_data = doc_groups[0]["chapters"]
+
+            def _generate_word():
+                import asyncio as _asyncio
+                loop = _asyncio.new_event_loop()
+                try:
+                    return loop.run_until_complete(RFPWordService.generate_full_document(
+                        project_name=project_name,
+                        client_name=client_name,
+                        rfp_reference=rfp_reference,
+                        chapters=chapters_data,
+                        company_name=company_name,
+                        image_lookup=image_lookup,
+                    ))
+                finally:
+                    loop.close()
+
+            file_stream = await asyncio.to_thread(_generate_word)
+
+            _update("finalizing", 90, "Finalisation...")
+
+            word_bytes = file_stream.getvalue()
+            store_export_result("word", pid, word_bytes, filename)
+
+            set_progress(_NS_WORD, pid, {
+                "status": "completed", "step": "done", "progress": 100,
+                "message": f"Export Word termine ({len(word_bytes) // 1024} KB)",
+            })
 
     except Exception as e:
         logger.exception("Word export failed for project %s", project_id)
@@ -473,6 +566,14 @@ async def preview_document(
 
     transform = anonymize if anonymized else deanonymize
 
+    # Fetch response documents to group chapters by deliverable
+    rd_result = await db.execute(
+        select(ResponseDocument)
+        .where(ResponseDocument.project_id == project_id)
+        .order_by(ResponseDocument.order)
+    )
+    response_docs = rd_result.scalars().all()
+
     children_map = {}
     root_chapters = []
     for c in all_chapters:
@@ -498,6 +599,38 @@ async def preview_document(
             ],
         }
 
+    # Group chapters by response_document_id
+    if len(response_docs) > 1:
+        rd_map = {rd.id: rd for rd in response_docs}
+        # Build groups: chapters belonging to each response document
+        doc_groups = []
+        for rd in response_docs:
+            rd_chapters = [c for c in root_chapters if c.response_document_id == rd.id]
+            if rd_chapters:
+                doc_groups.append({
+                    "id": str(rd.id),
+                    "title": rd.title,
+                    "description": rd.description or "",
+                    "chapters": [
+                        build_preview(c, 1, str(i+1))
+                        for i, c in enumerate(rd_chapters)
+                    ],
+                })
+        # Chapters without a response_document_id (orphans)
+        orphan_chapters = [c for c in root_chapters if not c.response_document_id]
+        if orphan_chapters:
+            doc_groups.append({
+                "id": None,
+                "title": "Autres sections",
+                "description": "",
+                "chapters": [
+                    build_preview(c, 1, str(i+1))
+                    for i, c in enumerate(orphan_chapters)
+                ],
+            })
+    else:
+        doc_groups = []
+
     preview = {
         "project_name": project.name,
         "client_name": project.client_name,
@@ -507,6 +640,7 @@ async def preview_document(
             build_preview(c, 1, str(i+1))
             for i, c in enumerate(root_chapters)
         ],
+        "documents": doc_groups,
     }
 
     return preview

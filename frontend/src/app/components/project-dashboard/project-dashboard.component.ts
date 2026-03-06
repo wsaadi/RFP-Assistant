@@ -2914,6 +2914,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     ).subscribe({
       next: (status) => {
         if (status.status === 'completed') {
+          const isMultiDoc = !!(status as any).multi_document;
           this.wordProgress = { status: 'running', step: 'downloading', progress: 100, message: 'Telechargement du fichier...' };
           this.stopWordPolling();
           this.api.downloadWord(this.projectId).subscribe({
@@ -2921,12 +2922,16 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
               const url = window.URL.createObjectURL(blob);
               const a = document.createElement('a');
               a.href = url;
-              a.download = `reponse_ao_${this.project?.rfp_reference || 'export'}.docx`;
+              const ext = isMultiDoc ? 'zip' : 'docx';
+              a.download = `reponse_ao_${this.project?.rfp_reference || 'export'}.${ext}`;
               a.click();
               window.URL.revokeObjectURL(url);
               this.exportingWord = false;
               this.wordProgress = null;
-              this.snackBar.open('Export Word telecharge', 'OK', { duration: 3000 });
+              const msg = isMultiDoc
+                ? `${(status as any).document_count || ''} documents Word telecharges (ZIP)`
+                : 'Export Word telecharge';
+              this.snackBar.open(msg, 'OK', { duration: 3000 });
               this.api.clearWordProgress(this.projectId).subscribe();
             },
             error: () => {

@@ -15,7 +15,7 @@ import { Subscription, timer } from 'rxjs';
 import { switchMap } from 'rxjs/operators';
 import { ApiService } from '../../services/api.service';
 import { renderMarkdown } from '../../services/markdown.service';
-import { DocumentPreview, PreviewChapter } from '../../models/report.model';
+import { DocumentPreview, PreviewChapter, PreviewDocumentGroup } from '../../models/report.model';
 
 interface ChatMessage {
   role: 'user' | 'assistant' | 'error';
@@ -62,45 +62,100 @@ interface ChatMessage {
           <span>Vue anonymisee — C'est ce que l'IA Mistral voit. Les donnees sensibles sont remplacees par des placeholders.</span>
         </div>
 
-        <div class="document-preview" [class.anon-mode]="viewMode === 'anonymized'">
-          <!-- Cover page -->
-          <div class="page cover-page">
-            <h1 class="doc-title">REPONSE A L'APPEL D'OFFRES</h1>
-            <h2 *ngIf="currentPreview.rfp_reference">Reference: {{ currentPreview.rfp_reference }}</h2>
-            <h2 class="project-name">{{ currentPreview.project_name }}</h2>
-            <div class="separator"></div>
-            <p *ngIf="currentPreview.client_name">Client: {{ currentPreview.client_name }}</p>
-            <p class="confidential">DOCUMENT CONFIDENTIEL</p>
-          </div>
+        <!-- Multi-document view -->
+        <ng-container *ngIf="hasMultipleDocuments; else singleDocView">
+          <ng-container *ngFor="let docGroup of currentPreview.documents; let docIdx = index">
+            <div class="document-preview" [class.anon-mode]="viewMode === 'anonymized'" [style.margin-bottom]="docIdx < currentPreview.documents!.length - 1 ? '32px' : '0'">
+              <!-- Document separator banner -->
+              <div class="doc-separator" *ngIf="currentPreview.documents!.length > 1">
+                <mat-icon>description</mat-icon>
+                <span class="doc-separator-label">Document {{ docIdx + 1 }} / {{ currentPreview.documents!.length }}</span>
+                <span class="doc-separator-title">{{ docGroup.title }}</span>
+              </div>
 
-          <!-- TOC -->
-          <div class="page toc-page">
-            <h2>SOMMAIRE</h2>
-            <div *ngFor="let ch of currentPreview.chapters" class="toc-entry" [class.toc-sub]="ch.level > 1">
-              <span>{{ ch.numbering }} {{ ch.title }}</span>
-              <ng-container *ngIf="ch.children?.length">
-                <div *ngFor="let sub of ch.children" class="toc-entry toc-sub">
-                  <span>{{ sub.numbering }} {{ sub.title }}</span>
+              <!-- Cover page -->
+              <div class="page cover-page">
+                <h1 class="doc-title">{{ docGroup.title }}</h1>
+                <h2 *ngIf="currentPreview.rfp_reference">Reference: {{ currentPreview.rfp_reference }}</h2>
+                <h2 class="project-name">{{ currentPreview.project_name }}</h2>
+                <div class="separator"></div>
+                <p *ngIf="currentPreview.client_name">Client: {{ currentPreview.client_name }}</p>
+                <p class="confidential">DOCUMENT CONFIDENTIEL</p>
+              </div>
+
+              <!-- TOC -->
+              <div class="page toc-page">
+                <h2>SOMMAIRE</h2>
+                <div *ngFor="let ch of docGroup.chapters" class="toc-entry" [class.toc-sub]="ch.level > 1">
+                  <span>{{ ch.numbering }} {{ ch.title }}</span>
+                  <ng-container *ngIf="ch.children?.length">
+                    <div *ngFor="let sub of ch.children" class="toc-entry toc-sub">
+                      <span>{{ sub.numbering }} {{ sub.title }}</span>
+                    </div>
+                  </ng-container>
+                </div>
+              </div>
+
+              <!-- Chapters -->
+              <ng-container *ngFor="let ch of docGroup.chapters">
+                <div class="page">
+                  <h2 class="chapter-title">{{ ch.numbering }} {{ ch.title }}</h2>
+                  <div class="chapter-content" *ngIf="ch.content" [innerHTML]="renderMarkdown(ch.content)"></div>
+                  <p *ngIf="!ch.content" class="empty-content">[Section a completer]</p>
+
+                  <ng-container *ngFor="let sub of ch.children">
+                    <h3 class="sub-title">{{ sub.numbering }} {{ sub.title }}</h3>
+                    <div class="chapter-content" *ngIf="sub.content" [innerHTML]="renderMarkdown(sub.content)"></div>
+                    <p *ngIf="!sub.content" class="empty-content">[Section a completer]</p>
+                  </ng-container>
                 </div>
               </ng-container>
             </div>
-          </div>
-
-          <!-- Chapters -->
-          <ng-container *ngFor="let ch of currentPreview.chapters">
-            <div class="page">
-              <h2 class="chapter-title">{{ ch.numbering }} {{ ch.title }}</h2>
-              <div class="chapter-content" *ngIf="ch.content" [innerHTML]="renderMarkdown(ch.content)"></div>
-              <p *ngIf="!ch.content" class="empty-content">[Section a completer]</p>
-
-              <ng-container *ngFor="let sub of ch.children">
-                <h3 class="sub-title">{{ sub.numbering }} {{ sub.title }}</h3>
-                <div class="chapter-content" *ngIf="sub.content" [innerHTML]="renderMarkdown(sub.content)"></div>
-                <p *ngIf="!sub.content" class="empty-content">[Section a completer]</p>
-              </ng-container>
-            </div>
           </ng-container>
-        </div>
+        </ng-container>
+
+        <!-- Single document view (original) -->
+        <ng-template #singleDocView>
+          <div class="document-preview" [class.anon-mode]="viewMode === 'anonymized'">
+            <!-- Cover page -->
+            <div class="page cover-page">
+              <h1 class="doc-title">REPONSE A L'APPEL D'OFFRES</h1>
+              <h2 *ngIf="currentPreview.rfp_reference">Reference: {{ currentPreview.rfp_reference }}</h2>
+              <h2 class="project-name">{{ currentPreview.project_name }}</h2>
+              <div class="separator"></div>
+              <p *ngIf="currentPreview.client_name">Client: {{ currentPreview.client_name }}</p>
+              <p class="confidential">DOCUMENT CONFIDENTIEL</p>
+            </div>
+
+            <!-- TOC -->
+            <div class="page toc-page">
+              <h2>SOMMAIRE</h2>
+              <div *ngFor="let ch of currentPreview.chapters" class="toc-entry" [class.toc-sub]="ch.level > 1">
+                <span>{{ ch.numbering }} {{ ch.title }}</span>
+                <ng-container *ngIf="ch.children?.length">
+                  <div *ngFor="let sub of ch.children" class="toc-entry toc-sub">
+                    <span>{{ sub.numbering }} {{ sub.title }}</span>
+                  </div>
+                </ng-container>
+              </div>
+            </div>
+
+            <!-- Chapters -->
+            <ng-container *ngFor="let ch of currentPreview.chapters">
+              <div class="page">
+                <h2 class="chapter-title">{{ ch.numbering }} {{ ch.title }}</h2>
+                <div class="chapter-content" *ngIf="ch.content" [innerHTML]="renderMarkdown(ch.content)"></div>
+                <p *ngIf="!ch.content" class="empty-content">[Section a completer]</p>
+
+                <ng-container *ngFor="let sub of ch.children">
+                  <h3 class="sub-title">{{ sub.numbering }} {{ sub.title }}</h3>
+                  <div class="chapter-content" *ngIf="sub.content" [innerHTML]="renderMarkdown(sub.content)"></div>
+                  <p *ngIf="!sub.content" class="empty-content">[Section a completer]</p>
+                </ng-container>
+              </div>
+            </ng-container>
+          </div>
+        </ng-template>
       </div>
 
       <!-- Chat panel -->
@@ -219,6 +274,10 @@ interface ChatMessage {
     .chapter-content .inserted-image { margin: 20px 0; text-align: center; }
     .chapter-content .inserted-image img { max-width: 100%; height: auto; border-radius: 6px; box-shadow: 0 2px 8px rgba(0,0,0,0.12); }
     .empty-content { color: #999; font-style: italic; }
+    .doc-separator { display: flex; align-items: center; gap: 10px; padding: 14px 20px; background: linear-gradient(135deg, #1B3A5C, #2C5F8A); color: white; font-size: 14px; }
+    .doc-separator mat-icon { font-size: 22px; width: 22px; height: 22px; opacity: 0.9; }
+    .doc-separator-label { font-size: 12px; opacity: 0.8; font-weight: 500; }
+    .doc-separator-title { font-weight: 600; font-size: 15px; }
     .loading-container { display: flex; justify-content: center; padding: 48px; }
 
     /* Chat panel */
@@ -284,6 +343,10 @@ export class PreviewComponent implements OnInit, OnDestroy {
 
   get currentPreview(): DocumentPreview {
     return (this.viewMode === 'anonymized' && this.anonPreview) ? this.anonPreview : this.preview!;
+  }
+
+  get hasMultipleDocuments(): boolean {
+    return !!(this.currentPreview?.documents && this.currentPreview.documents.length > 0);
   }
 
   ngOnInit(): void {
