@@ -990,8 +990,17 @@ async def document_qa(
     db: AsyncSession = Depends(get_db),
 ):
     """Answer a question about the project documents using RAG (vector search + LLM)."""
+    from ..services.moderation_service import moderate_prompt
     from ..services.vector_service import VectorService
     from ..services.ai_service import create_ai_service
+
+    # Moderate the user question before any processing
+    moderation = moderate_prompt(request.question, field_name="document_qa")
+    if not moderation:
+        return {
+            "answer": moderation.message,
+            "sources": [],
+        }
 
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
