@@ -1602,6 +1602,11 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   // Track files being uploaded (shown immediately before server confirmation)
   uploadingFiles: { id: string; filename: string; category: string; progress: number; status: 'uploading' | 'server_processing' | 'failed'; error?: string }[] = [];
 
+  // Upload queue to avoid flooding the server with concurrent requests
+  private _uploadQueue: { file: File; category: string }[] = [];
+  private _activeUploads = 0;
+  private readonly MAX_CONCURRENT_UPLOADS = 2;
+
   // Per-chapter AI state
   aiProcessing: Record<string, boolean> = {};
   aiProgress: Record<string, { status: string; step: string; progress: number; message: string }> = {};
@@ -1914,8 +1919,9 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     const files = input.files;
     if (!files) return;
     for (let i = 0; i < files.length; i++) {
-      this._uploadFileWithProgress(files[i], category);
+      this._uploadQueue.push({ file: files[i], category });
     }
+    this._processUploadQueue();
     // Reset input so re-selecting the same file works
     input.value = '';
   }
@@ -1929,7 +1935,16 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     const files = event.dataTransfer?.files;
     if (!files) return;
     for (let i = 0; i < files.length; i++) {
-      this._uploadFileWithProgress(files[i], category);
+      this._uploadQueue.push({ file: files[i], category });
+    }
+    this._processUploadQueue();
+  }
+
+  private _processUploadQueue(): void {
+    while (this._activeUploads < this.MAX_CONCURRENT_UPLOADS && this._uploadQueue.length > 0) {
+      const item = this._uploadQueue.shift()!;
+      this._activeUploads++;
+      this._uploadFileWithProgress(item.file, item.category);
     }
   }
 
@@ -1952,6 +1967,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
     response$.subscribe({
       next: () => {
+        this._activeUploads--;
+        this._processUploadQueue();
         // Upload done → file is now server-side, switch to "processing" state briefly
         const idx = this.uploadingFiles.findIndex(f => f.id === trackingId);
         if (idx >= 0) {
@@ -1974,6 +1991,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.api.getStatistics(this.projectId).subscribe({ next: (s) => this.stats = s });
       },
       error: (err) => {
+        this._activeUploads--;
+        this._processUploadQueue();
         const idx = this.uploadingFiles.findIndex(f => f.id === trackingId);
         if (idx >= 0) {
           this.uploadingFiles[idx] = { ...this.uploadingFiles[idx], status: 'failed', error: err.error?.detail || 'Erreur upload' };
