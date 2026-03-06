@@ -8,22 +8,34 @@ import { Subscription } from 'rxjs';
 import { OnboardingService, OnboardingStep, OnboardingState } from '../../services/onboarding.service';
 
 /**
- * Check if a DOM element is truly visible to the user.
- * Handles: display:none (*ngIf), visibility:hidden (inactive Material tabs),
- * zero-size elements, and off-screen elements.
+ * Reads the label of every active Material tab on the page.
+ * Angular Material MDC tabs add the class `mdc-tab--active` on the
+ * selected tab button, and the visible text lives inside
+ * `.mdc-tab__text-label`.
  */
-function isDomElementVisible(selector: string): boolean {
+function getActiveTabLabels(): string[] {
+  const labels: string[] = [];
+  document.querySelectorAll('.mdc-tab--active .mdc-tab__text-label').forEach(el => {
+    const text = el.textContent?.trim();
+    if (text) labels.push(text);
+  });
+  return labels;
+}
+
+/**
+ * Check if at least one of the comma-separated selectors resolves to
+ * an element that exists in the DOM and is not hidden (*ngIf / display:none).
+ * Used as a secondary filter for role-based elements (admin buttons etc.).
+ */
+function isDomElementPresent(selector: string): boolean {
   const selectors = selector.split(',').map(s => s.trim());
   for (const sel of selectors) {
     try {
       const el = document.querySelector(sel);
       if (!el || !(el instanceof HTMLElement)) continue;
-      // Check computed visibility (catches inactive Material tab content)
       const style = getComputedStyle(el);
-      if (style.display === 'none' || style.visibility === 'hidden') continue;
-      // Check element has non-zero dimensions
-      const rect = el.getBoundingClientRect();
-      if (rect.width === 0 && rect.height === 0) continue;
+      // display:none means Angular removed it via *ngIf
+      if (style.display === 'none') continue;
       return true;
     } catch { /* invalid selector */ }
   }
@@ -573,10 +585,31 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
     if (this.state.active) this.updatePosition();
   }
 
-  /** Filter route-matching steps to only those whose DOM targets are actually visible */
+  /**
+   * Filter route-matching steps based on two criteria:
+   * 1. Tab check: if the step has a `tabLabel`, the corresponding Material tab
+   *    must be the active one (has class `mdc-tab--active`).
+   * 2. DOM check: the step's selector must resolve to an existing element
+   *    (handles role-based *ngIf like admin buttons).
+   */
   private refreshVisibleSteps(): void {
     const routeSteps = this.onboardingService.currentPageSteps;
-    const newVisible = routeSteps.filter(step => isDomElementVisible(step.selector));
+    const activeTabLabels = getActiveTabLabels();
+
+    const newVisible = routeSteps.filter(step => {
+      // ── Tab filter ──
+      // If step is tied to a tab, that tab must be active.
+      // We use startsWith to handle labels like "Membres (3)" matching "Membres".
+      if (step.tabLabel) {
+        const tabActive = activeTabLabels.some(label => label.startsWith(step.tabLabel!));
+        if (!tabActive) return false;
+      }
+
+      // ── DOM filter ──
+      // The step's target element must exist and not be *ngIf-removed.
+      return isDomElementPresent(step.selector);
+    });
+
     const newIds = newVisible.map(s => s.id).join(',');
     const oldIds = this.visibleSteps.map(s => s.id).join(',');
 
