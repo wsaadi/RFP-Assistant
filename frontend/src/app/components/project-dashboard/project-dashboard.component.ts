@@ -1915,14 +1915,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     document.getElementById('upload-' + category)?.click();
   }
 
+  private readonly MAX_FILE_SIZE_MB = 50;
+
   onFileSelected(event: Event, category: string): void {
     const input = event.target as HTMLInputElement;
     const files = input.files;
     if (!files) return;
-    for (let i = 0; i < files.length; i++) {
-      this._uploadQueue.push({ file: files[i], category });
-    }
-    this._processUploadQueue();
+    this._enqueueFiles(files, category);
     // Reset input so re-selecting the same file works
     input.value = '';
   }
@@ -1935,8 +1934,23 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     event.preventDefault();
     const files = event.dataTransfer?.files;
     if (!files) return;
+    this._enqueueFiles(files, category);
+  }
+
+  private _enqueueFiles(files: FileList, category: string): void {
+    const rejected: string[] = [];
     for (let i = 0; i < files.length; i++) {
-      this._uploadQueue.push({ file: files[i], category });
+      if (files[i].size > this.MAX_FILE_SIZE_MB * 1024 * 1024) {
+        rejected.push(files[i].name);
+      } else {
+        this._uploadQueue.push({ file: files[i], category });
+      }
+    }
+    if (rejected.length > 0) {
+      this.snackBar.open(
+        `${rejected.length} fichier(s) ignoré(s) (taille max ${this.MAX_FILE_SIZE_MB} Mo) : ${rejected.join(', ')}`,
+        'OK', { duration: 6000 }
+      );
     }
     this._processUploadQueue();
   }
@@ -2006,13 +2020,26 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       },
       error: (err) => {
         this._activeUploads--;
-        this._processUploadQueue();
+        const errorMsg = err.error?.detail || (err.status === 413 ? 'Quota de stockage ou limite de fichiers atteint' : 'Erreur upload');
         const idx = this.uploadingFiles.findIndex(f => f.id === trackingId);
         if (idx >= 0) {
-          this.uploadingFiles[idx] = { ...this.uploadingFiles[idx], status: 'failed', error: err.error?.detail || 'Erreur upload' };
+          this.uploadingFiles[idx] = { ...this.uploadingFiles[idx], status: 'failed', error: errorMsg };
           this.uploadingFiles = [...this.uploadingFiles];
         }
-        this.snackBar.open(err.error?.detail || 'Erreur upload', 'OK', { duration: 3000 });
+        // On 413 (quota/limit), flush the entire queue — all subsequent uploads will fail too
+        if (err.status === 413) {
+          const flushed = this._uploadQueue.length;
+          this._uploadQueue = [];
+          // Mark any remaining tracking entries as failed
+          if (flushed > 0) {
+            this.snackBar.open(`${errorMsg}. ${flushed} fichier(s) restant(s) annulé(s).`, 'OK', { duration: 6000 });
+          } else {
+            this.snackBar.open(errorMsg, 'OK', { duration: 5000 });
+          }
+        } else {
+          this.snackBar.open(errorMsg, 'OK', { duration: 3000 });
+          this._processUploadQueue();
+        }
         // Auto-remove failed entry after 5s
         setTimeout(() => {
           this.uploadingFiles = this.uploadingFiles.filter(f => f.id !== trackingId);
