@@ -1090,6 +1090,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         order = 0
         created_count = 0
         delta_stats = {"new": 0, "modified": 0, "unchanged": 0}
+        failed_doc_ids: set = set()
 
         # If deliverables were detected but all are completion-type, no chapters to generate
         has_deliverables = (len(resp_docs) + completion_docs_count) > 0
@@ -1146,21 +1147,26 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
                                    f"{_title} — {token_count} tokens — {elapsed}s",
                     })
 
-                async with sem:
-                    structure = await ai_service.generate_response_structure_for_document(
-                        document_title=doc_title,
-                        document_description=doc_desc,
-                        new_rfp_content=anon_new_rfp,
-                        old_rfp_content=anon_old_rfp,
-                        old_response_content=anon_old_response,
-                        rfp_summary=rfp_summary,
-                        on_progress=_doc_progress,
-                        ai_context=proj_ai_context,
-                        company_name=proj_company_name,
-                        client_name=proj_client_name,
-                    )
+                try:
+                    async with sem:
+                        structure = await ai_service.generate_response_structure_for_document(
+                            document_title=doc_title,
+                            document_description=doc_desc,
+                            new_rfp_content=anon_new_rfp,
+                            old_rfp_content=anon_old_rfp,
+                            old_response_content=anon_old_response,
+                            rfp_summary=rfp_summary,
+                            on_progress=_doc_progress,
+                            ai_context=proj_ai_context,
+                            company_name=proj_company_name,
+                            client_name=proj_client_name,
+                        )
+                        _doc_done_count += 1
+                        return (doc_id, structure)
+                except Exception as exc:
+                    logger.error("Structure generation error for doc '%s': %s", doc_title, exc)
                     _doc_done_count += 1
-                    return (doc_id, structure)
+                    return (doc_id, [])
 
             _update("generating", 50 if rfp_summary else 40,
                     f"Generation parallele de {total_docs} document(s)...")
@@ -1171,6 +1177,40 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             ])
 
             all_doc_structures = [(did, struct) for did, struct in results if struct]
+            failed_doc_ids = {did for did, struct in results if not struct}
+
+            # ── Retry failed documents sequentially ──
+            if failed_doc_ids:
+                failed_titles = [t for (did, t, _d) in resp_docs if did in failed_doc_ids]
+                logger.warning(
+                    "Structure generation failed for %d/%d docs (first attempt): %s",
+                    len(failed_doc_ids), total_docs, failed_titles,
+                )
+                _update("generating", 82,
+                        f"Nouvelle tentative pour {len(failed_doc_ids)} document(s) en echec...")
+
+                for idx, (doc_id, doc_title, doc_desc) in enumerate(resp_docs):
+                    if doc_id not in failed_doc_ids:
+                        continue
+                    await asyncio.sleep(2)  # small delay before retry
+                    # Retry without summary (use full RFP content) for better results
+                    retry_structure = await ai_service.generate_response_structure_for_document(
+                        document_title=doc_title,
+                        document_description=doc_desc,
+                        new_rfp_content=anon_new_rfp,
+                        old_rfp_content=anon_old_rfp,
+                        old_response_content=anon_old_response,
+                        rfp_summary="",
+                        ai_context=proj_ai_context,
+                        company_name=proj_company_name,
+                        client_name=proj_client_name,
+                    )
+                    if retry_structure:
+                        all_doc_structures.append((doc_id, retry_structure))
+                        failed_doc_ids.discard(doc_id)
+                        logger.info("Retry succeeded for doc '%s'", doc_title)
+                    else:
+                        logger.error("Retry also failed for doc '%s'", doc_title)
 
             # Log AI usage for structure generation (multi-doc)
             async with task_session() as usage_db:
@@ -1299,6 +1339,14 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
         if completion_docs_count > 0:
             completion_msg = f" — {completion_docs_count} document(s) a completer (Excel/PDF) a traiter dans l'onglet Livrables"
 
+        # Build failure message for documents that failed even after retry
+        failed_msg = ""
+        if resp_docs and failed_doc_ids:
+            failed_titles = [t for (did, t, _d) in resp_docs if did in failed_doc_ids]
+            failed_msg = f" — ATTENTION: echec pour {len(failed_titles)} document(s): {', '.join(failed_titles)}"
+
+        success_doc_count = len(resp_docs) - len(failed_doc_ids) if resp_docs else 0
+
         set_progress(_NS_GEN, pid, {
             "status": "completed",
             "step": "done",
@@ -1308,8 +1356,9 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             "has_gap_analysis": gap_analysis is not None,
             "completion_docs_count": completion_docs_count,
             "message": f"{created_count} chapitres crees"
-                       + (f" pour {len(resp_docs)} document(s) redactionnels" if resp_docs else
+                       + (f" pour {success_doc_count}/{len(resp_docs)} document(s) redactionnels" if resp_docs else
                           f" ({delta_stats['new']} nouveaux, {delta_stats['modified']} modifies, {delta_stats['unchanged']} inchanges)")
+                       + failed_msg
                        + completion_msg,
         })
 
