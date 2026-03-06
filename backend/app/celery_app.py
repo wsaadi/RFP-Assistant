@@ -20,9 +20,22 @@ from kombu import Exchange, Queue
 
 _logger = logging.getLogger(__name__)
 
-# Read broker/backend from environment (same vars as config.py)
-broker_url = os.environ.get("CELERY_BROKER_URL", "redis://redis:6379/0")
-result_backend = os.environ.get("CELERY_RESULT_BACKEND", "redis://redis:6379/0")
+
+def _build_redis_url(env_var: str) -> str:
+    """Build a Redis URL from an env var, falling back to constructing one from REDIS_PASSWORD."""
+    explicit = os.environ.get(env_var)
+    if explicit:
+        return explicit
+    password = os.environ.get("REDIS_PASSWORD", "")
+    if password:
+        return f"redis://:{password}@redis:6379/0"
+    return "redis://redis:6379/0"
+
+
+# Read broker/backend from environment; auto-inject REDIS_PASSWORD when the
+# full URL vars are missing (common cause of "Authentication required" errors).
+broker_url = _build_redis_url("CELERY_BROKER_URL")
+result_backend = _build_redis_url("CELERY_RESULT_BACKEND")
 
 celery = Celery(
     "rfp_assistant",

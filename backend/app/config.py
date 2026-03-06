@@ -1,9 +1,18 @@
 """Configuration settings for the application."""
+import os
 import secrets
 import sys
 from pydantic_settings import BaseSettings
-from pydantic import field_validator
+from pydantic import field_validator, model_validator
 from typing import Optional
+
+
+def _default_redis_url() -> str:
+    """Build a Redis URL from REDIS_PASSWORD when the full URL is not set."""
+    password = os.environ.get("REDIS_PASSWORD", "")
+    if password:
+        return f"redis://:{password}@redis:6379/0"
+    return "redis://redis:6379/0"
 
 
 class Settings(BaseSettings):
@@ -55,10 +64,23 @@ class Settings(BaseSettings):
     admin_email: str = "admin@rfp-assistant.fr"
     admin_password: str = "admin123"
 
-    # Redis / Celery
-    redis_url: str = "redis://redis:6379/0"
-    celery_broker_url: str = "redis://redis:6379/0"
-    celery_result_backend: str = "redis://redis:6379/0"
+    # Redis / Celery — defaults are built dynamically from REDIS_PASSWORD
+    # so that authentication works even when only REDIS_PASSWORD is set.
+    redis_url: str = ""
+    celery_broker_url: str = ""
+    celery_result_backend: str = ""
+
+    @model_validator(mode="after")
+    def _inject_redis_password(self) -> "Settings":
+        """Fill empty Redis URLs using REDIS_PASSWORD from the environment."""
+        default = _default_redis_url()
+        if not self.redis_url:
+            self.redis_url = default
+        if not self.celery_broker_url:
+            self.celery_broker_url = default
+        if not self.celery_result_backend:
+            self.celery_result_backend = default
+        return self
 
     # CORS
     cors_origins: str = "http://localhost,http://localhost:80,http://localhost:4200"
