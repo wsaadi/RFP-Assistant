@@ -542,8 +542,12 @@ export class ApiService {
     return this.http.post(`${this.baseUrl}/export/${projectId}/preview-chat-cancel`, {});
   }
 
-  documentQA(projectId: string, question: string): Observable<{ answer: string; sources: { document_name: string; category: string; category_label: string; page_number: number; score: number; excerpt: string }[] }> {
-    return this.http.post<any>(`${this.baseUrl}/export/${projectId}/document-qa`, { question });
+  documentQA(projectId: string, question: string, documentIds?: string[]): Observable<{ answer: string; sources: { document_name: string; category: string; category_label: string; page_number: number; score: number; excerpt: string }[] }> {
+    const body: any = { question };
+    if (documentIds && documentIds.length > 0) {
+      body.document_ids = documentIds;
+    }
+    return this.http.post<any>(`${this.baseUrl}/export/${projectId}/document-qa`, body);
   }
 
   // ── Soutenance ──
