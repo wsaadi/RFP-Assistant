@@ -172,8 +172,14 @@ async def _process_document_async(document_id: str, project_id: str):
                     ProgressTracker.update(document_id, "extracting_images")
                     _images_data = DocumentProcessor.extract_images_from_docx(docx_content, document_id)
                 except Exception as doc_err:
-                    logger.error("[doc:%s] DOC conversion failed: %s", document_id, doc_err, exc_info=True)
-                    _text = ""
+                    logger.warning("[doc:%s] LibreOffice conversion failed, trying fallback: %s", document_id, doc_err)
+                    # Fallback: extract text directly with antiword/catdoc
+                    _text = DocumentProcessor.extract_text_from_doc_fallback(file_content)
+                    if _text.strip():
+                        _page_count = max(1, len(_text.split()) // 300)
+                        logger.info("[doc:%s] Fallback extraction succeeded (%d chars)", document_id, len(_text))
+                    else:
+                        logger.error("[doc:%s] All .doc extraction methods failed: %s", document_id, doc_err, exc_info=True)
 
             elif file_type == FileType.DOCX:
                 try:
@@ -208,7 +214,10 @@ async def _process_document_async(document_id: str, project_id: str):
 
         if text is None:
             logger.warning("[doc:%s] No text extracted — marking FAILED", document_id)
-            ProgressTracker.fail(document_id, "Aucun texte extrait du document")
+            fail_msg = "Aucun texte extrait du document"
+            if file_type == FileType.DOC:
+                fail_msg = "Impossible d'extraire le texte du fichier .doc — le format est peut-être trop ancien ou le fichier corrompu"
+            ProgressTracker.fail(document_id, fail_msg)
             async with TaskSession() as db:
                 result = await db.execute(
                     select(Document).where(Document.id == uuid.UUID(document_id))

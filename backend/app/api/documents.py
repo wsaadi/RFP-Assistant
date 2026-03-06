@@ -131,20 +131,25 @@ async def upload_document(
     )
     duplicate = existing.scalar_one_or_none()
     if duplicate:
-        # Return existing document instead of re-processing
-        return DocumentOut(
-            id=str(duplicate.id),
-            project_id=str(duplicate.project_id),
-            category=duplicate.category.value,
-            original_filename=duplicate.original_filename,
-            file_type=duplicate.file_type.value,
-            file_size=duplicate.file_size,
-            processing_status=duplicate.processing_status.value,
-            page_count=duplicate.page_count,
-            chunk_count=duplicate.chunk_count,
-            uploaded_by=str(duplicate.uploaded_by),
-            created_at=duplicate.created_at,
-        )
+        if duplicate.processing_status == ProcessingStatus.FAILED:
+            # Failed duplicate → delete old record and re-process below
+            await db.delete(duplicate)
+            await db.commit()
+        else:
+            # Return existing document instead of re-processing
+            return DocumentOut(
+                id=str(duplicate.id),
+                project_id=str(duplicate.project_id),
+                category=duplicate.category.value,
+                original_filename=duplicate.original_filename,
+                file_type=duplicate.file_type.value,
+                file_size=duplicate.file_size,
+                processing_status=duplicate.processing_status.value,
+                page_count=duplicate.page_count,
+                chunk_count=duplicate.chunk_count,
+                uploaded_by=str(duplicate.uploaded_by),
+                created_at=duplicate.created_at,
+            )
 
     # Save file
     filepath = DocumentProcessor.save_uploaded_file(content, str(project_id), file.filename)
