@@ -2810,6 +2810,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.improvementSource = '';
         this.loadImprovementAxes();
       },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 }),
     });
   }
 
@@ -2827,7 +2828,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.editingAxisId = null;
         this.loadImprovementAxes();
       },
-      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 }),
     });
   }
 
@@ -2849,7 +2850,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         if (this.project) this.project.ai_context = this.aiContextDraft;
         this.editingAiContext = false;
       },
-      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 3000 }),
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 }),
     });
   }
 

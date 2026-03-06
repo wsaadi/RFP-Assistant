@@ -470,6 +470,7 @@ export class ChapterEditorComponent implements OnInit, OnDestroy {
         this.newNote = '';
         this.snackBar.open('Note ajoutee', 'OK', { duration: 1500 });
       },
+      error: (err) => this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 }),
     });
   }
 
