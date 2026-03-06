@@ -31,7 +31,7 @@ from .deps import get_current_user
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
 ALLOWED_EXTENSIONS = {"pdf", "docx", "doc", "xlsx", "xls", "pptx"}
-MAX_FILE_SIZE = 50 * 1024 * 1024  # 50MB
+MAX_FILE_SIZE = 100 * 1024 * 1024  # 100MB
 
 # Magic bytes for file type validation (prevents extension spoofing)
 MAGIC_BYTES = {
@@ -91,7 +91,7 @@ async def upload_document(
     # Read file content
     content = await file.read()
     if len(content) > MAX_FILE_SIZE:
-        raise HTTPException(status_code=400, detail="Fichier trop volumineux (max 50MB)")
+        raise HTTPException(status_code=400, detail="Fichier trop volumineux (max 100 Mo)")
 
     # ── Per-user upload quota check ──
     if settings.max_upload_size_per_user_mb > 0:
@@ -108,21 +108,6 @@ async def upload_document(
                 status_code=413,
                 detail=f"Quota de stockage dépassé. Utilisé: {used_mb} MB / {settings.max_upload_size_per_user_mb} MB. "
                        f"Supprimez des fichiers ou contactez un administrateur.",
-            )
-
-    # ── Per-project file count limit ──
-    if settings.max_files_per_project > 0:
-        from sqlalchemy import func
-        file_count_result = await db.execute(
-            select(func.count())
-            .where(Document.project_id == project_id)
-        )
-        file_count = file_count_result.scalar() or 0
-        if file_count >= settings.max_files_per_project:
-            raise HTTPException(
-                status_code=413,
-                detail=f"Nombre maximum de fichiers par projet atteint ({settings.max_files_per_project}). "
-                       f"Supprimez des fichiers avant d'en ajouter.",
             )
 
     # Validate file content matches extension (magic bytes check)
