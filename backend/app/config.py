@@ -78,8 +78,8 @@ class Settings(BaseSettings):
     min_password_length: int = 10
 
     # Upload quotas per user (0 = unlimited)
-    max_upload_size_per_user_mb: int = 500  # Total storage per user in MB
-    max_files_per_project: int = 50  # Max files per project
+    max_upload_size_per_user_mb: int = 5000  # Total storage per user in MB (5 GB)
+    max_files_per_project: int = 0  # Max files per project (0 = unlimited)
 
     class Config:
         env_file = ".env"

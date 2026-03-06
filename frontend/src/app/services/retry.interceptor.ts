@@ -1,6 +1,6 @@
 import { HttpInterceptorFn, HttpErrorResponse } from '@angular/common/http';
 import { timer, throwError } from 'rxjs';
-import { retry, mergeMap } from 'rxjs/operators';
+import { retry } from 'rxjs/operators';
 
 const MAX_RETRIES = 3;
 

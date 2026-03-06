@@ -1602,11 +1602,9 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   // Track files being uploaded (shown immediately before server confirmation)
   uploadingFiles: { id: string; filename: string; category: string; progress: number; status: 'uploading' | 'server_processing' | 'failed'; error?: string }[] = [];
 
-  // Upload queue to avoid flooding the server with concurrent requests
+  // Upload queue — files are sent one at a time to avoid any throttling
   private _uploadQueue: { file: File; category: string }[] = [];
   private _activeUploads = 0;
-  private readonly MAX_CONCURRENT_UPLOADS = 2;
-  private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Per-chapter AI state
   aiProcessing: Record<string, boolean> = {};
@@ -1915,15 +1913,13 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     document.getElementById('upload-' + category)?.click();
   }
 
+  private readonly MAX_FILE_SIZE_MB = 100;
+
   onFileSelected(event: Event, category: string): void {
     const input = event.target as HTMLInputElement;
     const files = input.files;
     if (!files) return;
-    for (let i = 0; i < files.length; i++) {
-      this._uploadQueue.push({ file: files[i], category });
-    }
-    this._processUploadQueue();
-    // Reset input so re-selecting the same file works
+    this._enqueueFiles(files, category);
     input.value = '';
   }
 
@@ -1935,42 +1931,33 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     event.preventDefault();
     const files = event.dataTransfer?.files;
     if (!files) return;
+    this._enqueueFiles(files, category);
+  }
+
+  private _enqueueFiles(files: FileList, category: string): void {
+    const rejected: string[] = [];
     for (let i = 0; i < files.length; i++) {
-      this._uploadQueue.push({ file: files[i], category });
+      if (files[i].size > this.MAX_FILE_SIZE_MB * 1024 * 1024) {
+        rejected.push(files[i].name);
+      } else {
+        this._uploadQueue.push({ file: files[i], category });
+      }
+    }
+    if (rejected.length > 0) {
+      this.snackBar.open(
+        `Fichier(s) trop volumineux (max ${this.MAX_FILE_SIZE_MB} Mo) : ${rejected.join(', ')}`,
+        'OK', { duration: 6000 }
+      );
     }
     this._processUploadQueue();
   }
 
+  /** Process queue one file at a time — sequential to avoid any throttling. */
   private _processUploadQueue(): void {
-    while (this._activeUploads < this.MAX_CONCURRENT_UPLOADS && this._uploadQueue.length > 0) {
-      const item = this._uploadQueue.shift()!;
-      this._activeUploads++;
-      this._uploadFileWithProgress(item.file, item.category);
-    }
-  }
-
-  // Collect completed tracking IDs to clean up in one batch refresh
-  private _completedTrackingIds: string[] = [];
-
-  private _schedulePostUploadRefresh(trackingId: string): void {
-    this._completedTrackingIds.push(trackingId);
-    if (this._refreshTimer) { clearTimeout(this._refreshTimer); }
-    this._refreshTimer = setTimeout(() => {
-      this._refreshTimer = null;
-      const ids = [...this._completedTrackingIds];
-      this._completedTrackingIds = [];
-      // Single batched refresh for all completed uploads
-      this.api.getDocuments(this.projectId).subscribe({
-        next: (d) => {
-          this.documents = d;
-          this._refreshDocsByCategory();
-          this.uploadingFiles = this.uploadingFiles.filter(f => !ids.includes(f.id));
-          const hasProcessing = d.some(doc => doc.processing_status === 'pending' || doc.processing_status === 'processing');
-          if (hasProcessing) { this.startPolling(); }
-        },
-      });
-      this.api.getStatistics(this.projectId).subscribe({ next: (s) => this.stats = s });
-    }, 500);
+    if (this._activeUploads > 0 || this._uploadQueue.length === 0) return;
+    const item = this._uploadQueue.shift()!;
+    this._activeUploads = 1;
+    this._uploadFileWithProgress(item.file, item.category);
   }
 
   private _uploadFileWithProgress(file: File, category: string): void {
@@ -1992,31 +1979,41 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
 
     response$.subscribe({
       next: () => {
-        this._activeUploads--;
-        this._processUploadQueue();
-        // Upload done → file is now server-side, switch to "processing" state briefly
+        this._activeUploads = 0;
         const idx = this.uploadingFiles.findIndex(f => f.id === trackingId);
         if (idx >= 0) {
           this.uploadingFiles[idx] = { ...this.uploadingFiles[idx], status: 'server_processing', progress: 100 };
           this.uploadingFiles = [...this.uploadingFiles];
         }
-        this.snackBar.open(`${file.name} envoyé`, 'OK', { duration: 2000 });
-        // Debounce the refresh: wait 500ms so multiple completions batch into one call
-        this._schedulePostUploadRefresh(trackingId);
+        this.snackBar.open(`${file.name} envoyé (${this._uploadQueue.length} restant${this._uploadQueue.length > 1 ? 's' : ''})`, 'OK', { duration: 2000 });
+        // Refresh doc list + stats, then process next in queue
+        this.api.getDocuments(this.projectId).subscribe({
+          next: (d) => {
+            this.documents = d;
+            this._refreshDocsByCategory();
+            this.uploadingFiles = this.uploadingFiles.filter(f => f.id !== trackingId);
+            const hasProcessing = d.some(doc => doc.processing_status === 'pending' || doc.processing_status === 'processing');
+            if (hasProcessing) { this.startPolling(); }
+            this._processUploadQueue();
+          },
+          error: () => this._processUploadQueue(),
+        });
+        this.api.getStatistics(this.projectId).subscribe({ next: (s) => this.stats = s });
       },
       error: (err) => {
-        this._activeUploads--;
-        this._processUploadQueue();
+        this._activeUploads = 0;
+        const errorMsg = err.error?.detail || 'Erreur upload';
         const idx = this.uploadingFiles.findIndex(f => f.id === trackingId);
         if (idx >= 0) {
-          this.uploadingFiles[idx] = { ...this.uploadingFiles[idx], status: 'failed', error: err.error?.detail || 'Erreur upload' };
+          this.uploadingFiles[idx] = { ...this.uploadingFiles[idx], status: 'failed', error: errorMsg };
           this.uploadingFiles = [...this.uploadingFiles];
         }
-        this.snackBar.open(err.error?.detail || 'Erreur upload', 'OK', { duration: 3000 });
-        // Auto-remove failed entry after 5s
+        this.snackBar.open(`${file.name} : ${errorMsg}`, 'OK', { duration: 5000 });
         setTimeout(() => {
           this.uploadingFiles = this.uploadingFiles.filter(f => f.id !== trackingId);
         }, 5000);
+        // Continue with next file even on error
+        this._processUploadQueue();
       },
     });
   }
