@@ -9,6 +9,7 @@ import { MatDividerModule } from '@angular/material/divider';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { AuthService } from '../../services/auth.service';
 import { BrandingService, BrandingSettings } from '../../services/branding.service';
+import { OnboardingGuideComponent } from '../onboarding-guide/onboarding-guide.component';
 
 @Component({
   selector: 'app-layout',
@@ -16,7 +17,7 @@ import { BrandingService, BrandingSettings } from '../../services/branding.servi
   imports: [
     CommonModule, RouterOutlet, RouterLink, RouterLinkActive,
     MatToolbarModule, MatButtonModule, MatIconModule, MatMenuModule, MatDividerModule,
-    MatTooltipModule,
+    MatTooltipModule, OnboardingGuideComponent,
   ],
   template: `
     <mat-toolbar color="primary" class="toolbar">
@@ -68,6 +69,8 @@ import { BrandingService, BrandingSettings } from '../../services/branding.servi
     <main class="main-content">
       <router-outlet></router-outlet>
     </main>
+
+    <app-onboarding-guide></app-onboarding-guide>
   `,
   styles: [`
     .toolbar { position: sticky; top: 0; z-index: 1000; }
