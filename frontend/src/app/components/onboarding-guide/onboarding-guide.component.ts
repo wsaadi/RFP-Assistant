@@ -1,12 +1,34 @@
 import { Component, OnInit, OnDestroy, HostListener, ViewEncapsulation } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Router, NavigationEnd } from '@angular/router';
+import { Router } from '@angular/router';
 import { MatButtonModule } from '@angular/material/button';
 import { MatIconModule } from '@angular/material/icon';
 import { MatTooltipModule } from '@angular/material/tooltip';
 import { Subscription } from 'rxjs';
-import { filter } from 'rxjs/operators';
 import { OnboardingService, OnboardingStep, OnboardingState } from '../../services/onboarding.service';
+
+/**
+ * Check if a DOM element is truly visible to the user.
+ * Handles: display:none (*ngIf), visibility:hidden (inactive Material tabs),
+ * zero-size elements, and off-screen elements.
+ */
+function isDomElementVisible(selector: string): boolean {
+  const selectors = selector.split(',').map(s => s.trim());
+  for (const sel of selectors) {
+    try {
+      const el = document.querySelector(sel);
+      if (!el || !(el instanceof HTMLElement)) continue;
+      // Check computed visibility (catches inactive Material tab content)
+      const style = getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') continue;
+      // Check element has non-zero dimensions
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
+      return true;
+    } catch { /* invalid selector */ }
+  }
+  return false;
+}
 
 @Component({
   selector: 'app-onboarding-guide',
@@ -17,28 +39,22 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
     <!-- Floating toggle button -->
     <button class="onboarding-fab" (click)="toggleGuide()"
       [class.active]="state.active"
-      [class.has-steps]="!state.active && pageSteps.length > 0 && !pageCompleted"
-      [matTooltip]="state.active ? 'Désactiver le guide' : (pageSteps.length > 0 ? 'Lancer le guide pour cette page' : 'Pas de guide sur cette page')">
+      [class.has-steps]="!state.active && visibleSteps.length > 0 && !allVisibleCompleted"
+      [matTooltip]="fabTooltip">
       <div class="fab-avatar" [class.waving]="state.active && showWave">
         <svg viewBox="0 0 64 64" class="avatar-svg">
-          <!-- Body -->
           <ellipse cx="32" cy="56" rx="18" ry="8" fill="#1976d2"/>
-          <!-- Head -->
           <circle cx="32" cy="24" r="16" fill="#FFD54F"/>
-          <!-- Eyes -->
           <ellipse cx="26" cy="22" rx="2.5" ry="3" fill="#333">
             <animate attributeName="ry" values="3;0.5;3" dur="3s" repeatCount="indefinite"/>
           </ellipse>
           <ellipse cx="38" cy="22" rx="2.5" ry="3" fill="#333">
             <animate attributeName="ry" values="3;0.5;3" dur="3s" repeatCount="indefinite"/>
           </ellipse>
-          <!-- Smile -->
           <path d="M24 30 Q32 38 40 30" stroke="#333" stroke-width="2" fill="none" stroke-linecap="round"/>
-          <!-- Glasses -->
           <circle cx="26" cy="22" r="5" stroke="#555" stroke-width="1.5" fill="none"/>
           <circle cx="38" cy="22" r="5" stroke="#555" stroke-width="1.5" fill="none"/>
           <line x1="31" y1="22" x2="33" y2="22" stroke="#555" stroke-width="1.5"/>
-          <!-- Hand waving -->
           <g [attr.class]="state.active ? 'wave-hand' : ''">
             <circle cx="50" cy="34" r="4" fill="#FFD54F"/>
             <line x1="48" y1="38" x2="46" y2="46" stroke="#FFD54F" stroke-width="3" stroke-linecap="round"/>
@@ -46,8 +62,8 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
         </svg>
       </div>
       <span class="fab-label" *ngIf="!state.active">Guide</span>
-      <span class="fab-badge" *ngIf="!state.active && pageSteps.length > 0 && !pageCompleted">
-        {{ pageSteps.length }}
+      <span class="fab-badge" *ngIf="!state.active && visibleSteps.length > 0 && !allVisibleCompleted">
+        {{ visibleSteps.length }}
       </span>
     </button>
 
@@ -72,7 +88,7 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
         </div>
         <h2>Bienvenue sur RFP Assistant !</h2>
         <p>Je suis votre assistant personnel. Je peux vous guider à travers toutes les fonctionnalités de l'application.</p>
-        <p class="welcome-sub">Sur chaque page, je vous expliquerai ce que vous pouvez faire. Souhaitez-vous commencer ?</p>
+        <p class="welcome-sub">Sur chaque page, je vous expliquerai ce que vous pouvez faire !</p>
         <div class="welcome-actions">
           <button class="welcome-btn secondary" (click)="dismissWelcome()">Plus tard</button>
           <button class="welcome-btn primary" (click)="startTour()">Oui, guidez-moi !</button>
@@ -81,8 +97,8 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
     </div>
 
     <!-- Step tooltip overlay -->
-    <ng-container *ngIf="state.active && currentStep && pageSteps.length > 0">
-      <div class="onboarding-backdrop" (click)="onboardingService.nextStep()"></div>
+    <ng-container *ngIf="state.active && currentStep && visibleSteps.length > 0">
+      <div class="onboarding-backdrop" (click)="nextStep()"></div>
 
       <div class="onboarding-spotlight" *ngIf="spotlightStyle"
         [style.top]="spotlightStyle.top"
@@ -118,7 +134,7 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
           <p>{{ currentStep.message }}</p>
           <div class="tooltip-footer">
             <div class="step-indicators">
-              <span *ngFor="let s of pageSteps; let i = index"
+              <span *ngFor="let s of visibleSteps; let i = index"
                 class="step-dot"
                 [class.active]="s.id === currentStep.id"
                 [class.completed]="state.completedSteps.includes(s.id)"
@@ -126,16 +142,13 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
               </span>
             </div>
             <div class="tooltip-nav">
-              <span class="step-counter">{{ currentPageIndex + 1 }} / {{ pageSteps.length }}</span>
-              <span class="global-progress" *ngIf="globalCompletedCount > 0" matTooltip="Progression globale">
-                ({{ globalCompletedCount }}/{{ globalTotalCount }} au total)
-              </span>
-              <button class="tooltip-btn" (click)="onboardingService.prevStep()" [disabled]="currentPageIndex === 0">
+              <span class="step-counter">{{ currentVisibleIndex + 1 }} / {{ visibleSteps.length }}</span>
+              <button class="tooltip-btn" (click)="prevStep()" [disabled]="currentVisibleIndex === 0">
                 <mat-icon>chevron_left</mat-icon>
               </button>
-              <button class="tooltip-btn primary" (click)="onboardingService.nextStep()">
-                {{ isLastStepOnPage ? 'Compris !' : 'Suivant' }}
-                <mat-icon>{{ isLastStepOnPage ? 'check' : 'chevron_right' }}</mat-icon>
+              <button class="tooltip-btn primary" (click)="nextStep()">
+                {{ isLastVisibleStep ? 'Compris !' : 'Suivant' }}
+                <mat-icon>{{ isLastVisibleStep ? 'check' : 'chevron_right' }}</mat-icon>
               </button>
               <button class="tooltip-btn dismiss" (click)="onboardingService.stopGuide()" matTooltip="Fermer le guide">
                 <mat-icon>close</mat-icon>
@@ -442,11 +455,6 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
       color: #999;
       margin-right: auto;
     }
-    .global-progress {
-      font-size: 11px;
-      color: #bbb;
-      margin-right: auto;
-    }
 
     .tooltip-btn {
       display: inline-flex;
@@ -488,18 +496,18 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
 export class OnboardingGuideComponent implements OnInit, OnDestroy {
   state: OnboardingState = { active: false, currentStepId: '', completedSteps: [], dismissed: false };
   currentStep: OnboardingStep | null = null;
-  pageSteps: OnboardingStep[] = [];
+  visibleSteps: OnboardingStep[] = [];
   showWave = true;
   showFirstVisitModal = false;
   animateTooltip = false;
-  pageCompleted = false;
+  allVisibleCompleted = false;
 
   spotlightStyle: { top: string; left: string; width: string; height: string } | null = null;
   tooltipStyle = { top: '50%', left: '50%' };
   tooltipPosition = 'bottom';
 
   private subs: Subscription[] = [];
-  private positionInterval: ReturnType<typeof setInterval> | null = null;
+  private refreshInterval: ReturnType<typeof setInterval> | null = null;
 
   constructor(
     public onboardingService: OnboardingService,
@@ -507,7 +515,6 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
   ) {}
 
   ngOnInit(): void {
-    // Check first visit
     if (this.onboardingService.isFirstVisit()) {
       setTimeout(() => this.showFirstVisitModal = true, 1500);
     }
@@ -517,8 +524,7 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
       this.onboardingService.state$.subscribe((s) => {
         this.state = s;
         this.currentStep = this.onboardingService.currentStep;
-        this.pageSteps = this.onboardingService.currentPageSteps;
-        this.pageCompleted = this.onboardingService.currentPageCompleted;
+        this.refreshVisibleSteps();
 
         if (s.active && this.currentStep) {
           this.animateTooltip = false;
@@ -535,25 +541,26 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
     // React to route changes
     this.subs.push(
       this.onboardingService.currentRoute$.subscribe(() => {
-        this.pageSteps = this.onboardingService.currentPageSteps;
-        this.pageCompleted = this.onboardingService.currentPageCompleted;
+        // Wait for Angular to render the new page components
+        setTimeout(() => this.refreshVisibleSteps(), 500);
         if (this.state.active) {
-          setTimeout(() => this.updatePosition(), 400);
+          setTimeout(() => this.updatePosition(), 600);
         }
       }),
     );
 
-    // Periodically update position in case of layout shifts
-    this.positionInterval = setInterval(() => {
+    // Periodically refresh visible steps (catches tab switches, dynamic content)
+    this.refreshInterval = setInterval(() => {
+      this.refreshVisibleSteps();
       if (this.state.active && this.currentStep) {
         this.updatePosition();
       }
-    }, 2000);
+    }, 1500);
   }
 
   ngOnDestroy(): void {
     this.subs.forEach((s) => s.unsubscribe());
-    if (this.positionInterval) clearInterval(this.positionInterval);
+    if (this.refreshInterval) clearInterval(this.refreshInterval);
   }
 
   @HostListener('window:resize')
@@ -566,8 +573,41 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
     if (this.state.active) this.updatePosition();
   }
 
+  /** Filter route-matching steps to only those whose DOM targets are actually visible */
+  private refreshVisibleSteps(): void {
+    const routeSteps = this.onboardingService.currentPageSteps;
+    const newVisible = routeSteps.filter(step => isDomElementVisible(step.selector));
+    const newIds = newVisible.map(s => s.id).join(',');
+    const oldIds = this.visibleSteps.map(s => s.id).join(',');
+
+    if (newIds !== oldIds) {
+      this.visibleSteps = newVisible;
+
+      // If current step is no longer visible, jump to first visible step
+      if (this.state.active && this.currentStep && !newVisible.find(s => s.id === this.currentStep!.id)) {
+        if (newVisible.length > 0) {
+          const firstUncompleted = newVisible.find(s => !this.state.completedSteps.includes(s.id));
+          this.onboardingService.goToStep((firstUncompleted || newVisible[0]).id);
+        }
+      }
+    }
+
+    this.allVisibleCompleted = newVisible.length > 0 &&
+      newVisible.every(s => this.state.completedSteps.includes(s.id));
+  }
+
+  get fabTooltip(): string {
+    if (this.state.active) return 'Désactiver le guide';
+    if (this.visibleSteps.length > 0 && !this.allVisibleCompleted) {
+      return `${this.visibleSteps.length} conseil(s) pour cette vue`;
+    }
+    return 'Guide interactif';
+  }
+
   toggleGuide(): void {
     this.onboardingService.toggleGuide();
+    // Refresh after toggle to pick up visible steps
+    setTimeout(() => this.refreshVisibleSteps(), 100);
   }
 
   dismissWelcome(): void {
@@ -578,26 +618,29 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
   startTour(): void {
     this.showFirstVisitModal = false;
     this.onboardingService.startGuide();
+    setTimeout(() => this.refreshVisibleSteps(), 100);
   }
 
   goToStep(stepId: string): void {
     this.onboardingService.goToStep(stepId);
   }
 
-  get currentPageIndex(): number {
-    return this.onboardingService.currentPageStepIndex;
+  nextStep(): void {
+    this.onboardingService.nextStepIn(this.visibleSteps);
   }
 
-  get isLastStepOnPage(): boolean {
-    return this.currentPageIndex >= this.pageSteps.length - 1;
+  prevStep(): void {
+    this.onboardingService.prevStepIn(this.visibleSteps);
   }
 
-  get globalCompletedCount(): number {
-    return this.onboardingService.completedStepCount;
+  get currentVisibleIndex(): number {
+    if (!this.currentStep) return 0;
+    const idx = this.visibleSteps.findIndex(s => s.id === this.currentStep!.id);
+    return idx >= 0 ? idx : 0;
   }
 
-  get globalTotalCount(): number {
-    return this.onboardingService.totalStepCount;
+  get isLastVisibleStep(): boolean {
+    return this.currentVisibleIndex >= this.visibleSteps.length - 1;
   }
 
   private updatePosition(): void {
@@ -607,13 +650,18 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
     let el: Element | null = null;
     for (const sel of selectors) {
       try {
-        el = document.querySelector(sel);
-      } catch { /* invalid selector, skip */ }
-      if (el) break;
+        const candidate = document.querySelector(sel);
+        if (candidate && candidate instanceof HTMLElement) {
+          const style = getComputedStyle(candidate);
+          if (style.display !== 'none' && style.visibility !== 'hidden') {
+            el = candidate;
+            break;
+          }
+        }
+      } catch { /* invalid selector */ }
     }
 
     if (!el) {
-      // Element not found - show centered floating tooltip
       this.spotlightStyle = null;
       const vw = window.innerWidth;
       const vh = window.innerHeight;
@@ -662,7 +710,6 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
 
     this.tooltipStyle = { top: top + 'px', left: left + 'px' };
 
-    // Scroll element into view if needed
     if (rect.top < 0 || rect.bottom > vh) {
       el.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
