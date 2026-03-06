@@ -9,33 +9,47 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
 
 /**
  * Reads the label of every active Material tab on the page.
- * Angular Material MDC tabs add the class `mdc-tab--active` on the
- * selected tab button, and the visible text lives inside
- * `.mdc-tab__text-label`.
+ * Uses multiple detection strategies for reliability:
+ * 1. aria-selected="true" (WAI-ARIA standard, always set by Angular Material)
+ * 2. .mdc-tab--active (MDC class, Angular Material 15+)
  */
 function getActiveTabLabels(): string[] {
   const labels: string[] = [];
-  document.querySelectorAll('.mdc-tab--active .mdc-tab__text-label').forEach(el => {
+
+  // Strategy 1: WAI-ARIA (most reliable)
+  document.querySelectorAll('[role="tab"][aria-selected="true"]').forEach(el => {
     const text = el.textContent?.trim();
-    if (text) labels.push(text);
+    if (text && !labels.includes(text)) labels.push(text);
   });
+
+  // Strategy 2: MDC class (fallback)
+  if (labels.length === 0) {
+    document.querySelectorAll('.mdc-tab--active .mdc-tab__text-label').forEach(el => {
+      const text = el.textContent?.trim();
+      if (text && !labels.includes(text)) labels.push(text);
+    });
+  }
+
   return labels;
 }
 
 /**
  * Check if at least one of the comma-separated selectors resolves to
- * an element that exists in the DOM and is not hidden (*ngIf / display:none).
- * Used as a secondary filter for role-based elements (admin buttons etc.).
+ * an element that is truly visible: exists in the DOM, not hidden via
+ * *ngIf (display:none) and not inside an inactive Material tab
+ * (visibility:hidden).
  */
-function isDomElementPresent(selector: string): boolean {
+function isDomElementVisible(selector: string): boolean {
   const selectors = selector.split(',').map(s => s.trim());
   for (const sel of selectors) {
     try {
       const el = document.querySelector(sel);
       if (!el || !(el instanceof HTMLElement)) continue;
       const style = getComputedStyle(el);
-      // display:none means Angular removed it via *ngIf
       if (style.display === 'none') continue;
+      if (style.visibility === 'hidden') continue;
+      const rect = el.getBoundingClientRect();
+      if (rect.width === 0 && rect.height === 0) continue;
       return true;
     } catch { /* invalid selector */ }
   }
@@ -606,8 +620,9 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
       }
 
       // ── DOM filter ──
-      // The step's target element must exist and not be *ngIf-removed.
-      return isDomElementPresent(step.selector);
+      // The step's target element must be truly visible (not *ngIf-removed,
+      // not in inactive tab body with visibility:hidden).
+      return isDomElementVisible(step.selector);
     });
 
     const newIds = newVisible.map(s => s.id).join(',');
