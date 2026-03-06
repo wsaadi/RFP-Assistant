@@ -17,7 +17,8 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
     <!-- Floating toggle button -->
     <button class="onboarding-fab" (click)="toggleGuide()"
       [class.active]="state.active"
-      [matTooltip]="state.active ? 'Désactiver le guide' : 'Activer le guide interactif'">
+      [class.has-steps]="!state.active && pageSteps.length > 0 && !pageCompleted"
+      [matTooltip]="state.active ? 'Désactiver le guide' : (pageSteps.length > 0 ? 'Lancer le guide pour cette page' : 'Pas de guide sur cette page')">
       <div class="fab-avatar" [class.waving]="state.active && showWave">
         <svg viewBox="0 0 64 64" class="avatar-svg">
           <!-- Body -->
@@ -45,6 +46,9 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
         </svg>
       </div>
       <span class="fab-label" *ngIf="!state.active">Guide</span>
+      <span class="fab-badge" *ngIf="!state.active && pageSteps.length > 0 && !pageCompleted">
+        {{ pageSteps.length }}
+      </span>
     </button>
 
     <!-- Welcome modal for first visit -->
@@ -68,7 +72,7 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
         </div>
         <h2>Bienvenue sur RFP Assistant !</h2>
         <p>Je suis votre assistant personnel. Je peux vous guider à travers toutes les fonctionnalités de l'application.</p>
-        <p class="welcome-sub">Souhaitez-vous que je vous fasse faire le tour ?</p>
+        <p class="welcome-sub">Sur chaque page, je vous expliquerai ce que vous pouvez faire. Souhaitez-vous commencer ?</p>
         <div class="welcome-actions">
           <button class="welcome-btn secondary" (click)="dismissWelcome()">Plus tard</button>
           <button class="welcome-btn primary" (click)="startTour()">Oui, guidez-moi !</button>
@@ -77,7 +81,7 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
     </div>
 
     <!-- Step tooltip overlay -->
-    <ng-container *ngIf="state.active && currentStep">
+    <ng-container *ngIf="state.active && currentStep && pageSteps.length > 0">
       <div class="onboarding-backdrop" (click)="onboardingService.nextStep()"></div>
 
       <div class="onboarding-spotlight" *ngIf="spotlightStyle"
@@ -114,21 +118,24 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
           <p>{{ currentStep.message }}</p>
           <div class="tooltip-footer">
             <div class="step-indicators">
-              <span *ngFor="let s of allSteps; let i = index"
+              <span *ngFor="let s of pageSteps; let i = index"
                 class="step-dot"
-                [class.active]="i === state.currentStepIndex"
+                [class.active]="s.id === currentStep.id"
                 [class.completed]="state.completedSteps.includes(s.id)"
-                (click)="goToStep(i)">
+                (click)="goToStep(s.id)">
               </span>
             </div>
             <div class="tooltip-nav">
-              <span class="step-counter">{{ state.currentStepIndex + 1 }} / {{ allSteps.length }}</span>
-              <button class="tooltip-btn" (click)="onboardingService.prevStep()" [disabled]="state.currentStepIndex === 0">
+              <span class="step-counter">{{ currentPageIndex + 1 }} / {{ pageSteps.length }}</span>
+              <span class="global-progress" *ngIf="globalCompletedCount > 0" matTooltip="Progression globale">
+                ({{ globalCompletedCount }}/{{ globalTotalCount }} au total)
+              </span>
+              <button class="tooltip-btn" (click)="onboardingService.prevStep()" [disabled]="currentPageIndex === 0">
                 <mat-icon>chevron_left</mat-icon>
               </button>
               <button class="tooltip-btn primary" (click)="onboardingService.nextStep()">
-                {{ isLastStep ? 'Terminer' : 'Suivant' }}
-                <mat-icon>{{ isLastStep ? 'check' : 'chevron_right' }}</mat-icon>
+                {{ isLastStepOnPage ? 'Compris !' : 'Suivant' }}
+                <mat-icon>{{ isLastStepOnPage ? 'check' : 'chevron_right' }}</mat-icon>
               </button>
               <button class="tooltip-btn dismiss" (click)="onboardingService.stopGuide()" matTooltip="Fermer le guide">
                 <mat-icon>close</mat-icon>
@@ -173,6 +180,13 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
     .onboarding-fab.active:hover {
       box-shadow: 0 6px 24px rgba(67, 160, 71, 0.5);
     }
+    .onboarding-fab.has-steps {
+      animation: fabPulse 3s ease-in-out infinite;
+    }
+    @keyframes fabPulse {
+      0%, 100% { box-shadow: 0 4px 16px rgba(25, 118, 210, 0.4); }
+      50% { box-shadow: 0 4px 24px rgba(25, 118, 210, 0.7); }
+    }
 
     .fab-avatar {
       width: 36px; height: 36px;
@@ -185,6 +199,22 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
     }
     .fab-avatar.waving { animation: fabBounce 2s ease-in-out infinite; }
     .fab-label { white-space: nowrap; }
+    .fab-badge {
+      position: absolute;
+      top: -4px;
+      right: -4px;
+      background: #ff5722;
+      color: white;
+      border-radius: 50%;
+      width: 20px;
+      height: 20px;
+      font-size: 11px;
+      font-weight: 700;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border: 2px solid white;
+    }
 
     .avatar-svg, .avatar-svg-small { width: 100%; height: 100%; }
 
@@ -383,7 +413,7 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
 
     .step-indicators {
       display: flex;
-      gap: 4px;
+      gap: 6px;
       flex-wrap: wrap;
       justify-content: center;
     }
@@ -396,7 +426,7 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
     }
     .step-dot.active {
       background: #1976d2;
-      transform: scale(1.3);
+      transform: scale(1.4);
     }
     .step-dot.completed { background: #43a047; }
     .step-dot:hover { transform: scale(1.5); }
@@ -410,6 +440,11 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
     .step-counter {
       font-size: 12px;
       color: #999;
+      margin-right: auto;
+    }
+    .global-progress {
+      font-size: 11px;
+      color: #bbb;
       margin-right: auto;
     }
 
@@ -451,12 +486,13 @@ import { OnboardingService, OnboardingStep, OnboardingState } from '../../servic
   `],
 })
 export class OnboardingGuideComponent implements OnInit, OnDestroy {
-  state: OnboardingState = { active: false, currentStepIndex: 0, completedSteps: [], dismissed: false };
+  state: OnboardingState = { active: false, currentStepId: '', completedSteps: [], dismissed: false };
   currentStep: OnboardingStep | null = null;
-  allSteps: OnboardingStep[] = [];
+  pageSteps: OnboardingStep[] = [];
   showWave = true;
   showFirstVisitModal = false;
   animateTooltip = false;
+  pageCompleted = false;
 
   spotlightStyle: { top: string; left: string; width: string; height: string } | null = null;
   tooltipStyle = { top: '50%', left: '50%' };
@@ -468,9 +504,7 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
   constructor(
     public onboardingService: OnboardingService,
     private router: Router,
-  ) {
-    this.allSteps = this.onboardingService.allSteps;
-  }
+  ) {}
 
   ngOnInit(): void {
     // Check first visit
@@ -478,10 +512,14 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
       setTimeout(() => this.showFirstVisitModal = true, 1500);
     }
 
+    // React to state changes
     this.subs.push(
       this.onboardingService.state$.subscribe((s) => {
         this.state = s;
         this.currentStep = this.onboardingService.currentStep;
+        this.pageSteps = this.onboardingService.currentPageSteps;
+        this.pageCompleted = this.onboardingService.currentPageCompleted;
+
         if (s.active && this.currentStep) {
           this.animateTooltip = false;
           setTimeout(() => {
@@ -494,12 +532,13 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
       }),
     );
 
+    // React to route changes
     this.subs.push(
-      this.router.events.pipe(
-        filter((e): e is NavigationEnd => e instanceof NavigationEnd),
-      ).subscribe(() => {
+      this.onboardingService.currentRoute$.subscribe(() => {
+        this.pageSteps = this.onboardingService.currentPageSteps;
+        this.pageCompleted = this.onboardingService.currentPageCompleted;
         if (this.state.active) {
-          setTimeout(() => this.updatePosition(), 300);
+          setTimeout(() => this.updatePosition(), 400);
         }
       }),
     );
@@ -533,7 +572,6 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
 
   dismissWelcome(): void {
     this.showFirstVisitModal = false;
-    // Save state so modal doesn't show again
     this.onboardingService.stopGuide();
   }
 
@@ -542,12 +580,24 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
     this.onboardingService.startGuide();
   }
 
-  goToStep(index: number): void {
-    this.onboardingService.goToStep(index);
+  goToStep(stepId: string): void {
+    this.onboardingService.goToStep(stepId);
   }
 
-  get isLastStep(): boolean {
-    return this.state.currentStepIndex >= this.allSteps.length - 1;
+  get currentPageIndex(): number {
+    return this.onboardingService.currentPageStepIndex;
+  }
+
+  get isLastStepOnPage(): boolean {
+    return this.currentPageIndex >= this.pageSteps.length - 1;
+  }
+
+  get globalCompletedCount(): number {
+    return this.onboardingService.completedStepCount;
+  }
+
+  get globalTotalCount(): number {
+    return this.onboardingService.totalStepCount;
   }
 
   private updatePosition(): void {
@@ -556,14 +606,18 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
     const selectors = this.currentStep.selector.split(',').map((s) => s.trim());
     let el: Element | null = null;
     for (const sel of selectors) {
-      el = document.querySelector(sel);
+      try {
+        el = document.querySelector(sel);
+      } catch { /* invalid selector, skip */ }
       if (el) break;
     }
 
     if (!el) {
-      // Element not found on current page - show centered tooltip
+      // Element not found - show centered floating tooltip
       this.spotlightStyle = null;
-      this.tooltipStyle = { top: '50%', left: '50%' };
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      this.tooltipStyle = { top: Math.round(vh * 0.35) + 'px', left: Math.max(24, Math.round((vw - 440) / 2)) + 'px' };
       this.tooltipPosition = 'bottom';
       return;
     }
@@ -578,7 +632,6 @@ export class OnboardingGuideComponent implements OnInit, OnDestroy {
       height: (rect.height + pad * 2) + 'px',
     };
 
-    // Position tooltip relative to the element
     const tooltipWidth = 440;
     const tooltipHeight = 220;
     const vw = window.innerWidth;
