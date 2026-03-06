@@ -1606,6 +1606,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   private _uploadQueue: { file: File; category: string }[] = [];
   private _activeUploads = 0;
   private readonly MAX_CONCURRENT_UPLOADS = 2;
+  private _refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Per-chapter AI state
   aiProcessing: Record<string, boolean> = {};
@@ -1948,6 +1949,30 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     }
   }
 
+  // Collect completed tracking IDs to clean up in one batch refresh
+  private _completedTrackingIds: string[] = [];
+
+  private _schedulePostUploadRefresh(trackingId: string): void {
+    this._completedTrackingIds.push(trackingId);
+    if (this._refreshTimer) { clearTimeout(this._refreshTimer); }
+    this._refreshTimer = setTimeout(() => {
+      this._refreshTimer = null;
+      const ids = [...this._completedTrackingIds];
+      this._completedTrackingIds = [];
+      // Single batched refresh for all completed uploads
+      this.api.getDocuments(this.projectId).subscribe({
+        next: (d) => {
+          this.documents = d;
+          this._refreshDocsByCategory();
+          this.uploadingFiles = this.uploadingFiles.filter(f => !ids.includes(f.id));
+          const hasProcessing = d.some(doc => doc.processing_status === 'pending' || doc.processing_status === 'processing');
+          if (hasProcessing) { this.startPolling(); }
+        },
+      });
+      this.api.getStatistics(this.projectId).subscribe({ next: (s) => this.stats = s });
+    }, 500);
+  }
+
   private _uploadFileWithProgress(file: File, category: string): void {
     const trackingId = 'upload_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
     const entry = { id: trackingId, filename: file.name, category, progress: 0, status: 'uploading' as const };
@@ -1976,19 +2001,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
           this.uploadingFiles = [...this.uploadingFiles];
         }
         this.snackBar.open(`${file.name} envoyé`, 'OK', { duration: 2000 });
-        // Refresh document list so the real doc appears, then remove tracking entry
-        this.api.getDocuments(this.projectId).subscribe({
-          next: (d) => {
-            this.documents = d;
-            this._refreshDocsByCategory();
-            // Remove tracking entry now that the real doc is in the list
-            this.uploadingFiles = this.uploadingFiles.filter(f => f.id !== trackingId);
-            const hasProcessing = d.some(doc => doc.processing_status === 'pending' || doc.processing_status === 'processing');
-            if (hasProcessing) { this.startPolling(); }
-          },
-        });
-        // Also refresh stats
-        this.api.getStatistics(this.projectId).subscribe({ next: (s) => this.stats = s });
+        // Debounce the refresh: wait 500ms so multiple completions batch into one call
+        this._schedulePostUploadRefresh(trackingId);
       },
       error: (err) => {
         this._activeUploads--;

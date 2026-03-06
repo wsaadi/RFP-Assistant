@@ -131,31 +131,22 @@ export class ApiService {
       reportProgress: true,
     });
 
-    const attemptUpload = (retryCount: number) => {
-      this.http.request(req).subscribe({
-        next: (event) => {
-          if (event.type === HttpEventType.UploadProgress && event.total) {
-            progress$.next(Math.round(100 * event.loaded / event.total));
-          } else if (event.type === HttpEventType.Response) {
-            progress$.next(100);
-            progress$.complete();
-            response$.next(event.body as DocumentInfo);
-            response$.complete();
-          }
-        },
-        error: (err) => {
-          if (err.status === 429 && retryCount < 3) {
-            const delay = Math.pow(2, retryCount) * 1000; // 1s, 2s, 4s
-            progress$.next(0);
-            setTimeout(() => attemptUpload(retryCount + 1), delay);
-          } else {
-            progress$.error(err);
-            response$.error(err);
-          }
-        },
-      });
-    };
-    attemptUpload(0);
+    this.http.request(req).subscribe({
+      next: (event) => {
+        if (event.type === HttpEventType.UploadProgress && event.total) {
+          progress$.next(Math.round(100 * event.loaded / event.total));
+        } else if (event.type === HttpEventType.Response) {
+          progress$.next(100);
+          progress$.complete();
+          response$.next(event.body as DocumentInfo);
+          response$.complete();
+        }
+      },
+      error: (err) => {
+        progress$.error(err);
+        response$.error(err);
+      },
+    });
 
     return { progress$, response$ };
   }
