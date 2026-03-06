@@ -16,6 +16,7 @@ from ..schemas.chapter import (
     BulkDeleteChaptersRequest,
 )
 from ..services.progress_service import get_or_idle, set_progress
+from ..services.moderation_service import moderate_prompt
 from .deps import get_current_user
 
 router = APIRouter(prefix="/chapters", tags=["Chapters"])
@@ -211,6 +212,10 @@ async def add_note(
     db: AsyncSession = Depends(get_db),
 ):
     """Add a note to a chapter."""
+    moderation = moderate_prompt(request.content, "note")
+    if not moderation:
+        raise HTTPException(status_code=422, detail=moderation.message)
+
     result = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
     chapter = result.scalar_one_or_none()
     if not chapter:
@@ -237,6 +242,12 @@ async def generate_chapter_content(
     db: AsyncSession = Depends(get_db),
 ):
     """Launch chapter content generation as a Celery background task."""
+    # Moderate the custom prompt before dispatching
+    if request.custom_prompt:
+        moderation = moderate_prompt(request.custom_prompt, "custom_prompt")
+        if not moderation:
+            raise HTTPException(status_code=422, detail=moderation.message)
+
     cid = str(chapter_id)
 
     existing = get_or_idle(_NS, cid)

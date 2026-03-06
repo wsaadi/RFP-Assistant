@@ -33,6 +33,7 @@ from ..services.ai_service import MistralAIService, create_ai_service, log_ai_us
 from ..services.vector_service import VectorService
 from ..services.anonymization_service import AnonymizationService
 from ..services.progress_service import set_progress, get_or_idle
+from ..services.moderation_service import moderate_prompt
 from .deps import get_current_user, require_project_owner_or_admin, get_workspace_membership, get_project_membership
 
 router = APIRouter(prefix="/projects", tags=["Projects"])
@@ -162,6 +163,12 @@ async def create_project(
     db: AsyncSession = Depends(get_db),
 ):
     """Create a new RFP project. Any workspace member can create a project."""
+    # Moderate user-provided text fields
+    if request.ai_context:
+        moderation = moderate_prompt(request.ai_context, "ai_context")
+        if not moderation:
+            raise HTTPException(status_code=422, detail=moderation.message)
+
     # Verify workspace membership
     await get_workspace_membership(workspace_id, current_user, db)
 
@@ -270,6 +277,14 @@ async def update_project(
 ):
     """Update project details."""
     from ..models.user import UserRole
+
+    # Moderate user-provided text fields
+    for field_name in ("ai_context", "improvement_axes"):
+        value = getattr(request, field_name, None)
+        if value:
+            moderation = moderate_prompt(value, field_name)
+            if not moderation:
+                raise HTTPException(status_code=422, detail=moderation.message)
 
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
@@ -3107,6 +3122,10 @@ async def add_improvement_axis(
     db: AsyncSession = Depends(get_db),
 ):
     """Add an improvement axis from client feedback."""
+    moderation = moderate_prompt(request.content, "improvement_axis")
+    if not moderation:
+        raise HTTPException(status_code=422, detail=moderation.message)
+
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
@@ -3135,6 +3154,10 @@ async def update_improvement_axis(
     db: AsyncSession = Depends(get_db),
 ):
     """Update an existing improvement axis."""
+    moderation = moderate_prompt(request.content, "improvement_axis")
+    if not moderation:
+        raise HTTPException(status_code=422, detail=moderation.message)
+
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
     if not project:
