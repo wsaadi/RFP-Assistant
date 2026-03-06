@@ -11,6 +11,8 @@ export interface OnboardingStep {
   message: string;
   icon: string;
   position: 'top' | 'bottom' | 'left' | 'right';
+  /** If set, the step only shows when this tab label is active (Angular Material mdc-tab--active) */
+  tabLabel?: string;
 }
 
 export interface OnboardingState {
@@ -50,6 +52,17 @@ const ALL_STEPS: OnboardingStep[] = [
     position: 'bottom',
   },
 
+  // ── Workspace detail – always visible (header) ──
+  {
+    id: 'workspace-admin-actions',
+    route: '/workspace/',
+    selector: '.header-actions button[color="primary"], .header-actions button[color="accent"]',
+    title: 'Actions administrateur',
+    message: 'En tant qu\'administrateur, vous pouvez importer un projet depuis un backup, configurer les paramètres IA du workspace et modifier ses propriétés.',
+    icon: 'admin_panel_settings',
+    position: 'bottom',
+  },
+
   // ── Workspace detail – Projets tab ──
   {
     id: 'workspace-detail-projects',
@@ -59,6 +72,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Ici vous retrouvez tous les projets de réponse à appel d\'offres. Chaque projet correspond à un AO spécifique avec ses documents, chapitres et analyses. Cliquez pour y accéder.',
     icon: 'assignment',
     position: 'top',
+    tabLabel: 'Projets',
   },
   {
     id: 'create-project',
@@ -68,15 +82,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Cliquez sur "Nouveau projet" pour démarrer un projet de réponse à appel d\'offres. Renseignez le nom du client, la référence de l\'AO et la date limite.',
     icon: 'note_add',
     position: 'bottom',
-  },
-  {
-    id: 'workspace-admin-actions',
-    route: '/workspace/',
-    selector: '.header-actions button[color="primary"], .header-actions button[color="accent"]',
-    title: 'Actions administrateur',
-    message: 'En tant qu\'administrateur, vous pouvez importer un projet depuis un backup, configurer les paramètres IA du workspace et modifier ses propriétés.',
-    icon: 'admin_panel_settings',
-    position: 'bottom',
+    tabLabel: 'Projets',
   },
 
   // ── Workspace detail – Membres tab ──
@@ -88,6 +94,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'En tant que propriétaire ou admin, vous pouvez ajouter des collaborateurs et changer leurs rôles : Propriétaire, Éditeur ou Lecteur. Chacun aura des droits adaptés.',
     icon: 'group_add',
     position: 'top',
+    tabLabel: 'Membres',
   },
   {
     id: 'workspace-members-view',
@@ -97,9 +104,10 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Voici la liste des membres de cet espace de travail. Chaque membre a un rôle qui détermine ses droits d\'accès aux projets.',
     icon: 'group',
     position: 'top',
+    tabLabel: 'Membres',
   },
 
-  // ── Project dashboard – header (always visible) ──
+  // ── Project dashboard – header (always visible, no tabLabel) ──
   {
     id: 'project-overview',
     route: '/project/',
@@ -137,6 +145,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Commencez par uploader les documents de l\'appel d\'offres (CCTP, RC, BPU...) et vos anciens documents de réponse. Classez-les par catégorie pour aider l\'IA à mieux les utiliser.',
     icon: 'upload_file',
     position: 'top',
+    tabLabel: 'Documents',
   },
   {
     id: 'upload-categories',
@@ -146,6 +155,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Chaque carte correspond à un type de document : Ancien AO, Nouvel AO, Ancienne réponse, Nouvelle réponse, Inspiration. Glissez-déposez ou cliquez pour sélectionner.',
     icon: 'category',
     position: 'bottom',
+    tabLabel: 'Documents',
   },
 
   // ── Project – Livrables tab ──
@@ -157,6 +167,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Cliquez pour laisser l\'IA analyser l\'appel d\'offres et identifier tous les documents à produire (mémoire technique, BPU, planning...). C\'est la première étape !',
     icon: 'find_in_page',
     position: 'bottom',
+    tabLabel: 'Livrables',
   },
   {
     id: 'livrables-list',
@@ -166,6 +177,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Les livrables détectés apparaissent ici. Cochez ceux à compléter et lancez le pré-remplissage pour que l\'IA complète les sections manquantes.',
     icon: 'description',
     position: 'top',
+    tabLabel: 'Livrables',
   },
 
   // ── Project – Structure tab ──
@@ -177,6 +189,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'L\'IA analyse le cahier des charges et crée automatiquement la structure de chapitres de votre réponse. Sélectionnez les documents de rédaction concernés.',
     icon: 'auto_fix_high',
     position: 'bottom',
+    tabLabel: 'Structure',
   },
   {
     id: 'structure-chapters',
@@ -186,6 +199,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'La liste de tous vos chapitres. Cochez ceux que vous souhaitez, puis utilisez "Générer IA" pour les rédiger ou "Pré-remplir" pour copier depuis vos anciens documents.',
     icon: 'menu_book',
     position: 'top',
+    tabLabel: 'Structure',
   },
   {
     id: 'structure-ai-generate',
@@ -195,6 +209,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Sélectionnez des chapitres puis cliquez "Générer IA" pour que l\'IA rédige le contenu. Elle s\'appuie sur vos documents de référence et le contexte du projet.',
     icon: 'auto_awesome',
     position: 'bottom',
+    tabLabel: 'Structure',
   },
 
   // ── Project – Outils IA tab ──
@@ -206,6 +221,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Configurez le contexte IA : décrivez votre entreprise, vos points forts, le ton souhaité. L\'IA utilisera ces informations pour personnaliser toutes ses rédactions.',
     icon: 'psychology',
     position: 'bottom',
+    tabLabel: 'Outils IA',
   },
   {
     id: 'ai-tools',
@@ -215,9 +231,10 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Lancez l\'analyse de conformité (votre réponse couvre-t-elle toutes les exigences ?), l\'analyse d\'écarts (qu\'est-ce qui a changé ?) ou consultez les statistiques du projet.',
     icon: 'build',
     position: 'top',
+    tabLabel: 'Outils IA',
   },
 
-  // ── Project – Q&A tab ──
+  // ── Project – Q&A Documents tab ──
   {
     id: 'qa-documents',
     route: '/project/',
@@ -226,6 +243,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Posez des questions à l\'IA sur vos documents ! Par exemple : "Quelles sont les pénalités de retard ?" ou "Quels sont les SLA demandés ?". L\'IA cherche dans tous vos documents et cite ses sources.',
     icon: 'question_answer',
     position: 'top',
+    tabLabel: 'Q&A Documents',
   },
 
   // ── Project – Membres tab ──
@@ -237,6 +255,7 @@ const ALL_STEPS: OnboardingStep[] = [
     message: 'Gérez les accès au projet. Ajoutez des membres depuis l\'espace de travail et attribuez-leur un rôle : Propriétaire, Éditeur ou Lecteur.',
     icon: 'group',
     position: 'top',
+    tabLabel: 'Membres',
   },
 
   // ── Chapter editor ──
@@ -352,7 +371,6 @@ export class OnboardingService {
       const prevRoute = this.currentRouteSubject.value;
       this.currentRouteSubject.next(e.urlAfterRedirects);
 
-      // When the route changes and guide is active, auto-jump to first step of the new page
       if (this.state.active && prevRoute !== e.urlAfterRedirects) {
         const filtered = this.getStepsForRoute(e.urlAfterRedirects);
         if (filtered.length > 0) {
@@ -391,7 +409,6 @@ export class OnboardingService {
     return ALL_STEPS;
   }
 
-  /** Steps filtered to the current route only */
   get currentPageSteps(): OnboardingStep[] {
     return this.getStepsForRoute(this.currentRoute);
   }
@@ -435,7 +452,6 @@ export class OnboardingService {
     }
   }
 
-  /** Navigate steps within a given visible list (called by component) */
   nextStepIn(visibleSteps: OnboardingStep[]): void {
     const s = this.state;
     if (!s.active) return;
@@ -446,12 +462,10 @@ export class OnboardingService {
     if (currentIdx < visibleSteps.length - 1) {
       this.saveState({ ...s, currentStepId: visibleSteps[currentIdx + 1].id, completedSteps: completed });
     } else {
-      // Last visible step - mark complete
       this.saveState({ ...s, active: false, currentStepId: '', completedSteps: completed, dismissed: false });
     }
   }
 
-  /** Navigate back within a given visible list (called by component) */
   prevStepIn(visibleSteps: OnboardingStep[]): void {
     const s = this.state;
     if (!s.active) return;
