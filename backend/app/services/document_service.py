@@ -73,6 +73,43 @@ class DocumentProcessor:
                 return f.read()
 
     @staticmethod
+    def extract_text_from_doc_fallback(file_content: bytes) -> str:
+        """Fallback text extraction for .doc using antiword.
+
+        Used when LibreOffice conversion fails.
+        Returns extracted text or empty string.
+        """
+        with tempfile.TemporaryDirectory() as tmpdir:
+            doc_path = os.path.join(tmpdir, "input.doc")
+            with open(doc_path, "wb") as f:
+                f.write(file_content)
+
+            try:
+                result = subprocess.run(
+                    ["antiword", doc_path],
+                    capture_output=True,
+                    timeout=60,
+                )
+                if result.returncode == 0:
+                    return result.stdout.decode("utf-8", errors="ignore")
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+            # Last resort: try catdoc
+            try:
+                result = subprocess.run(
+                    ["catdoc", doc_path],
+                    capture_output=True,
+                    timeout=60,
+                )
+                if result.returncode == 0:
+                    return result.stdout.decode("utf-8", errors="ignore")
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                pass
+
+        return ""
+
+    @staticmethod
     def _validate_docx(file_content: bytes) -> bool:
         """Check if file_content is a valid DOCX (ZIP with Word content type)."""
         if not zipfile.is_zipfile(io.BytesIO(file_content)):

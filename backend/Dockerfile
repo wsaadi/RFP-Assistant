@@ -9,6 +9,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     libpq-dev \
     libreoffice-writer-nogui \
+    antiword \
+    catdoc \
     gosu \
     && rm -rf /var/lib/apt/lists/*
 
