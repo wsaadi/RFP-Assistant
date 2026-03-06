@@ -2,6 +2,7 @@
 import asyncio
 import uuid
 import logging
+from typing import List, Optional
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse
@@ -42,6 +43,7 @@ class PreviewChatRequest(BaseModel):
 
 class DocumentQARequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
+    document_ids: Optional[List[str]] = Field(None, description="Optional list of document UUIDs to restrict search scope")
 
 
 @router.post("/{project_id}/word")
@@ -1023,65 +1025,111 @@ async def document_qa(
 
     ai_service = create_ai_service(config)
 
-    # Semantic search across all documents
+    # Semantic search — optionally restricted to selected documents
     search_results = VectorService.search(
-        str(project_id), request.question, top_k=15,
+        str(project_id),
+        request.question,
+        top_k=25,
+        document_ids=request.document_ids,
     )
 
+    # Filter out low-relevance results (cosine similarity < 0.3)
+    search_results = [r for r in search_results if r.get("score", 0) >= 0.3]
+
     if not search_results:
+        if request.document_ids:
+            return {
+                "answer": "Je n'ai trouve aucune information pertinente dans les documents selectionnes pour repondre a cette question. Essayez de reformuler votre question ou de selectionner d'autres documents.",
+                "sources": [],
+            }
         return {
             "answer": "Je n'ai trouve aucun document pertinent pour repondre a cette question. Verifiez que des documents ont bien ete charges et traites dans le projet.",
             "sources": [],
         }
 
-    # Build context from search results
+    # Build context from search results — group by document for coherence
+    from collections import defaultdict
+    doc_groups = defaultdict(list)
+    for r in search_results:
+        doc_key = r.get("document_name", "Document inconnu")
+        doc_groups[doc_key].append(r)
+
     context_parts = []
     sources = []
     seen_sources = set()
-    for r in search_results:
-        content = r["content"]
-        # Remove the "passage: " prefix added during indexing
-        if content.startswith("passage: "):
-            content = content[9:]
-        doc_name = r.get("document_name", "Document inconnu")
-        category = r.get("category", "")
-        page = r.get("page_number", 0)
-        cat_label = CATEGORY_LABELS.get(category, category)
+    chunk_count = 0
+    max_chunks = 20  # Limit context window to avoid dilution
 
-        context_parts.append(
-            f"[Source: {doc_name} ({cat_label}), page {page}]\n{content}"
-        )
+    for doc_name, doc_results in doc_groups.items():
+        # Sort by page number then chunk index for coherent reading order
+        doc_results.sort(key=lambda x: (x.get("page_number", 0), x.get("chunk_index", 0)))
+        for r in doc_results:
+            if chunk_count >= max_chunks:
+                break
+            content = r["content"]
+            # Remove the "passage: " prefix added during indexing
+            if content.startswith("passage: "):
+                content = content[9:]
+            category = r.get("category", "")
+            page = r.get("page_number", 0)
+            section = r.get("section_title", "")
+            cat_label = CATEGORY_LABELS.get(category, category)
+            score = r.get("score", 0)
 
-        source_key = f"{doc_name}|{page}"
-        if source_key not in seen_sources:
-            seen_sources.add(source_key)
-            sources.append({
-                "document_name": doc_name,
-                "category": category,
-                "category_label": cat_label,
-                "page_number": page,
-                "score": r.get("score", 0),
-                "excerpt": content[:200],
-            })
+            header = f"[Source: {doc_name} | {cat_label} | page {page}"
+            if section:
+                header += f" | section: {section}"
+            header += f" | pertinence: {score:.0%}]"
+
+            context_parts.append(f"{header}\n{content}")
+            chunk_count += 1
+
+            source_key = f"{doc_name}|{page}"
+            if source_key not in seen_sources:
+                seen_sources.add(source_key)
+                sources.append({
+                    "document_name": doc_name,
+                    "category": category,
+                    "category_label": cat_label,
+                    "page_number": page,
+                    "score": score,
+                    "excerpt": content[:200],
+                })
 
     context_text = "\n\n---\n\n".join(context_parts)
 
-    system_prompt = """Tu es un assistant expert en analyse de documents pour les appels d'offres.
+    # Build document scope description for the prompt
+    doc_scope = ""
+    if request.document_ids:
+        doc_names_in_scope = list(doc_groups.keys())
+        doc_scope = f"\n\nIMPORTANT: L'utilisateur a restreint la recherche aux documents suivants : {', '.join(doc_names_in_scope)}. Concentre ta reponse sur ces documents uniquement."
+
+    system_prompt = f"""Tu es un assistant expert en analyse de documents pour les appels d'offres.
 L'utilisateur te pose des questions sur les documents charges dans le projet.
 Tu dois repondre en te basant UNIQUEMENT sur les extraits de documents fournis ci-dessous.
 
-Regles:
-- Reponds de maniere precise et detaillee en te basant sur les documents.
-- Cite TOUJOURS tes sources : indique le nom du document, la categorie et le numero de page entre parentheses. Exemple: (Source: cahier_des_charges.pdf, Nouvel AO, page 12)
-- Si tu ne trouves pas l'information dans les extraits fournis, dis-le clairement.
-- Quand l'utilisateur parle d'"ancien AO" ou "ancien appel d'offres", il fait reference aux documents de categorie "Ancien AO".
-- Quand il parle d'"ancienne reponse", il fait reference aux documents de categorie "Ancienne Reponse".
-- Quand il parle de "nouvel AO" ou "nouveau cahier des charges", il fait reference aux documents de categorie "Nouvel AO".
-- Quand il parle de "notre reponse", il fait reference aux documents de categorie "Notre Reponse".
-- Utilise le markdown pour structurer ta reponse (titres, listes, gras).
-- Si la question porte sur une comparaison entre ancien et nouvel AO, compare les informations des documents des deux categories."""
+Regles STRICTES:
+- Base ta reponse EXCLUSIVEMENT sur les extraits fournis. Ne complete JAMAIS avec des connaissances generales.
+- Reponds de maniere precise, structuree et detaillee.
+- Cite TOUJOURS tes sources avec le format exact : **(Source: nom_du_fichier.pdf, Categorie, page X)**
+- Pour chaque affirmation factuelle, indique la source correspondante.
+- Si tu ne trouves PAS l'information dans les extraits fournis, dis-le CLAIREMENT : "Cette information n'apparait pas dans les extraits disponibles."
+- Ne fais JAMAIS de supposition ou d'extrapolation au-dela de ce qui est ecrit dans les documents.
+- Si l'information est partielle, indique-le et cite ce qui est disponible.
 
-    user_prompt = f"""Voici les extraits pertinents des documents du projet :
+Vocabulaire de categorie:
+- "Ancien AO" = documents de categorie "Ancien AO" (ancien appel d'offres)
+- "Ancienne Reponse" = documents de categorie "Ancienne Reponse"
+- "Nouvel AO" / "cahier des charges" = documents de categorie "Nouvel AO"
+- "Notre Reponse" = documents de categorie "Notre Reponse"
+- "Inspiration" = documents d'inspiration / references
+
+Mise en forme:
+- Utilise le markdown : titres (##), listes, **gras** pour les points cles.
+- Si la question porte sur une comparaison, structure ta reponse en colonnes ou sections claires.
+- Termine par une synthese courte si la reponse est longue.{doc_scope}"""
+
+    user_prompt = f"""Voici les extraits pertinents des documents du projet (classes par document et page) :
 
 {context_text}
 
@@ -1089,7 +1137,7 @@ Regles:
 
 Question de l'utilisateur : {request.question}
 
-Reponds en citant tes sources."""
+Reponds de maniere precise et structuree en citant systematiquement tes sources."""
 
     try:
         answer = await ai_service.generate_streaming(

@@ -170,6 +170,7 @@ class VectorService:
         query: str,
         top_k: int = 10,
         category_filter: Optional[str] = None,
+        document_ids: Optional[List[str]] = None,
     ) -> List[Dict]:
         """Search for similar chunks in the vector database.
 
@@ -178,6 +179,7 @@ class VectorService:
             query: Search query text
             top_k: Number of results to return
             category_filter: Optional filter by document category
+            document_ids: Optional list of document UUIDs to restrict search scope
 
         Returns:
             List of search results with content, metadata, and score
@@ -185,8 +187,19 @@ class VectorService:
         collection = cls.get_collection(project_id)
 
         where_filter = None
+        conditions = []
         if category_filter:
-            where_filter = {"category": category_filter}
+            conditions.append({"category": category_filter})
+        if document_ids:
+            if len(document_ids) == 1:
+                conditions.append({"document_id": document_ids[0]})
+            else:
+                conditions.append({"document_id": {"$in": document_ids}})
+
+        if len(conditions) == 1:
+            where_filter = conditions[0]
+        elif len(conditions) > 1:
+            where_filter = {"$and": conditions}
 
         try:
             results = collection.query(
@@ -207,10 +220,12 @@ class VectorService:
                 search_results.append({
                     "chunk_id": results["ids"][0][i],
                     "content": doc,
+                    "document_id": metadata.get("document_id", ""),
                     "document_name": metadata.get("document_name", ""),
                     "category": metadata.get("category", ""),
                     "page_number": metadata.get("page_number", 0),
                     "section_title": metadata.get("section_title", ""),
+                    "chunk_index": metadata.get("chunk_index", 0),
                     "score": round(score, 4),
                 })
 

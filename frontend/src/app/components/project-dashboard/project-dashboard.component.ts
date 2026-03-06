@@ -1050,7 +1050,34 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                 <mat-icon>question_answer</mat-icon>
                 <div>
                   <h3>Interroger les documents du projet</h3>
-                  <p class="qa-subtitle">Posez des questions sur l'ensemble des documents charges. L'IA analysera les documents et citera ses sources.</p>
+                  <p class="qa-subtitle">Posez des questions sur les documents charges. L'IA analysera les documents et citera ses sources.</p>
+                </div>
+              </div>
+
+              <div class="qa-doc-filter">
+                <button mat-stroked-button (click)="toggleQaDocFilter()" class="qa-filter-btn">
+                  <mat-icon>filter_list</mat-icon>
+                  {{ qaSelectedDocIds.length > 0 ? qaSelectedDocIds.length + ' document(s) selectionne(s)' : 'Tous les documents' }}
+                  <mat-icon>{{ qaDocFilterOpen ? 'expand_less' : 'expand_more' }}</mat-icon>
+                </button>
+                <button *ngIf="qaSelectedDocIds.length > 0" mat-icon-button matTooltip="Reinitialiser le filtre" (click)="clearQaDocSelection()">
+                  <mat-icon>clear</mat-icon>
+                </button>
+              </div>
+
+              <div *ngIf="qaDocFilterOpen" class="qa-doc-list">
+                <div *ngFor="let doc of getCompletedDocuments()" class="qa-doc-item"
+                  [class.qa-doc-selected]="isQaDocSelected(doc.id)"
+                  (click)="toggleQaDocSelection(doc.id)">
+                  <mat-checkbox [checked]="isQaDocSelected(doc.id)" (click)="$event.stopPropagation()" (change)="toggleQaDocSelection(doc.id)"></mat-checkbox>
+                  <mat-icon class="qa-doc-type-icon">description</mat-icon>
+                  <div class="qa-doc-item-info">
+                    <span class="qa-doc-item-name">{{ doc.original_filename }}</span>
+                    <mat-chip class="qa-doc-cat-chip">{{ doc.category }}</mat-chip>
+                  </div>
+                </div>
+                <div *ngIf="getCompletedDocuments().length === 0" class="qa-doc-empty">
+                  Aucun document traite disponible.
                 </div>
               </div>
 
@@ -1507,6 +1534,18 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .qa-loading span { font-size: 13px; color: #e65100; }
     .qa-input-area { display: flex; gap: 12px; align-items: flex-start; }
     .qa-input-field { flex: 1; }
+    .qa-doc-filter { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+    .qa-filter-btn { font-size: 13px; color: #1B3A5C; border-color: #c5cae9; display: flex; align-items: center; gap: 6px; }
+    .qa-filter-btn mat-icon { font-size: 18px; width: 18px; height: 18px; }
+    .qa-doc-list { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 8px; margin-bottom: 16px; max-height: 250px; overflow-y: auto; }
+    .qa-doc-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
+    .qa-doc-item:hover { background: #e8eaf6; }
+    .qa-doc-selected { background: #e3f2fd; }
+    .qa-doc-type-icon { font-size: 18px; width: 18px; height: 18px; color: #1976d2; }
+    .qa-doc-item-info { display: flex; align-items: center; gap: 8px; flex: 1; min-width: 0; }
+    .qa-doc-item-name { font-size: 13px; color: #333; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .qa-doc-cat-chip { font-size: 10px !important; height: 20px !important; min-height: 20px !important; }
+    .qa-doc-empty { text-align: center; padding: 16px; color: #888; font-size: 13px; }
 
     /* Project Members */
     .add-member-card { padding: 24px; margin-bottom: 16px; }
@@ -1629,6 +1668,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   qaMessages: { role: 'user' | 'assistant' | 'error'; content: string; sources?: any[]; timestamp: Date; _sourcesOpen?: boolean }[] = [];
   qaInput = '';
   qaLoading = false;
+  qaSelectedDocIds: string[] = [];
+  qaDocFilterOpen = false;
 
   // Project members & access control
   projectMembers: any[] = [];
@@ -3159,7 +3200,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.qaInput = '';
     this.qaLoading = true;
 
-    this.api.documentQA(this.projectId, question).subscribe({
+    this.api.documentQA(this.projectId, question, this.qaSelectedDocIds.length > 0 ? this.qaSelectedDocIds : undefined).subscribe({
       next: (res) => {
         this.qaLoading = false;
         this.qaMessages.push({
@@ -3187,6 +3228,31 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       ke.preventDefault();
       this.askQuestion();
     }
+  }
+
+  toggleQaDocFilter(): void {
+    this.qaDocFilterOpen = !this.qaDocFilterOpen;
+  }
+
+  toggleQaDocSelection(docId: string): void {
+    const idx = this.qaSelectedDocIds.indexOf(docId);
+    if (idx >= 0) {
+      this.qaSelectedDocIds.splice(idx, 1);
+    } else {
+      this.qaSelectedDocIds.push(docId);
+    }
+  }
+
+  isQaDocSelected(docId: string): boolean {
+    return this.qaSelectedDocIds.includes(docId);
+  }
+
+  clearQaDocSelection(): void {
+    this.qaSelectedDocIds = [];
+  }
+
+  getCompletedDocuments(): DocumentInfo[] {
+    return this.documents.filter(d => d.processing_status === 'completed');
   }
 
   // ── Project member management ──

@@ -19,9 +19,10 @@ from ..config import settings
 
 
 # Chunk size configuration (aligned with multilingual-e5-base 512 token limit)
-# ~300 words ≈ 400-450 tokens in French, safely under the 512 max_seq_length
-CHUNK_SIZE = 300  # words
-CHUNK_OVERLAP = 50  # words overlap between chunks
+# ~200 words ≈ 260-300 tokens in French, well within the 512 max_seq_length.
+# Smaller chunks yield more precise retrieval results.
+CHUNK_SIZE = 200  # words
+CHUNK_OVERLAP = 40  # words overlap between chunks
 
 
 class DocumentProcessor:
