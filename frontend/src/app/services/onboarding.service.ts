@@ -11,13 +11,11 @@ export interface OnboardingStep {
   message: string;
   icon: string;
   position: 'top' | 'bottom' | 'left' | 'right';
-  action?: 'click' | 'observe';
-  nextRoute?: string;
 }
 
 export interface OnboardingState {
   active: boolean;
-  currentStepIndex: number;
+  currentStepId: string;
   completedSteps: string[];
   dismissed: boolean;
 }
@@ -47,7 +45,7 @@ const ALL_STEPS: OnboardingStep[] = [
     route: '/workspaces',
     selector: '.page-header button[color="primary"]',
     title: 'Créer un workspace (Admin)',
-    message: 'Si vous êtes administrateur, cliquez ici pour créer un nouvel espace de travail. Donnez-lui un nom parlant comme "AO Transport 2025".',
+    message: 'Si vous êtes administrateur, cliquez ici pour créer un nouvel espace de travail. Donnez-lui un nom parlant comme "AO Transport 2025". Ensuite, entrez dans le workspace pour créer vos projets.',
     icon: 'add_circle',
     position: 'bottom',
   },
@@ -75,7 +73,7 @@ const ALL_STEPS: OnboardingStep[] = [
     route: '/workspace/',
     selector: '.mat-mdc-tab:nth-child(2)',
     title: 'Gérer les membres',
-    message: 'Dans l\'onglet "Membres", vous pouvez ajouter des collaborateurs avec différents rôles : Propriétaire, Éditeur ou Lecteur. Chacun aura des droits adaptés.',
+    message: 'Dans l\'onglet "Membres", vous pouvez ajouter des collaborateurs avec différents rôles : Propriétaire, Éditeur ou Lecteur. Chacun aura des droits adaptés. Ensuite, entrez dans un projet.',
     icon: 'group',
     position: 'bottom',
   },
@@ -157,7 +155,7 @@ const ALL_STEPS: OnboardingStep[] = [
     route: '/project/',
     selector: 'button:has(mat-icon[fontIcon="bar_chart"]), [routerLink*="statistics"], [class*="stat"]',
     title: 'Statistiques 📈',
-    message: 'Suivez l\'avancement de votre projet : progression par chapitre, couverture des exigences, score de conformité global et métriques de qualité.',
+    message: 'Suivez l\'avancement de votre projet : progression par chapitre, couverture des exigences, score de conformité global et métriques de qualité. Cliquez sur un chapitre pour l\'éditer.',
     icon: 'analytics',
     position: 'bottom',
   },
@@ -228,17 +226,35 @@ const ALL_STEPS: OnboardingStep[] = [
     icon: 'monitoring',
     position: 'top',
   },
-  // ── Final step ──
+  // ── Image gallery page ──
   {
-    id: 'guide-complete',
-    route: '*',
-    selector: 'body',
-    title: 'Vous êtes prêt ! 🚀',
-    message: 'Vous connaissez maintenant les principales fonctionnalités de RFP Assistant. N\'hésitez pas à réactiver ce guide à tout moment depuis le bouton en bas à droite. Bonne rédaction !',
-    icon: 'celebration',
-    position: 'bottom',
+    id: 'images-page',
+    route: '/images',
+    selector: '.page-container, .gallery, .image',
+    title: 'Galerie d\'images',
+    message: 'Toutes les images extraites de vos documents sont ici. L\'IA Vision peut les analyser automatiquement pour en extraire du texte et des informations utiles à la rédaction.',
+    icon: 'photo_library',
+    position: 'top',
+  },
+  // ── Soutenance page ──
+  {
+    id: 'soutenance-page',
+    route: '/soutenance',
+    selector: '.page-container, .soutenance',
+    title: 'Préparation de soutenance',
+    message: 'Générez automatiquement un PowerPoint de soutenance avec un script de présentation. L\'IA structure votre argumentaire et prépare les réponses aux questions attendues.',
+    icon: 'co_present',
+    position: 'top',
   },
 ];
+
+/** Check if a step's route pattern matches a given URL */
+function stepMatchesRoute(step: OnboardingStep, url: string): boolean {
+  if (step.route === '*') return true;
+  // For routes like '/workspace/', '/project/', '/chapter/' - match as substring
+  // For exact routes like '/workspaces', '/compliance' - match start or contain
+  return url.includes(step.route);
+}
 
 @Injectable({ providedIn: 'root' })
 export class OnboardingService {
@@ -247,13 +263,28 @@ export class OnboardingService {
   private stateSubject = new BehaviorSubject<OnboardingState>(this.loadState());
   state$ = this.stateSubject.asObservable();
 
-  private currentRoute = '';
+  private currentRouteSubject = new BehaviorSubject<string>('');
+  currentRoute$ = this.currentRouteSubject.asObservable();
 
   constructor(private router: Router) {
     this.router.events.pipe(
       filter((e): e is NavigationEnd => e instanceof NavigationEnd),
     ).subscribe((e) => {
-      this.currentRoute = e.urlAfterRedirects;
+      const prevRoute = this.currentRouteSubject.value;
+      this.currentRouteSubject.next(e.urlAfterRedirects);
+
+      // When the route changes and guide is active, auto-jump to first step of the new page
+      if (this.state.active && prevRoute !== e.urlAfterRedirects) {
+        const filtered = this.getStepsForRoute(e.urlAfterRedirects);
+        if (filtered.length > 0) {
+          // Jump to first non-completed step on this page, or first step
+          const firstUncompleted = filtered.find(s => !this.state.completedSteps.includes(s.id));
+          this.saveState({
+            ...this.state,
+            currentStepId: (firstUncompleted || filtered[0]).id,
+          });
+        }
+      }
     });
   }
 
@@ -262,7 +293,7 @@ export class OnboardingService {
       const saved = localStorage.getItem(this.STORAGE_KEY);
       if (saved) return JSON.parse(saved);
     } catch {}
-    return { active: false, currentStepIndex: 0, completedSteps: [], dismissed: false };
+    return { active: false, currentStepId: '', completedSteps: [], dismissed: false };
   }
 
   private saveState(state: OnboardingState): void {
@@ -274,75 +305,100 @@ export class OnboardingService {
     return this.stateSubject.value;
   }
 
+  get currentRoute(): string {
+    return this.currentRouteSubject.value;
+  }
+
   get allSteps(): OnboardingStep[] {
     return ALL_STEPS;
   }
 
+  /** Steps filtered to the current route only */
+  get currentPageSteps(): OnboardingStep[] {
+    return this.getStepsForRoute(this.currentRoute);
+  }
+
   get currentStep(): OnboardingStep | null {
     const s = this.state;
-    if (!s.active || s.currentStepIndex >= ALL_STEPS.length) return null;
-    return ALL_STEPS[s.currentStepIndex];
+    if (!s.active || !s.currentStepId) return null;
+    return ALL_STEPS.find(step => step.id === s.currentStepId) || null;
+  }
+
+  /** Index of the current step within the current page's filtered steps */
+  get currentPageStepIndex(): number {
+    const step = this.currentStep;
+    if (!step) return 0;
+    return this.currentPageSteps.findIndex(s => s.id === step.id);
   }
 
   getStepsForRoute(route: string): OnboardingStep[] {
-    return ALL_STEPS.filter((s) => {
-      if (s.route === '*') return true;
-      return route.startsWith(s.route) || route.includes(s.route);
-    });
+    return ALL_STEPS.filter(s => stepMatchesRoute(s, route));
+  }
+
+  /** Number of pages that have steps (for global progress) */
+  get totalStepCount(): number {
+    return ALL_STEPS.length;
+  }
+
+  get completedStepCount(): number {
+    return this.state.completedSteps.length;
   }
 
   startGuide(): void {
-    this.saveState({ active: true, currentStepIndex: 0, completedSteps: [], dismissed: false });
+    const filtered = this.getStepsForRoute(this.currentRoute);
+    const firstId = filtered.length > 0 ? filtered[0].id : ALL_STEPS[0].id;
+    this.saveState({ active: true, currentStepId: firstId, completedSteps: [], dismissed: false });
   }
 
   stopGuide(): void {
-    const s = this.state;
-    this.saveState({ ...s, active: false, dismissed: true });
+    this.saveState({ ...this.state, active: false, dismissed: true });
   }
 
   toggleGuide(): void {
     if (this.state.active) {
       this.stopGuide();
     } else {
-      this.startGuide();
+      // Restart on current page
+      const filtered = this.getStepsForRoute(this.currentRoute);
+      const firstUncompleted = filtered.find(s => !this.state.completedSteps.includes(s.id));
+      const firstId = (firstUncompleted || filtered[0])?.id || ALL_STEPS[0].id;
+      this.saveState({ active: true, currentStepId: firstId, completedSteps: this.state.completedSteps, dismissed: false });
     }
   }
 
   nextStep(): void {
     const s = this.state;
     if (!s.active) return;
-    const step = ALL_STEPS[s.currentStepIndex];
-    const completed = step ? [...s.completedSteps, step.id] : s.completedSteps;
-    const next = s.currentStepIndex + 1;
-    if (next >= ALL_STEPS.length) {
-      this.saveState({ ...s, active: false, currentStepIndex: 0, completedSteps: completed, dismissed: true });
+
+    const pageSteps = this.currentPageSteps;
+    const currentIdx = pageSteps.findIndex(step => step.id === s.currentStepId);
+    const completed = s.currentStepId ? [...new Set([...s.completedSteps, s.currentStepId])] : s.completedSteps;
+
+    if (currentIdx < pageSteps.length - 1) {
+      // More steps on this page
+      this.saveState({ ...s, currentStepId: pageSteps[currentIdx + 1].id, completedSteps: completed });
     } else {
-      this.saveState({ ...s, currentStepIndex: next, completedSteps: completed });
+      // Last step on this page - mark complete, deactivate until next page
+      this.saveState({ ...s, active: false, currentStepId: '', completedSteps: completed, dismissed: false });
     }
   }
 
   prevStep(): void {
     const s = this.state;
-    if (!s.active || s.currentStepIndex <= 0) return;
-    this.saveState({ ...s, currentStepIndex: s.currentStepIndex - 1 });
-  }
+    if (!s.active) return;
 
-  goToStep(index: number): void {
-    const s = this.state;
-    if (index >= 0 && index < ALL_STEPS.length) {
-      this.saveState({ ...s, currentStepIndex: index, active: true });
+    const pageSteps = this.currentPageSteps;
+    const currentIdx = pageSteps.findIndex(step => step.id === s.currentStepId);
+
+    if (currentIdx > 0) {
+      this.saveState({ ...s, currentStepId: pageSteps[currentIdx - 1].id });
     }
   }
 
-  /** Find the first step that matches the current route */
-  jumpToRouteStep(route: string): void {
-    const s = this.state;
-    if (!s.active) return;
-    const idx = ALL_STEPS.findIndex((step) =>
-      route.startsWith(step.route) || route.includes(step.route),
-    );
-    if (idx >= 0 && idx !== s.currentStepIndex) {
-      this.saveState({ ...s, currentStepIndex: idx });
+  goToStep(stepId: string): void {
+    const step = ALL_STEPS.find(s => s.id === stepId);
+    if (step) {
+      this.saveState({ ...this.state, currentStepId: stepId, active: true });
     }
   }
 
@@ -352,6 +408,17 @@ export class OnboardingService {
 
   resetGuide(): void {
     localStorage.removeItem(this.STORAGE_KEY);
-    this.stateSubject.next({ active: false, currentStepIndex: 0, completedSteps: [], dismissed: false });
+    this.stateSubject.next({ active: false, currentStepId: '', completedSteps: [], dismissed: false });
+  }
+
+  /** Check if all steps for the current page are completed */
+  get currentPageCompleted(): boolean {
+    const pageSteps = this.currentPageSteps;
+    return pageSteps.length > 0 && pageSteps.every(s => this.state.completedSteps.includes(s.id));
+  }
+
+  /** Check if guide has steps for the current page */
+  get hasStepsForCurrentPage(): boolean {
+    return this.currentPageSteps.length > 0;
   }
 }
