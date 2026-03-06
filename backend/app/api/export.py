@@ -990,17 +990,10 @@ async def document_qa(
     db: AsyncSession = Depends(get_db),
 ):
     """Answer a question about the project documents using RAG (vector search + LLM)."""
-    from ..services.moderation_service import moderate_prompt
+    from ..services.moderation_service import moderate_prompt_llm
     from ..services.vector_service import VectorService
     from ..services.ai_service import create_ai_service
-
-    # Moderate the user question before any processing
-    moderation = moderate_prompt(request.question, field_name="document_qa")
-    if not moderation:
-        return {
-            "answer": moderation.message,
-            "sources": [],
-        }
+    from ..security import decrypt_api_key
 
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = result.scalar_one_or_none()
@@ -1013,6 +1006,20 @@ async def document_qa(
     config = config_result.scalar_one_or_none()
     if not config or not config.mistral_api_key_encrypted:
         raise HTTPException(status_code=400, detail="Configuration IA non definie")
+
+    # Moderate the user question (regex + LLM) before any heavy processing
+    scw_key = decrypt_api_key(config.scaleway_api_key_encrypted or "") if config.scaleway_api_key_encrypted else ""
+    moderation = await moderate_prompt_llm(
+        request.question,
+        field_name="document_qa",
+        api_key=scw_key,
+        scaleway_project_id=config.scaleway_project_id or "",
+    )
+    if not moderation:
+        return {
+            "answer": moderation.message,
+            "sources": [],
+        }
 
     ai_service = create_ai_service(config)
 

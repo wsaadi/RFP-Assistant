@@ -16,7 +16,7 @@ from ..schemas.chapter import (
     BulkDeleteChaptersRequest,
 )
 from ..services.progress_service import get_or_idle, set_progress
-from ..services.moderation_service import moderate_prompt
+from ..services.moderation_service import moderate_prompt, moderate_prompt_llm
 from .deps import get_current_user
 
 router = APIRouter(prefix="/chapters", tags=["Chapters"])
@@ -242,12 +242,6 @@ async def generate_chapter_content(
     db: AsyncSession = Depends(get_db),
 ):
     """Launch chapter content generation as a Celery background task."""
-    # Moderate the custom prompt before dispatching
-    if request.custom_prompt:
-        moderation = moderate_prompt(request.custom_prompt, "custom_prompt")
-        if not moderation:
-            raise HTTPException(status_code=422, detail=moderation.message)
-
     cid = str(chapter_id)
 
     existing = get_or_idle(_NS, cid)
@@ -268,6 +262,19 @@ async def generate_chapter_content(
     config = config_result.scalar_one_or_none()
     if not config or not config.mistral_api_key_encrypted:
         raise HTTPException(status_code=400, detail="Configuration IA non définie")
+
+    # Moderate the custom prompt (regex + LLM) before dispatching
+    if request.custom_prompt:
+        from ..security import decrypt_api_key
+        scw_key = decrypt_api_key(config.scaleway_api_key_encrypted or "") if config.scaleway_api_key_encrypted else ""
+        moderation = await moderate_prompt_llm(
+            request.custom_prompt,
+            field_name="custom_prompt",
+            api_key=scw_key,
+            scaleway_project_id=config.scaleway_project_id or "",
+        )
+        if not moderation:
+            raise HTTPException(status_code=422, detail=moderation.message)
 
     set_progress(_NS, cid, {
         "status": "queued", "step": "queued", "progress": 0,
