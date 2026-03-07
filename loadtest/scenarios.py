@@ -543,14 +543,15 @@ class UserSession:
             await self._think()
 
     async def _step_generate_content(self):
-        """Trigger AI content generation for chapters."""
+        """Trigger AI content generation for chapters (in parallel)."""
         if not self.chapter_ids:
             self._report("generate_content", 8, "no chapters")
             return
 
-        # Generate content for up to 2 chapters (expensive AI operation)
+        # Generate content for up to 2 chapters — fire all at once, poll in parallel
         chapters_to_gen = self.chapter_ids[:2]
-        for chapter_id in chapters_to_gen:
+
+        async def _gen_one(chapter_id: str):
             ai_op = AIOperationMetric(
                 user_id=self.user_id,
                 operation="generate_content",
@@ -577,7 +578,8 @@ class UserSession:
                 self._report("generate_content", 8, f"HTTP {status}")
             self.collector.record_ai_operation(ai_op)
 
-            await self._think()
+        # Launch all chapter generations concurrently
+        await asyncio.gather(*[_gen_one(cid) for cid in chapters_to_gen])
 
     async def _step_compliance_analysis(self):
         """Run compliance analysis (AI-powered)."""
