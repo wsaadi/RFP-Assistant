@@ -8,6 +8,29 @@ from ..services.progress_service import set_progress, get_progress
 
 logger = logging.getLogger(__name__)
 
+# Timeout for vector_search sub-task calls (seconds).
+# The documents worker runs the search; AI workers wait for the result.
+_VECTOR_SEARCH_TIMEOUT = 30
+
+
+def _vector_search(project_id: str, query: str, top_k: int = 10,
+                   category_filter: str | None = None) -> list[dict]:
+    """Run a vector search via the documents worker (which owns the embedding model).
+
+    This avoids loading the ~800MB SentenceTransformer model in every AI worker
+    process, saving ~9.6GB RAM across 12 concurrent AI processes.
+    """
+    result = celery.send_task(
+        "tasks.vector_search",
+        kwargs={
+            "project_id": project_id,
+            "query": query,
+            "top_k": top_k,
+            "category_filter": category_filter,
+        },
+    )
+    return result.get(timeout=_VECTOR_SEARCH_TIMEOUT)
+
 # Namespace for chapter generation progress in Redis
 NS = "chapter_gen"
 
@@ -56,7 +79,6 @@ async def _run_chapter_generation(
     from ..models.chapter import Chapter, ChapterStatus
     from ..models.document import Document, DocumentChunk, DocumentImage, DocumentCategory, ProcessingStatus
     from ..services.ai_service import MistralAIService, create_ai_service
-    from ..services.vector_service import VectorService
     from ..services.anonymization_service import AnonymizationService
     from ..services.llm_provider import ProviderConfig
 
@@ -148,18 +170,18 @@ async def _run_chapter_generation(
                     _update("searching", 10, "Recherche de contenu pertinent...")
                     search_results = []
                     if use_old_response:
-                        search_results = VectorService.search(
+                        search_results = _vector_search(
                             str(project_id),
                             f"{ch_title} {ch_description}",
                             top_k=5, category_filter="old_response",
                         )
-                    context_results = VectorService.search(
+                    context_results = _vector_search(
                         str(project_id),
                         f"{ch_title} {ch_rfp_requirement}",
                         top_k=3,
                     )
                     # Search inspiration documents for relevant content
-                    inspiration_results = VectorService.search(
+                    inspiration_results = _vector_search(
                         str(project_id),
                         f"{ch_title} {ch_description}",
                         top_k=3, category_filter="inspiration",

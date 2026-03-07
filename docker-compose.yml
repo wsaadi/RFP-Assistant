@@ -154,29 +154,33 @@ services:
   # ── Celery Workers ──
   # Three dedicated workers split by workload profile:
   #
-  # 1. documents (concurrency=1): CPU-bound processing (NER, embedding, images).
-  #    Single process avoids doubling the ~800MB embedding model in memory.
+  # 1. documents (concurrency=1): CPU-bound processing (NER, embedding, images)
+  #    AND vector search.  This is the ONLY worker that loads the ~800MB
+  #    embedding model.  AI workers delegate searches here via tasks.vector_search.
   #
   # 2. default (concurrency=4): Lightweight tasks (Word/PDF export, backups).
-  #    Four processes for parallel exports under concurrent load.
+  #    No embedding model loaded — saves ~3.2GB RAM.
   #
   # 3-4. ai ×2 (concurrency=6 each = 12 total): I/O-bound LLM calls.
-  #    High concurrency is safe because these tasks spend 95%+ of their time
-  #    waiting on network responses from external AI APIs (Mistral, Scaleway, etc).
-  #    Two workers with 6 slots each = 12 concurrent AI tasks for 10+ users.
+  #    No embedding model loaded — saves ~9.6GB RAM.  Vector searches are
+  #    delegated to the documents worker via tasks.vector_search.
   #
   # max-memory-per-child=2000000: ~2GB — must exceed embedding model (~800MB)
   #   plus processing overhead.
   # max-tasks-per-child=50: periodic recycling for clean state.
 
-  # Worker 1: Heavy document processing (extraction, anonymization, indexing)
+  # Worker 1: Document processing + vector search (owns the embedding model)
+  # Concurrency=2: one slot for long-running document processing, one for
+  # fast vector_search requests from AI workers.  Both child processes load
+  # the ~800MB model (~1.6GB total), which is far cheaper than loading it
+  # in every AI worker process (~9.6GB).
   celery-worker-documents:
     <<: *celery-worker
     container_name: rfp-assistant-celery-worker-documents
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=1
+      --concurrency=2
       --queues=documents
       --max-memory-per-child=2000000
       --max-tasks-per-child=50
