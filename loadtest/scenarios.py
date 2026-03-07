@@ -543,14 +543,15 @@ class UserSession:
             await self._think()
 
     async def _step_generate_content(self):
-        """Trigger AI content generation for chapters."""
+        """Trigger AI content generation for chapters (in parallel)."""
         if not self.chapter_ids:
             self._report("generate_content", 8, "no chapters")
             return
 
-        # Generate content for up to 2 chapters (expensive AI operation)
+        # Generate content for up to 2 chapters — fire all at once, poll in parallel
         chapters_to_gen = self.chapter_ids[:2]
-        for chapter_id in chapters_to_gen:
+
+        async def _gen_one(chapter_id: str):
             ai_op = AIOperationMetric(
                 user_id=self.user_id,
                 operation="generate_content",
@@ -577,7 +578,8 @@ class UserSession:
                 self._report("generate_content", 8, f"HTTP {status}")
             self.collector.record_ai_operation(ai_op)
 
-            await self._think()
+        # Launch all chapter generations concurrently
+        await asyncio.gather(*[_gen_one(cid) for cid in chapters_to_gen])
 
     async def _step_compliance_analysis(self):
         """Run compliance analysis (AI-powered)."""
@@ -818,6 +820,51 @@ async def run_concurrent_users(
     # If no users were created, use admin for all
     if not users:
         users = [{"email": admin_email, "password": admin_password}] * num_users
+
+    # ── Validate AI provider configuration ──
+    # Check the workspace AI config to warn if providers are set to local
+    # Ollama (which processes requests sequentially and will bottleneck
+    # concurrent users). Cloud providers (Mistral, Scaleway) handle
+    # parallel requests properly.
+    try:
+        ws_resp = await admin_client.get(f"{base_url}/api/workspaces")
+        if ws_resp.status_code == 200:
+            workspaces = ws_resp.json()
+            if workspaces:
+                ws_id = workspaces[0]["id"]
+                cfg_resp = await admin_client.get(
+                    f"{base_url}/api/admin/ai-config/{ws_id}"
+                )
+                if cfg_resp.status_code == 200:
+                    cfg = cfg_resp.json()
+                    llm_provider = cfg.get("provider", "mistral")
+                    ner_provider = cfg.get("ner_provider", "ollama")
+                    vision_provider = cfg.get("vision_provider", "ollama")
+                    print(f"\n  AI Config (workspace {ws_id[:8]}...):")
+                    print(f"    LLM provider:    {llm_provider} ({cfg.get('model_name', '?')})")
+                    print(f"    NER provider:    {ner_provider} ({cfg.get('ner_model', '?')})")
+                    print(f"    Vision provider: {vision_provider} ({cfg.get('vision_model', '?')})")
+
+                    warnings = []
+                    if llm_provider == "ollama":
+                        warnings.append("LLM")
+                    if ner_provider == "ollama":
+                        warnings.append("NER/anonymization")
+                    if vision_provider == "ollama":
+                        warnings.append("Vision/image analysis")
+
+                    if warnings and num_users > 1:
+                        print(f"\n  WARNING: {', '.join(warnings)} using Ollama (local).")
+                        print(f"  Ollama processes requests sequentially — {num_users} concurrent")
+                        print(f"  users WILL experience queuing delays and potential timeouts.")
+                        print(f"  For load testing, configure cloud providers (Mistral/Scaleway)")
+                        print(f"  via the admin UI or PUT /api/admin/ai-config/{{workspace_id}}")
+                    elif not warnings:
+                        print(f"    All providers are cloud-based — good for {num_users} concurrent users")
+                else:
+                    print(f"\n  Could not read AI config (HTTP {cfg_resp.status_code}), skipping validation")
+    except Exception as e:
+        print(f"\n  Could not validate AI config: {e}")
 
     # Live dashboard
     dashboard = LiveDashboard(num_users)
