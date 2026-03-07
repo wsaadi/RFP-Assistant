@@ -154,7 +154,7 @@ services:
   # ── Celery Workers ──
   # Three dedicated workers split by workload profile:
   #
-  # 1. documents (concurrency=3): CPU-bound processing (NER, embedding, images)
+  # 1. documents (concurrency=5): CPU-bound processing (NER, embedding, images)
   #    AND vector search.  This is the ONLY worker that loads the ~800MB
   #    embedding model.  AI workers delegate searches here via tasks.vector_search.
   #
@@ -170,22 +170,26 @@ services:
   # max-tasks-per-child=50: periodic recycling for clean state.
 
   # Worker 1: Document processing + vector search (owns the embedding model)
-  # Concurrency=3: two slots for long-running document processing, one for
-  # fast vector_search requests from AI workers.  All three child processes
-  # load the ~800MB model (~2.4GB total), which is far cheaper than loading
-  # it in every AI worker process (~9.6GB).
+  # Concurrency=5: handles both long-running document processing AND fast
+  # vector_search requests from AI workers.  All five child processes load
+  # the ~800MB model (~4GB total), which is far cheaper than loading it in
+  # every AI worker process (~9.6GB).
   celery-worker-documents:
     <<: *celery-worker
     container_name: rfp-assistant-celery-worker-documents
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=3
+      --concurrency=5
       --queues=documents
       --max-memory-per-child=2000000
       --max-tasks-per-child=50
       --without-heartbeat
       --hostname=worker-documents@%h
+    deploy:
+      resources:
+        limits:
+          memory: 6G
 
   # Worker 2: Lightweight tasks (exports, backups)
   # Concurrency=4 so 10 concurrent users can export in parallel.
