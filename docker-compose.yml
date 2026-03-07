@@ -149,7 +149,7 @@ services:
     deploy:
       resources:
         limits:
-          memory: 3G
+          memory: 5G
 
   # ── Celery Workers ──
   # Three dedicated workers split by workload profile:
