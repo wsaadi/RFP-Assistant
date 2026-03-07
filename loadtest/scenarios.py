@@ -154,6 +154,16 @@ SEARCH_QUERIES = [
 class UserSession:
     """Simulates a single user's session against the RFP Assistant API."""
 
+    # Per-step polling timeouts (seconds).
+    # These must be generous enough for the worst-case scenario where N users
+    # are competing for limited worker slots.  With 10 users:
+    #   - doc processing: 40 docs on 3 document workers → up to ~400s
+    #   - chapter content: 20 chapters on 12 AI workers → up to ~200s
+    #   - structure/soutenance: 10 tasks on 12 AI workers → up to ~120s
+    POLL_TIMEOUT_DOC_PROCESSING = 600   # step 5: heaviest queue pressure
+    POLL_TIMEOUT_AI_TASK = 600          # steps 7, 9, 10, 12: AI queue
+    POLL_TIMEOUT_EXPORT = 300           # step 11: lightweight, rarely queued
+
     def __init__(
         self,
         user_id: int,
@@ -249,7 +259,7 @@ class UserSession:
         if self.dashboard:
             self.dashboard.user_started(self.user_id)
 
-        timeout = httpx.Timeout(connect=10, read=300, write=30, pool=10)
+        timeout = httpx.Timeout(connect=10, read=660, write=30, pool=10)
         async with httpx.AsyncClient(timeout=timeout) as client:
             self.client = client
             try:
@@ -430,7 +440,7 @@ class UserSession:
             operation="document_processing",
             started_at=time.monotonic(),
         )
-        max_wait = 300  # seconds
+        max_wait = self.POLL_TIMEOUT_DOC_PROCESSING
         poll_interval = 3
         start = time.monotonic()
         poll_count = 0
@@ -494,7 +504,8 @@ class UserSession:
         if resp and resp.status_code == 200:
             self._report("generate_structure", 6, "polling...")
             final_status, polls = await self._poll_progress(
-                "structure_status", f"/api/projects/{self.project_id}/generation-status"
+                "structure_status", f"/api/projects/{self.project_id}/generation-status",
+                max_wait=self.POLL_TIMEOUT_AI_TASK,
             )
             ai_op.finish(final_status, polls)
             self._report("structure_status", 6, f"{final_status} ({ai_op.duration_s}s)")
@@ -599,6 +610,7 @@ class UserSession:
                 final_status, polls = await self._poll_progress(
                     "compliance_status",
                     f"/api/projects/{self.project_id}/compliance-analysis-status",
+                    max_wait=self.POLL_TIMEOUT_AI_TASK,
                 )
                 ai_op.finish(final_status, polls)
                 self._report("compliance_status", 9, f"{final_status} ({ai_op.duration_s}s)")
@@ -624,7 +636,7 @@ class UserSession:
         )
         if resp and resp.status_code == 200:
             self._report("export_word", 10, "polling...")
-            max_wait = 300
+            max_wait = self.POLL_TIMEOUT_EXPORT
             start = time.monotonic()
             poll_count = 0
             final_status = "timeout"
@@ -671,7 +683,7 @@ class UserSession:
         if resp:
             if resp.status_code == 200:
                 self._report("generate_soutenance", 11, "polling...")
-                max_wait = 300
+                max_wait = self.POLL_TIMEOUT_AI_TASK
                 start = time.monotonic()
                 poll_count = 0
                 final_status = "timeout"
@@ -708,7 +720,7 @@ class UserSession:
                 f"/api/projects/{self.project_id}",
             )
 
-    async def _poll_progress(self, step_name: str, status_url: str, max_wait: int = 300) -> tuple[str, int]:
+    async def _poll_progress(self, step_name: str, status_url: str, max_wait: int = 600) -> tuple[str, int]:
         """Generic progress polling. Returns (final_status, poll_count)."""
         poll_count = 0
         start = time.monotonic()
@@ -725,7 +737,7 @@ class UserSession:
             await asyncio.sleep(3)
         return "timeout", poll_count
 
-    async def _poll_chapter_gen(self, chapter_id: str, max_wait: int = 300) -> tuple[str, int]:
+    async def _poll_chapter_gen(self, chapter_id: str, max_wait: int = 600) -> tuple[str, int]:
         """Poll chapter generation status. Returns (final_status, poll_count)."""
         poll_count = 0
         start = time.monotonic()
