@@ -185,6 +185,8 @@ services:
 
   # Worker 2: Lightweight tasks (exports, backups)
   # Concurrency=4 so 10 concurrent users can export in parallel.
+  # Note: embedding model preload is skipped for this worker (see celery_app.py)
+  # since exports/backups never use embeddings. Saves ~3.2GB RAM.
   celery-worker-default:
     <<: *celery-worker
     container_name: rfp-assistant-celery-worker-default
