@@ -283,10 +283,13 @@ async def generate_chapter_content(
 
     # Dispatch to Celery worker
     from ..tasks.chapter_tasks import generate_chapter_content_task
-    generate_chapter_content_task.delay(
-        cid, str(chapter.project_id), str(project.workspace_id),
-        request.action, request.custom_prompt or "",
-        request.use_old_response, request.include_improvement_axes,
+    generate_chapter_content_task.apply_async(
+        args=(
+            cid, str(chapter.project_id), str(project.workspace_id),
+            request.action, request.custom_prompt or "",
+            request.use_old_response, request.include_improvement_axes,
+        ),
+        priority=1,
     )
 
     return {"success": True, "message": "Generation lancee en arriere-plan"}

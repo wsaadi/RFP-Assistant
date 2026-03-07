@@ -683,7 +683,9 @@ async def preview_chat(
     })
 
     from ..tasks.export_tasks import preview_chat_task
-    preview_chat_task.delay(pid, str(project.workspace_id), request.message)
+    preview_chat_task.apply_async(
+        args=(pid, str(project.workspace_id), request.message), priority=7,
+    )
 
     return {"success": True, "message": "Instruction envoyee a l'IA"}
 
@@ -1198,7 +1200,9 @@ async def export_soutenance(
     delete_export_result("soutenance_script", pid)
 
     from ..tasks.export_tasks import export_soutenance_task
-    export_soutenance_task.delay(pid, str(project.workspace_id), body.slide_count)
+    export_soutenance_task.apply_async(
+        args=(pid, str(project.workspace_id), body.slide_count), priority=7,
+    )
 
     return {"success": True, "message": "Preparation de soutenance lancee en arriere-plan"}
 
