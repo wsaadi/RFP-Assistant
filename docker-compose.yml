@@ -199,19 +199,25 @@ services:
 
   # Worker 3: AI/LLM tasks (I/O-bound, external API calls)
   # High concurrency because tasks are network-bound (waiting on LLM responses),
-  # not CPU-bound. Each concurrent task uses minimal CPU/RAM while waiting.
+  # not CPU-bound. Each child process preloads the embedding model (~800MB),
+  # so memory = concurrency × ~1GB. With concurrency=8 and 10GB limit,
+  # all 10 users can get AI responses with minimal queuing.
   celery-worker-ai:
     <<: *celery-worker
     container_name: rfp-assistant-celery-worker-ai
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=4
+      --concurrency=8
       --queues=ai
       --max-memory-per-child=2000000
       --max-tasks-per-child=50
       --without-heartbeat
       --hostname=worker-ai@%h
+    deploy:
+      resources:
+        limits:
+          memory: 10G
 
   frontend:
     build:

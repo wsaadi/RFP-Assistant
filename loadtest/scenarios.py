@@ -430,7 +430,7 @@ class UserSession:
             operation="document_processing",
             started_at=time.monotonic(),
         )
-        max_wait = 300  # seconds
+        max_wait = 180  # seconds
         poll_interval = 3
         start = time.monotonic()
         poll_count = 0
@@ -669,7 +669,7 @@ class UserSession:
         if resp:
             if resp.status_code == 200:
                 self._report("generate_soutenance", 11, "polling...")
-                max_wait = 300
+                max_wait = 180
                 start = time.monotonic()
                 poll_count = 0
                 final_status = "timeout"
@@ -706,7 +706,7 @@ class UserSession:
                 f"/api/projects/{self.project_id}",
             )
 
-    async def _poll_progress(self, step_name: str, status_url: str, max_wait: int = 300) -> tuple[str, int]:
+    async def _poll_progress(self, step_name: str, status_url: str, max_wait: int = 180) -> tuple[str, int]:
         """Generic progress polling. Returns (final_status, poll_count)."""
         poll_count = 0
         start = time.monotonic()
@@ -723,7 +723,7 @@ class UserSession:
             await asyncio.sleep(3)
         return "timeout", poll_count
 
-    async def _poll_chapter_gen(self, chapter_id: str, max_wait: int = 300) -> tuple[str, int]:
+    async def _poll_chapter_gen(self, chapter_id: str, max_wait: int = 180) -> tuple[str, int]:
         """Poll chapter generation status. Returns (final_status, poll_count)."""
         poll_count = 0
         start = time.monotonic()
