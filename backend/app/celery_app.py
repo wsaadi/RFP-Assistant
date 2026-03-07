@@ -125,6 +125,7 @@ celery.conf.update(
         "tasks.process_document": {"queue": "documents"},
         "tasks.reanonymize": {"queue": "documents"},
         "tasks.analyze_images": {"queue": "documents"},
+        "tasks.vector_search": {"queue": "documents"},
         # I/O-bound AI/LLM tasks → ai queue (high concurrency)
         "tasks.generate_chapter_content": {"queue": "ai"},
         "tasks.gap_analysis": {"queue": "ai"},
@@ -168,11 +169,23 @@ celery.conf.update(
 # ── Embedding model preloading ──
 # The SentenceTransformer model (~800MB) is loaded lazily by VectorService.
 # We preload it at worker startup so the first task doesn't pay the loading cost.
-# With concurrency=1 there's only one worker, so no stagger is needed.
+#
+# Only the DOCUMENTS worker needs the model in memory:
+# - It indexes chunks (VectorService.index_chunks) during document processing
+# - It serves vector_search requests from AI workers via a dedicated Celery task
+#
+# AI workers no longer load the model — they delegate searches to the documents
+# worker via tasks.vector_search.  This saves ~800MB per AI child process
+# (~9.6GB total with 2×6 concurrency).
 
 @worker_process_init.connect
 def _preload_embedding_model(**kwargs):
-    """Preload the embedding model in the worker process at startup."""
+    """Preload the embedding model only on the documents worker."""
+    import sys
+    argv_str = " ".join(sys.argv)
+    if "--queues=documents" not in argv_str and "--queues documents" not in argv_str:
+        _logger.info("Worker PID %d: skipping embedding preload (not documents worker)", os.getpid())
+        return
     try:
         from .services.vector_service import VectorService
         _logger.info("Worker PID %d: preloading embedding model...", os.getpid())

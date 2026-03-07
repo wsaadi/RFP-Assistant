@@ -821,6 +821,28 @@ async def _finalize_after_timeout(project_id: str, image_ids: list[str]):
         await task_engine.dispose()
 
 
+@celery.task(name="tasks.vector_search", queue="documents")
+def vector_search_task(
+    project_id: str,
+    query: str,
+    top_k: int = 10,
+    category_filter: str | None = None,
+) -> list[dict]:
+    """Run a vector similarity search on the documents worker.
+
+    This task exists so that AI workers (which handle LLM calls) don't need
+    to load the ~800MB embedding model.  The documents worker already has it
+    in memory, so we route search requests there via this lightweight task.
+
+    Returns the list of search result dicts directly (small payload).
+    """
+    from ..services.vector_service import VectorService
+
+    return VectorService.search(
+        project_id, query, top_k=top_k, category_filter=category_filter,
+    )
+
+
 def _guess_image_category(width: int, height: int) -> str:
     """Guess an image category from its pixel dimensions.
 
