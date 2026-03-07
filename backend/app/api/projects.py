@@ -403,7 +403,9 @@ async def analyze_gap(
     })
 
     from ..tasks.project_tasks import gap_analysis_task
-    gap_analysis_task.delay(str(project_id), str(project.workspace_id))
+    gap_analysis_task.apply_async(
+        args=(str(project_id), str(project.workspace_id)), priority=3,
+    )
 
     return {"success": True, "message": "Analyse des ecarts lancee en arriere-plan"}
 
@@ -940,7 +942,9 @@ async def generate_structure(
     })
 
     from ..tasks.project_tasks import generate_structure_task
-    generate_structure_task.delay(str(project_id), str(workspace_id))
+    generate_structure_task.apply_async(
+        args=(str(project_id), str(workspace_id)), priority=0,
+    )
 
     return {"success": True, "message": "Generation lancee en arriere-plan"}
 
@@ -1428,7 +1432,9 @@ async def prefill_chapters(
     })
 
     from ..tasks.project_tasks import prefill_chapters_task
-    prefill_chapters_task.delay(str(project_id), str(workspace_id), chapter_ids)
+    prefill_chapters_task.apply_async(
+        args=(str(project_id), str(workspace_id), chapter_ids), priority=1,
+    )
 
     return {"success": True, "message": "Pre-remplissage lance en arriere-plan"}
 
@@ -1656,7 +1662,9 @@ async def detect_deliverables(
     })
 
     from ..tasks.project_tasks import detect_deliverables_task
-    detect_deliverables_task.delay(str(project_id), str(project.workspace_id))
+    detect_deliverables_task.apply_async(
+        args=(str(project_id), str(project.workspace_id)), priority=5,
+    )
     return {"success": True, "message": "Detection lancee en arriere-plan"}
 
 
@@ -2016,7 +2024,9 @@ async def fill_deliverables(
     })
 
     from ..tasks.project_tasks import fill_deliverables_task
-    fill_deliverables_task.delay(str(project_id), str(project.workspace_id))
+    fill_deliverables_task.apply_async(
+        args=(str(project_id), str(project.workspace_id)), priority=5,
+    )
     return {"success": True, "message": "Auto-remplissage lancé en arrière-plan"}
 
 
@@ -2294,7 +2304,9 @@ async def analyze_compliance(
     })
 
     from ..tasks.project_tasks import compliance_analysis_task
-    compliance_analysis_task.delay(str(project_id), str(project.workspace_id), target_scope)
+    compliance_analysis_task.apply_async(
+        args=(str(project_id), str(project.workspace_id), target_scope), priority=3,
+    )
 
     return {"success": True, "message": "Analyse de conformite lancee en arriere-plan"}
 
@@ -2582,9 +2594,12 @@ async def generate_recommendation_content(
     })
 
     from ..tasks.project_tasks import generate_recommendation_task
-    generate_recommendation_task.delay(
-        task_id, str(project_id), str(project.workspace_id),
-        recommendation, missing_description, chapter_id, inject,
+    generate_recommendation_task.apply_async(
+        args=(
+            task_id, str(project_id), str(project.workspace_id),
+            recommendation, missing_description, chapter_id, inject,
+        ),
+        priority=5,
     )
 
     return {"task_id": task_id}

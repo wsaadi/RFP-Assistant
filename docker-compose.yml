@@ -157,13 +157,13 @@ services:
   # 1. documents (concurrency=1): CPU-bound processing (NER, embedding, images).
   #    Single process avoids doubling the ~800MB embedding model in memory.
   #
-  # 2. default (concurrency=2): Lightweight tasks (Word/PDF export, backups).
-  #    Two processes for parallel exports without heavy memory usage.
+  # 2. default (concurrency=4): Lightweight tasks (Word/PDF export, backups).
+  #    Four processes for parallel exports under concurrent load.
   #
-  # 3. ai (concurrency=4): I/O-bound LLM calls (external API wait).
+  # 3-4. ai ×2 (concurrency=6 each = 12 total): I/O-bound LLM calls.
   #    High concurrency is safe because these tasks spend 95%+ of their time
-  #    waiting on network responses from external AI APIs (OpenAI, Ollama, etc).
-  #    4 concurrent tasks = 4 users can get AI responses simultaneously.
+  #    waiting on network responses from external AI APIs (Mistral, Scaleway, etc).
+  #    Two workers with 6 slots each = 12 concurrent AI tasks for 10+ users.
   #
   # max-memory-per-child=2000000: ~2GB — must exceed embedding model (~800MB)
   #   plus processing overhead.
@@ -184,40 +184,58 @@ services:
       --hostname=worker-documents@%h
 
   # Worker 2: Lightweight tasks (exports, backups)
+  # Concurrency=4 so 10 concurrent users can export in parallel.
   celery-worker-default:
     <<: *celery-worker
     container_name: rfp-assistant-celery-worker-default
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=2
+      --concurrency=4
       --queues=default
       --max-memory-per-child=2000000
       --max-tasks-per-child=50
       --without-heartbeat
       --hostname=worker-default@%h
 
-  # Worker 3: AI/LLM tasks (I/O-bound, external API calls)
-  # High concurrency because tasks are network-bound (waiting on LLM responses),
-  # not CPU-bound. Each child process preloads the embedding model (~800MB),
-  # so memory = concurrency × ~1GB. With concurrency=8 and 10GB limit,
-  # all 10 users can get AI responses with minimal queuing.
-  celery-worker-ai:
+  # Workers 3-4: AI/LLM tasks (I/O-bound, external API calls)
+  # Two workers with concurrency=6 each = 12 total concurrent AI slots.
+  # Tasks are network-bound (waiting on LLM responses), not CPU-bound.
+  # Splitting across two workers distributes CPU and avoids single-process
+  # bottlenecks. With 12 slots, 10 users can run AI tasks with minimal queuing.
+  celery-worker-ai-1:
     <<: *celery-worker
-    container_name: rfp-assistant-celery-worker-ai
+    container_name: rfp-assistant-celery-worker-ai-1
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=8
+      --concurrency=6
       --queues=ai
       --max-memory-per-child=2000000
       --max-tasks-per-child=50
       --without-heartbeat
-      --hostname=worker-ai@%h
+      --hostname=worker-ai-1@%h
     deploy:
       resources:
         limits:
-          memory: 10G
+          memory: 6G
+
+  celery-worker-ai-2:
+    <<: *celery-worker
+    container_name: rfp-assistant-celery-worker-ai-2
+    command: >
+      celery -A app.celery_app worker
+      --loglevel=info
+      --concurrency=6
+      --queues=ai
+      --max-memory-per-child=2000000
+      --max-tasks-per-child=50
+      --without-heartbeat
+      --hostname=worker-ai-2@%h
+    deploy:
+      resources:
+        limits:
+          memory: 6G
 
   frontend:
     build:

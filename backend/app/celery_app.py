@@ -84,6 +84,9 @@ celery.conf.update(
         "socket_keepalive": True,
         "socket_connect_timeout": 10,
         "socket_timeout": 30,
+        # Priority support: 10 levels (0=highest) for the ai queue.
+        # Redis creates a sub-queue per priority level; list them low→high.
+        "priority_steps": list(range(10)),
     },
 
     # ── Redis connection pool ──
@@ -99,10 +102,14 @@ celery.conf.update(
     broker_connection_max_retries=10,
 
     # ── Task queues ──
+    # The ai queue supports 10 priority levels (0=highest, 9=lowest) so that
+    # pipeline-critical tasks (structure generation) run before later stages
+    # (compliance, soutenance) when the queue is congested.
     task_queues=(
         Queue("default", default_exchange, routing_key="default"),
         Queue("documents", document_exchange, routing_key="documents"),
-        Queue("ai", ai_exchange, routing_key="ai"),
+        Queue("ai", ai_exchange, routing_key="ai",
+              queue_arguments={"x-max-priority": 10}),
     ),
     task_default_queue="default",
     task_default_exchange="default",
