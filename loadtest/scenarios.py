@@ -9,6 +9,112 @@ import httpx
 
 from .metrics import MetricsCollector, RequestMetric, UserJourneyMetric
 
+
+class LiveDashboard:
+    """Real-time dashboard showing concurrent user activity."""
+
+    STEP_LABELS = {
+        "login": "Login",
+        "list_workspaces": "Workspaces",
+        "create_project": "Create project",
+        "upload_document": "Upload docs",
+        "check_processing": "Processing",
+        "search_documents": "Search",
+        "generate_structure": "AI Structure",
+        "structure_status": "AI Structure",
+        "create_chapter": "Chapters",
+        "create_sub_chapter": "Chapters",
+        "generate_content": "AI Content",
+        "chapter_gen_status": "AI Content",
+        "compliance_analysis": "Compliance",
+        "compliance_status": "Compliance",
+        "export_word": "Export Word",
+        "export_word_status": "Export Word",
+        "download_word": "Export Word",
+        "generate_soutenance": "Soutenance",
+        "soutenance_status": "Soutenance",
+        "delete_project": "Cleanup",
+    }
+
+    def __init__(self, num_users: int):
+        self.num_users = num_users
+        self.user_status: dict[int, str] = {}
+        self.user_step: dict[int, str] = {}
+        self.user_step_num: dict[int, int] = {}
+        self.active_users = 0
+        self.finished_users = 0
+        self._header_printed = False
+        self._last_line_count = 0
+
+    def user_started(self, user_id: int):
+        self.user_status[user_id] = "active"
+        self.user_step[user_id] = "Starting..."
+        self.user_step_num[user_id] = 0
+        self.active_users += 1
+        self._refresh()
+
+    def user_progress(self, user_id: int, step: str, step_num: int, detail: str = ""):
+        label = self.STEP_LABELS.get(step, step)
+        if detail:
+            label = f"{label}: {detail}"
+        self.user_step[user_id] = label
+        self.user_step_num[user_id] = step_num
+        self._refresh()
+
+    def user_finished(self, user_id: int, success: bool, error: str = ""):
+        if success:
+            self.user_status[user_id] = "done"
+            self.user_step[user_id] = "DONE (12/12)"
+        else:
+            self.user_status[user_id] = "fail"
+            self.user_step[user_id] = f"FAILED: {error[:40]}" if error else "FAILED"
+        self.active_users = max(0, self.active_users - 1)
+        self.finished_users += 1
+        self._refresh()
+
+    def _refresh(self):
+        """Redraw the dashboard."""
+        import sys
+
+        # Clear previous lines
+        if self._last_line_count > 0:
+            sys.stdout.write(f"\033[{self._last_line_count}A\033[J")
+
+        lines = []
+        lines.append(f"  Active: {self.active_users}/{self.num_users}  |  "
+                      f"Finished: {self.finished_users}/{self.num_users}")
+        lines.append(f"  {'─' * 68}")
+
+        for uid in sorted(self.user_status.keys()):
+            status = self.user_status[uid]
+            step = self.user_step[uid]
+            step_num = self.user_step_num[uid]
+
+            if status == "active":
+                bar = self._progress_bar(step_num, 12)
+                icon = ">>>"
+            elif status == "done":
+                bar = self._progress_bar(12, 12)
+                icon = "[OK]"
+            else:
+                bar = self._progress_bar(step_num, 12)
+                icon = "[!!]"
+
+            lines.append(f"  {icon} User {uid:<3d} {bar}  {step}")
+
+        lines.append("")
+
+        output = "\n".join(lines)
+        sys.stdout.write(output + "\n")
+        sys.stdout.flush()
+        self._last_line_count = len(lines)
+
+    @staticmethod
+    def _progress_bar(current: int, total: int, width: int = 16) -> str:
+        filled = int(width * current / total) if total > 0 else 0
+        bar = "█" * filled + "░" * (width - filled)
+        return f"[{bar}] {current:>2d}/{total}"
+
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
 
 # Realistic chapter structures for RFP responses
@@ -56,6 +162,7 @@ class UserSession:
         password: str,
         collector: MetricsCollector,
         think_time: tuple[float, float] = (0.5, 2.0),
+        dashboard: Optional[LiveDashboard] = None,
     ):
         self.user_id = user_id
         self.base_url = base_url.rstrip("/")
@@ -63,6 +170,7 @@ class UserSession:
         self.password = password
         self.collector = collector
         self.think_time = think_time
+        self.dashboard = dashboard
 
         self.client: Optional[httpx.AsyncClient] = None
         self.token: Optional[str] = None
@@ -70,6 +178,11 @@ class UserSession:
         self.project_id: Optional[str] = None
         self.chapter_ids: list[str] = []
         self.document_ids: list[str] = []
+
+    def _report(self, step: str, step_num: int, detail: str = ""):
+        """Report progress to the live dashboard."""
+        if self.dashboard:
+            self.dashboard.user_progress(self.user_id, step, step_num, detail)
 
     async def _think(self):
         """Simulate human think time between actions."""
@@ -133,70 +246,86 @@ class UserSession:
             steps_total=12,
         )
 
+        if self.dashboard:
+            self.dashboard.user_started(self.user_id)
+
         timeout = httpx.Timeout(connect=10, read=120, write=30, pool=10)
         async with httpx.AsyncClient(timeout=timeout) as client:
             self.client = client
             try:
                 # Step 1: Login
+                self._report("login", 0)
                 await self._step_login()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 2: List workspaces
+                self._report("list_workspaces", 1)
                 await self._step_list_workspaces()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 3: Create project
+                self._report("create_project", 2)
                 await self._step_create_project()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 4: Upload documents (RFP + old response)
+                self._report("upload_document", 3)
                 await self._step_upload_documents()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 5: Wait for document processing
+                self._report("check_processing", 4)
                 await self._step_wait_processing()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 6: Search documents
+                self._report("search_documents", 5)
                 await self._step_search_documents()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 7: Generate chapter structure (AI call)
+                self._report("generate_structure", 6)
                 await self._step_generate_structure()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 8: Create chapters manually
+                self._report("create_chapter", 7)
                 await self._step_create_chapters()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 9: Generate chapter content (AI call)
+                self._report("generate_content", 8)
                 await self._step_generate_content()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 10: Run compliance analysis (AI call)
+                self._report("compliance_analysis", 9)
                 await self._step_compliance_analysis()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 11: Export Word document
+                self._report("export_word", 10)
                 await self._step_export_word()
                 journey.steps_completed += 1
                 await self._think()
 
                 # Step 12: Generate soutenance (AI call)
+                self._report("generate_soutenance", 11)
                 await self._step_generate_soutenance()
                 journey.steps_completed += 1
 
                 # Cleanup: delete project
+                self._report("delete_project", 12)
                 await self._step_cleanup()
 
                 journey.success = True
@@ -204,11 +333,14 @@ class UserSession:
             except Exception as e:
                 journey.error = str(e)
                 journey.success = False
-                print(f"  [User {self.user_id}] Journey failed at step {journey.steps_completed + 1}: {e}")
 
             finally:
                 journey.finished_at = time.time()
                 self.collector.record_journey(journey)
+                if self.dashboard:
+                    self.dashboard.user_finished(
+                        self.user_id, journey.success, journey.error or ""
+                    )
                 self.client = None
 
     async def _step_login(self):
@@ -221,7 +353,6 @@ class UserSession:
             data = resp.json()
             self.token = data["access_token"]
             self.client.headers["Authorization"] = f"Bearer {self.token}"
-            print(f"  [User {self.user_id}] Logged in as {self.email}")
         else:
             raise RuntimeError(f"Login failed: {resp.status_code if resp else 'no response'}")
 
@@ -232,7 +363,6 @@ class UserSession:
             workspaces = resp.json()
             if workspaces:
                 self.workspace_id = workspaces[0]["id"]
-                print(f"  [User {self.user_id}] Using workspace: {workspaces[0]['name']}")
             else:
                 raise RuntimeError("No workspaces available")
         else:
@@ -255,7 +385,7 @@ class UserSession:
         )
         if resp and resp.status_code == 201:
             self.project_id = resp.json()["id"]
-            print(f"  [User {self.user_id}] Created project: {project_name}")
+            self._report("create_project", 2, project_name)
         else:
             raise RuntimeError(f"Failed to create project: {resp.status_code if resp else 'no response'}")
 
@@ -271,7 +401,7 @@ class UserSession:
         for filename, category in uploads:
             filepath = os.path.join(FIXTURES_DIR, filename)
             if not os.path.exists(filepath):
-                print(f"  [User {self.user_id}] Fixture not found: {filepath}, skipping")
+                self._report("upload_document", 3, f"skip {filename}")
                 continue
 
             with open(filepath, "rb") as f:
@@ -286,10 +416,10 @@ class UserSession:
             if resp and resp.status_code == 200:
                 doc_id = resp.json()["id"]
                 self.document_ids.append(doc_id)
-                print(f"  [User {self.user_id}] Uploaded {filename} ({category})")
+                self._report("upload_document", 3, f"{filename}")
             else:
                 status = resp.status_code if resp else "no response"
-                print(f"  [User {self.user_id}] Upload failed for {filename}: {status}")
+                self._report("upload_document", 3, f"FAIL {filename}: {status}")
 
             await self._think()
 
@@ -307,19 +437,19 @@ class UserSession:
             if resp and resp.status_code == 200:
                 progress = resp.json().get("progress", [])
                 if not progress:
-                    print(f"  [User {self.user_id}] Documents processed (no active processing)")
+                    self._report("check_processing", 4, "done")
                     return
                 all_done = all(
                     p.get("db_status") in ("completed", "failed") or p.get("progress", 0) == 100
                     for p in progress
                 )
                 if all_done:
-                    print(f"  [User {self.user_id}] All documents processed")
+                    self._report("check_processing", 4, "done")
                     return
 
             await asyncio.sleep(poll_interval)
 
-        print(f"  [User {self.user_id}] Processing timeout after {max_wait}s (continuing anyway)")
+        self._report("check_processing", 4, "timeout")
 
     async def _step_search_documents(self):
         """Perform vector searches across the project documents."""
@@ -332,7 +462,7 @@ class UserSession:
             )
             if resp and resp.status_code == 200:
                 results = resp.json().get("results", [])
-                print(f"  [User {self.user_id}] Search '{query}': {len(results)} results")
+                self._report("search_documents", 5, f"'{query}' -> {len(results)}")
             await self._think()
 
     async def _step_generate_structure(self):
@@ -343,12 +473,12 @@ class UserSession:
             json={},
         )
         if resp and resp.status_code == 200:
-            print(f"  [User {self.user_id}] Structure generation started")
-            # Poll for completion
+            self._report("generate_structure", 6, "polling...")
             await self._poll_progress("structure_status", f"/api/projects/{self.project_id}/generate-structure-status")
+            self._report("structure_status", 6, "done")
         else:
             status = resp.status_code if resp else "no response"
-            print(f"  [User {self.user_id}] Structure generation: {status} (may require AI config)")
+            self._report("generate_structure", 6, f"HTTP {status}")
 
     async def _step_create_chapters(self):
         """Create chapters manually (fallback if AI structure gen not configured)."""
@@ -367,7 +497,7 @@ class UserSession:
             if resp and resp.status_code == 201:
                 chapter_id = resp.json()["id"]
                 self.chapter_ids.append(chapter_id)
-                print(f"  [User {self.user_id}] Created chapter: {tmpl['title']}")
+                self._report("create_chapter", 7, tmpl["title"])
 
                 # Add a sub-chapter
                 if SUB_CHAPTER_TEMPLATES and random.random() > 0.5:
@@ -391,7 +521,7 @@ class UserSession:
     async def _step_generate_content(self):
         """Trigger AI content generation for chapters."""
         if not self.chapter_ids:
-            print(f"  [User {self.user_id}] No chapters to generate content for")
+            self._report("generate_content", 8, "no chapters")
             return
 
         # Generate content for up to 2 chapters (expensive AI operation)
@@ -408,12 +538,12 @@ class UserSession:
                 },
             )
             if resp and resp.status_code == 200:
-                print(f"  [User {self.user_id}] Content generation launched for chapter")
-                # Poll status
+                self._report("generate_content", 8, "polling...")
                 await self._poll_chapter_gen(chapter_id)
+                self._report("chapter_gen_status", 8, "done")
             else:
                 status = resp.status_code if resp else "no response"
-                print(f"  [User {self.user_id}] Content gen: {status} (may need AI config)")
+                self._report("generate_content", 8, f"HTTP {status}")
 
             await self._think()
 
@@ -425,14 +555,17 @@ class UserSession:
             json={},
         )
         if resp:
-            print(f"  [User {self.user_id}] Compliance analysis: {resp.status_code}")
             if resp.status_code == 200:
+                self._report("compliance_analysis", 9, "polling...")
                 await self._poll_progress(
                     "compliance_status",
                     f"/api/projects/{self.project_id}/compliance-analysis-status",
                 )
+                self._report("compliance_status", 9, "done")
+            else:
+                self._report("compliance_analysis", 9, f"HTTP {resp.status_code}")
         else:
-            print(f"  [User {self.user_id}] Compliance analysis: no response")
+            self._report("compliance_analysis", 9, "no response")
 
     async def _step_export_word(self):
         """Export project as Word document."""
@@ -442,8 +575,7 @@ class UserSession:
             json={},
         )
         if resp and resp.status_code == 200:
-            print(f"  [User {self.user_id}] Word export started")
-            # Poll status
+            self._report("export_word", 10, "polling...")
             max_wait = 90
             start = time.monotonic()
             while (time.monotonic() - start) < max_wait:
@@ -454,20 +586,19 @@ class UserSession:
                 if status_resp and status_resp.status_code == 200:
                     data = status_resp.json()
                     if data.get("status") in ("completed", "ready"):
-                        print(f"  [User {self.user_id}] Word export ready")
-                        # Download
+                        self._report("export_word", 10, "downloading")
                         await self._request(
                             "download_word", "GET",
                             f"/api/export/{self.project_id}/word-download",
                         )
                         break
                     elif data.get("status") == "failed":
-                        print(f"  [User {self.user_id}] Word export failed")
+                        self._report("export_word", 10, "failed")
                         break
                 await asyncio.sleep(3)
         else:
             status = resp.status_code if resp else "no response"
-            print(f"  [User {self.user_id}] Word export: {status}")
+            self._report("export_word", 10, f"HTTP {status}")
 
     async def _step_generate_soutenance(self):
         """Generate soutenance/defense materials (AI-powered)."""
@@ -477,9 +608,8 @@ class UserSession:
             json={},
         )
         if resp:
-            print(f"  [User {self.user_id}] Soutenance generation: {resp.status_code}")
             if resp.status_code == 200:
-                # Poll for completion
+                self._report("generate_soutenance", 11, "polling...")
                 max_wait = 120
                 start = time.monotonic()
                 while (time.monotonic() - start) < max_wait:
@@ -490,12 +620,14 @@ class UserSession:
                     if status_resp and status_resp.status_code == 200:
                         data = status_resp.json()
                         if data.get("status") in ("completed", "ready", "idle"):
-                            print(f"  [User {self.user_id}] Soutenance ready")
+                            self._report("soutenance_status", 11, "done")
                             break
                         elif data.get("status") == "failed":
-                            print(f"  [User {self.user_id}] Soutenance failed")
+                            self._report("soutenance_status", 11, "failed")
                             break
                     await asyncio.sleep(3)
+            else:
+                self._report("generate_soutenance", 11, f"HTTP {resp.status_code}")
 
     async def _step_cleanup(self):
         """Delete the test project to clean up."""
@@ -504,10 +636,6 @@ class UserSession:
                 "delete_project", "DELETE",
                 f"/api/projects/{self.project_id}",
             )
-            if resp and resp.status_code in (200, 204):
-                print(f"  [User {self.user_id}] Cleaned up project")
-            else:
-                print(f"  [User {self.user_id}] Cleanup: {resp.status_code if resp else 'no response'}")
 
     async def _poll_progress(self, step_name: str, status_url: str, max_wait: int = 120):
         """Generic progress polling."""
@@ -553,6 +681,7 @@ async def run_concurrent_users(
     """Run multiple concurrent user journeys.
 
     Creates test users via the admin API, then runs them all concurrently.
+    Each user starts immediately as a real asyncio task with staggered delays.
     """
     print(f"\n  Preparing {num_users} concurrent user(s)...")
 
@@ -615,11 +744,16 @@ async def run_concurrent_users(
     if not users:
         users = [{"email": admin_email, "password": admin_password}] * num_users
 
+    # Live dashboard
+    dashboard = LiveDashboard(num_users)
+
     # Start collecting
     collector.start()
 
-    # Create and run user sessions
-    tasks = []
+    print(f"\n  Launching {num_users} user(s) with {stagger_delay}s stagger...\n")
+
+    # Launch user sessions as real asyncio tasks for true concurrency
+    tasks: list[asyncio.Task] = []
     for i, user_creds in enumerate(users):
         session = UserSession(
             user_id=i + 1,
@@ -628,14 +762,17 @@ async def run_concurrent_users(
             password=user_creds["password"],
             collector=collector,
             think_time=think_time,
+            dashboard=dashboard,
         )
-        tasks.append(session.run_full_journey())
+        # create_task starts the coroutine IMMEDIATELY on the event loop
+        task = asyncio.create_task(session.run_full_journey())
+        tasks.append(task)
 
-        # Stagger user starts to simulate realistic ramp-up
+        # Stagger: wait before launching the NEXT user (previous one is already running)
         if i < len(users) - 1:
             await asyncio.sleep(stagger_delay)
 
-    # Wait for all users to complete
+    # Wait for all running tasks to complete
     await asyncio.gather(*tasks, return_exceptions=True)
 
     collector.stop()
