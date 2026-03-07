@@ -1147,7 +1147,7 @@ async def _run_structure_generation(project_id: uuid.UUID, workspace_id: uuid.UU
             all_doc_structures: list[tuple[str, list]] = []
             _doc_done_count = 0
 
-            sem = asyncio.Semaphore(3)  # Limit concurrent Mistral calls
+            sem = asyncio.Semaphore(10)  # Mistral/Scaleway handle 24 req/s
 
             async def _gen_one_doc(doc_idx, doc_id, doc_title, doc_desc):
                 nonlocal _doc_done_count
@@ -2129,7 +2129,7 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
             combined_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
 
         # ── Phase 2: Parallel AI generation (NO DB connection held) ──
-        sem = asyncio.Semaphore(3)
+        sem = asyncio.Semaphore(10)
         _fill_done = 0
 
         async def _fill_one_doc(idx, doc_data):

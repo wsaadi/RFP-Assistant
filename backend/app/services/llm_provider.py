@@ -18,7 +18,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 # Default timeout for API calls (seconds)
-_DEFAULT_TIMEOUT = 120
+_DEFAULT_TIMEOUT = 300
 _MAX_RETRIES = 2
 
 
