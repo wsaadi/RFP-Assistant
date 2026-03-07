@@ -3,6 +3,8 @@ import asyncio
 import logging
 import uuid
 
+from celery.result import allow_join_result
+
 from ..celery_app import celery
 from ..services.progress_service import set_progress, get_progress
 
@@ -29,7 +31,11 @@ def _vector_search(project_id: str, query: str, top_k: int = 10,
             "category_filter": category_filter,
         },
     )
-    return result.get(timeout=_VECTOR_SEARCH_TIMEOUT)
+    # allow_join_result is safe here: the vector_search task runs on the
+    # dedicated documents worker queue, so there is no risk of deadlock
+    # with the AI worker pool that executes this code.
+    with allow_join_result():
+        return result.get(timeout=_VECTOR_SEARCH_TIMEOUT)
 
 # Namespace for chapter generation progress in Redis
 NS = "chapter_gen"
