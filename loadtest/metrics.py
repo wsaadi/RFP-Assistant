@@ -25,6 +25,31 @@ class RequestMetric:
 
 
 @dataclass
+class AIOperationMetric:
+    """Tracks the real wall-clock duration of an AI operation (dispatch → completion).
+
+    This measures the TOTAL time from when the async task is dispatched until polling
+    confirms it completed — giving the true AI processing time including queue wait,
+    LLM inference, and any retries.
+    """
+    user_id: int
+    operation: str  # generate_structure, generate_content, compliance_analysis, etc.
+    started_at: float = 0.0
+    finished_at: float = 0.0
+    duration_s: float = 0.0
+    poll_count: int = 0
+    final_status: str = ""  # completed, failed, timeout
+    success: bool = False
+
+    def finish(self, status: str, poll_count: int = 0):
+        self.finished_at = time.monotonic()
+        self.duration_s = round(self.finished_at - self.started_at, 2)
+        self.final_status = status
+        self.poll_count = poll_count
+        self.success = status in ("completed", "ready", "idle")
+
+
+@dataclass
 class UserJourneyMetric:
     """Full user journey metric."""
     user_id: int
@@ -42,6 +67,8 @@ class MetricsCollector:
     def __init__(self):
         self.requests: list[RequestMetric] = []
         self.journeys: list[UserJourneyMetric] = []
+        self.ai_operations: list[AIOperationMetric] = []
+        self._server_resources: dict = {}
         self._start_time: float = 0.0
         self._end_time: float = 0.0
 
@@ -56,6 +83,12 @@ class MetricsCollector:
 
     def record_journey(self, journey: UserJourneyMetric):
         self.journeys.append(journey)
+
+    def record_ai_operation(self, op: AIOperationMetric):
+        self.ai_operations.append(op)
+
+    def set_server_resources(self, resources: dict):
+        self._server_resources = resources
 
     @property
     def total_duration_s(self) -> float:
@@ -122,6 +155,32 @@ class MetricsCollector:
                 "error": r.error or "",
             })
 
+        # AI operation timing (real wall-clock durations)
+        ai_ops_stats = {}
+        if self.ai_operations:
+            by_op = defaultdict(list)
+            for op in self.ai_operations:
+                by_op[op.operation].append(op)
+
+            for op_name, ops in by_op.items():
+                durations_s = [op.duration_s for op in ops if op.duration_s > 0]
+                ok = sum(1 for op in ops if op.success)
+                polls = [op.poll_count for op in ops]
+                ai_ops_stats[op_name] = {
+                    "count": len(ops),
+                    "success": ok,
+                    "failed": len(ops) - ok,
+                    "avg_duration_s": round(statistics.mean(durations_s), 2) if durations_s else 0,
+                    "min_duration_s": round(min(durations_s), 2) if durations_s else 0,
+                    "max_duration_s": round(max(durations_s), 2) if durations_s else 0,
+                    "p95_duration_s": round(_percentile(durations_s, 95), 2) if durations_s else 0,
+                    "avg_poll_count": round(statistics.mean(polls), 1) if polls else 0,
+                    "statuses": dict(defaultdict(int, {
+                        op.final_status: sum(1 for o in ops if o.final_status == op.final_status)
+                        for op in ops
+                    })),
+                }
+
         report = {
             "summary": {
                 "total_duration_s": round(self.total_duration_s, 2),
@@ -139,6 +198,7 @@ class MetricsCollector:
                 "min_ms": round(min(durations), 1),
                 "max_ms": round(max(durations), 1),
             },
+            "ai_operations": ai_ops_stats,
             "journeys": {
                 "total": len(self.journeys),
                 "successful": journey_successes,
@@ -149,6 +209,10 @@ class MetricsCollector:
             "steps": step_stats,
             "errors": errors[:50],  # cap at 50
         }
+
+        # Attach server resource data if available
+        if self._server_resources:
+            report["server_resources"] = self._server_resources
 
         return report
 
@@ -187,6 +251,20 @@ class MetricsCollector:
         for step_name, stats in report["steps"].items():
             print(f"  {step_name:30s} {stats['count']:>6d} {stats['success_rate']:>5.1f}% "
                   f"{stats['avg_ms']:>9.1f}ms {stats['p95_ms']:>9.1f}ms {stats['max_ms']:>9.1f}ms")
+
+        # AI Operations (real wall-clock durations)
+        ai_ops = report.get("ai_operations", {})
+        if ai_ops:
+            print(f"\n  {'AI Operation':30s} {'Count':>6s} {'OK%':>6s} {'Avg':>8s} "
+                  f"{'P95':>8s} {'Max':>8s} {'Polls':>7s}")
+            print(f"  {'─' * 76}")
+            for op_name, stats in ai_ops.items():
+                ok_pct = round(stats['success'] / stats['count'] * 100, 1) if stats['count'] > 0 else 0
+                print(f"  {op_name:30s} {stats['count']:>6d} {ok_pct:>5.1f}% "
+                      f"{stats['avg_duration_s']:>6.1f}s "
+                      f"{stats['p95_duration_s']:>6.1f}s "
+                      f"{stats['max_duration_s']:>6.1f}s "
+                      f"{stats['avg_poll_count']:>5.0f}x")
 
         # Journeys
         print(f"\n  User Journeys:      {j['total']} total, {j['successful']} OK, {j['failed']} failed")
@@ -242,6 +320,16 @@ class MetricsCollector:
         # All journeys should complete
         if j["total"] > 0 and j["failed"] > j["total"] * 0.2:
             issues.append(f"{j['failed']}/{j['total']} journeys failed (> 20%)")
+
+        # AI operations: check for failures and extreme latency
+        ai_ops = report.get("ai_operations", {})
+        for op_name, stats in ai_ops.items():
+            if stats["count"] > 0:
+                fail_rate = stats["failed"] / stats["count"]
+                if fail_rate > 0.3:
+                    issues.append(f"AI '{op_name}': {stats['failed']}/{stats['count']} failed (> 30%)")
+                if stats["p95_duration_s"] > 120:
+                    issues.append(f"AI '{op_name}': P95 = {stats['p95_duration_s']}s (> 120s)")
 
         # No 5xx errors tolerated beyond 5%
         total_5xx = sum(

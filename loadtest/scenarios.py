@@ -7,7 +7,7 @@ from typing import Optional
 
 import httpx
 
-from .metrics import MetricsCollector, RequestMetric, UserJourneyMetric
+from .metrics import MetricsCollector, RequestMetric, UserJourneyMetric, AIOperationMetric
 
 
 class LiveDashboard:
@@ -425,31 +425,45 @@ class UserSession:
 
     async def _step_wait_processing(self):
         """Poll document processing progress until complete or timeout."""
+        ai_op = AIOperationMetric(
+            user_id=self.user_id,
+            operation="document_processing",
+            started_at=time.monotonic(),
+        )
         max_wait = 120  # seconds
         poll_interval = 3
         start = time.monotonic()
+        poll_count = 0
+        final_status = "timeout"
 
         while (time.monotonic() - start) < max_wait:
             resp, _ = await self._request(
                 "check_processing", "GET",
                 f"/api/documents/progress/{self.project_id}",
             )
+            poll_count += 1
             if resp and resp.status_code == 200:
                 progress = resp.json().get("progress", [])
                 if not progress:
+                    final_status = "completed"
                     self._report("check_processing", 4, "done")
-                    return
+                    break
                 all_done = all(
                     p.get("db_status") in ("completed", "failed") or p.get("progress", 0) == 100
                     for p in progress
                 )
                 if all_done:
+                    any_failed = any(p.get("db_status") == "failed" for p in progress)
+                    final_status = "completed" if not any_failed else "partial"
                     self._report("check_processing", 4, "done")
-                    return
+                    break
 
             await asyncio.sleep(poll_interval)
 
-        self._report("check_processing", 4, "timeout")
+        if final_status == "timeout":
+            self._report("check_processing", 4, "timeout")
+        ai_op.finish(final_status, poll_count)
+        self.collector.record_ai_operation(ai_op)
 
     async def _step_search_documents(self):
         """Perform vector searches across the project documents."""
@@ -467,6 +481,11 @@ class UserSession:
 
     async def _step_generate_structure(self):
         """Trigger AI-based chapter structure generation."""
+        ai_op = AIOperationMetric(
+            user_id=self.user_id,
+            operation="generate_structure",
+            started_at=time.monotonic(),
+        )
         resp, _ = await self._request(
             "generate_structure", "POST",
             f"/api/projects/{self.project_id}/generate-structure",
@@ -474,11 +493,16 @@ class UserSession:
         )
         if resp and resp.status_code == 200:
             self._report("generate_structure", 6, "polling...")
-            await self._poll_progress("structure_status", f"/api/projects/{self.project_id}/generation-status")
-            self._report("structure_status", 6, "done")
+            final_status, polls = await self._poll_progress(
+                "structure_status", f"/api/projects/{self.project_id}/generation-status"
+            )
+            ai_op.finish(final_status, polls)
+            self._report("structure_status", 6, f"{final_status} ({ai_op.duration_s}s)")
         else:
             status = resp.status_code if resp else "no response"
+            ai_op.finish("error")
             self._report("generate_structure", 6, f"HTTP {status}")
+        self.collector.record_ai_operation(ai_op)
 
     async def _step_create_chapters(self):
         """Create chapters manually (fallback if AI structure gen not configured)."""
@@ -527,6 +551,11 @@ class UserSession:
         # Generate content for up to 2 chapters (expensive AI operation)
         chapters_to_gen = self.chapter_ids[:2]
         for chapter_id in chapters_to_gen:
+            ai_op = AIOperationMetric(
+                user_id=self.user_id,
+                operation="generate_content",
+                started_at=time.monotonic(),
+            )
             resp, _ = await self._request(
                 "generate_content", "POST",
                 f"/api/chapters/{chapter_id}/generate-content",
@@ -539,16 +568,24 @@ class UserSession:
             )
             if resp and resp.status_code == 200:
                 self._report("generate_content", 8, "polling...")
-                await self._poll_chapter_gen(chapter_id)
-                self._report("chapter_gen_status", 8, "done")
+                final_status, polls = await self._poll_chapter_gen(chapter_id)
+                ai_op.finish(final_status, polls)
+                self._report("chapter_gen_status", 8, f"{final_status} ({ai_op.duration_s}s)")
             else:
                 status = resp.status_code if resp else "no response"
+                ai_op.finish("error")
                 self._report("generate_content", 8, f"HTTP {status}")
+            self.collector.record_ai_operation(ai_op)
 
             await self._think()
 
     async def _step_compliance_analysis(self):
         """Run compliance analysis (AI-powered)."""
+        ai_op = AIOperationMetric(
+            user_id=self.user_id,
+            operation="compliance_analysis",
+            started_at=time.monotonic(),
+        )
         resp, _ = await self._request(
             "compliance_analysis", "POST",
             f"/api/projects/{self.project_id}/compliance-analysis",
@@ -557,18 +594,27 @@ class UserSession:
         if resp:
             if resp.status_code == 200:
                 self._report("compliance_analysis", 9, "polling...")
-                await self._poll_progress(
+                final_status, polls = await self._poll_progress(
                     "compliance_status",
                     f"/api/projects/{self.project_id}/compliance-analysis-status",
                 )
-                self._report("compliance_status", 9, "done")
+                ai_op.finish(final_status, polls)
+                self._report("compliance_status", 9, f"{final_status} ({ai_op.duration_s}s)")
             else:
+                ai_op.finish("error")
                 self._report("compliance_analysis", 9, f"HTTP {resp.status_code}")
         else:
+            ai_op.finish("error")
             self._report("compliance_analysis", 9, "no response")
+        self.collector.record_ai_operation(ai_op)
 
     async def _step_export_word(self):
         """Export project as Word document."""
+        ai_op = AIOperationMetric(
+            user_id=self.user_id,
+            operation="export_word",
+            started_at=time.monotonic(),
+        )
         resp, _ = await self._request(
             "export_word", "POST",
             f"/api/export/{self.project_id}/word",
@@ -578,14 +624,18 @@ class UserSession:
             self._report("export_word", 10, "polling...")
             max_wait = 90
             start = time.monotonic()
+            poll_count = 0
+            final_status = "timeout"
             while (time.monotonic() - start) < max_wait:
                 status_resp, _ = await self._request(
                     "export_word_status", "GET",
                     f"/api/export/{self.project_id}/word-status",
                 )
+                poll_count += 1
                 if status_resp and status_resp.status_code == 200:
                     data = status_resp.json()
                     if data.get("status") in ("completed", "ready"):
+                        final_status = "completed"
                         self._report("export_word", 10, "downloading")
                         await self._request(
                             "download_word", "GET",
@@ -593,15 +643,24 @@ class UserSession:
                         )
                         break
                     elif data.get("status") == "failed":
+                        final_status = "failed"
                         self._report("export_word", 10, "failed")
                         break
                 await asyncio.sleep(3)
+            ai_op.finish(final_status, poll_count)
         else:
             status = resp.status_code if resp else "no response"
+            ai_op.finish("error")
             self._report("export_word", 10, f"HTTP {status}")
+        self.collector.record_ai_operation(ai_op)
 
     async def _step_generate_soutenance(self):
         """Generate soutenance/defense materials (AI-powered)."""
+        ai_op = AIOperationMetric(
+            user_id=self.user_id,
+            operation="generate_soutenance",
+            started_at=time.monotonic(),
+        )
         resp, _ = await self._request(
             "generate_soutenance", "POST",
             f"/api/export/{self.project_id}/soutenance",
@@ -612,22 +671,32 @@ class UserSession:
                 self._report("generate_soutenance", 11, "polling...")
                 max_wait = 120
                 start = time.monotonic()
+                poll_count = 0
+                final_status = "timeout"
                 while (time.monotonic() - start) < max_wait:
                     status_resp, _ = await self._request(
                         "soutenance_status", "GET",
                         f"/api/export/{self.project_id}/soutenance-status",
                     )
+                    poll_count += 1
                     if status_resp and status_resp.status_code == 200:
                         data = status_resp.json()
                         if data.get("status") in ("completed", "ready", "idle"):
-                            self._report("soutenance_status", 11, "done")
+                            final_status = data.get("status", "completed")
+                            self._report("soutenance_status", 11, f"{final_status} ({ai_op.duration_s}s)")
                             break
                         elif data.get("status") == "failed":
+                            final_status = "failed"
                             self._report("soutenance_status", 11, "failed")
                             break
                     await asyncio.sleep(3)
+                ai_op.finish(final_status, poll_count)
             else:
+                ai_op.finish("error")
                 self._report("generate_soutenance", 11, f"HTTP {resp.status_code}")
+        else:
+            ai_op.finish("error")
+        self.collector.record_ai_operation(ai_op)
 
     async def _step_cleanup(self):
         """Delete the test project to clean up."""
@@ -637,36 +706,42 @@ class UserSession:
                 f"/api/projects/{self.project_id}",
             )
 
-    async def _poll_progress(self, step_name: str, status_url: str, max_wait: int = 120):
-        """Generic progress polling."""
+    async def _poll_progress(self, step_name: str, status_url: str, max_wait: int = 120) -> tuple[str, int]:
+        """Generic progress polling. Returns (final_status, poll_count)."""
+        poll_count = 0
         start = time.monotonic()
         while (time.monotonic() - start) < max_wait:
             resp, _ = await self._request(step_name, "GET", status_url)
+            poll_count += 1
             if resp and resp.status_code == 200:
                 data = resp.json()
                 status = data.get("status", "")
                 if status in ("completed", "ready", "idle"):
-                    return
+                    return status, poll_count
                 if status == "failed":
-                    return
+                    return "failed", poll_count
             await asyncio.sleep(3)
+        return "timeout", poll_count
 
-    async def _poll_chapter_gen(self, chapter_id: str, max_wait: int = 120):
-        """Poll chapter generation status."""
+    async def _poll_chapter_gen(self, chapter_id: str, max_wait: int = 120) -> tuple[str, int]:
+        """Poll chapter generation status. Returns (final_status, poll_count)."""
+        poll_count = 0
         start = time.monotonic()
         while (time.monotonic() - start) < max_wait:
             resp, _ = await self._request(
                 "chapter_gen_status", "GET",
                 f"/api/chapters/{chapter_id}/generate-status",
             )
+            poll_count += 1
             if resp and resp.status_code == 200:
                 data = resp.json()
                 status = data.get("status", "")
                 if status in ("completed", "idle"):
-                    return
+                    return status, poll_count
                 if status == "failed":
-                    return
+                    return "failed", poll_count
             await asyncio.sleep(3)
+        return "timeout", poll_count
 
 
 async def run_concurrent_users(

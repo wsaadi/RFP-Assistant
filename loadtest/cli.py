@@ -2,7 +2,8 @@
 """
 RFP Assistant Load Testing CLI
 
-Simulates 1-10 concurrent users performing realistic end-to-end journeys:
+Simulates 1-10 concurrent users performing realistic end-to-end journeys
+with comprehensive monitoring:
   - Login & authentication
   - Document upload (PDF, DOCX)
   - Document processing & vector indexing
@@ -15,10 +16,17 @@ Simulates 1-10 concurrent users performing realistic end-to-end journeys:
   - Soutenance/defense material generation (AI)
   - Project cleanup
 
+Monitoring capabilities:
+  - Server resources: CPU, RAM, Disk I/O, Network I/O per Docker container
+  - AI operations: real wall-clock duration from dispatch to completion
+  - HTTP metrics: latency percentiles, throughput, error rates
+  - Resource alerts: automatic detection of CPU/RAM saturation
+
 Usage:
   python -m loadtest.cli --users 3 --url http://localhost:8000
   python -m loadtest.cli --users 5 --url http://localhost:8000 --admin-email admin@rfp-assistant.fr --admin-password admin123 --think-time 1.0 3.0
   python -m loadtest.cli --users 1 --url http://localhost:8000 --json report.json
+  python -m loadtest.cli --users 10 --url http://localhost:8000 --monitor-interval 1.0
 
 Cleanup:
   python -m loadtest.cli --cleanup --url http://localhost:8000 --admin-password secret
@@ -35,6 +43,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from loadtest.metrics import MetricsCollector
+from loadtest.monitor import ServerMonitor
 from loadtest.scenarios import run_concurrent_users
 from loadtest.fixtures.generate_fixtures import main as generate_fixtures
 
@@ -58,7 +67,13 @@ Examples:
   # Full stress test with 10 users, fast think time
   python -m loadtest.cli --users 10 --url http://localhost:8000 --think-time 0.1 0.5
 
-  # Export results to JSON
+  # Stress test with high-frequency resource monitoring
+  python -m loadtest.cli --users 10 --url http://localhost:8000 --monitor-interval 1.0
+
+  # Run without Docker resource monitoring
+  python -m loadtest.cli --users 5 --url http://localhost:8000 --no-monitor
+
+  # Export results to JSON (includes server resources + AI timing)
   python -m loadtest.cli --users 3 --url http://localhost:8000 --json results.json
 
   # Generate test fixtures only
@@ -124,6 +139,18 @@ Examples:
         "--cleanup",
         action="store_true",
         help="Delete all LoadTest projects and loadtest_user accounts, then exit",
+    )
+    parser.add_argument(
+        "--no-monitor",
+        action="store_true",
+        help="Disable Docker container resource monitoring (CPU, RAM, Disk, Network)",
+    )
+    parser.add_argument(
+        "--monitor-interval",
+        type=float,
+        default=2.0,
+        metavar="SECONDS",
+        help="Server resource sampling interval in seconds (default: 2.0)",
     )
     return parser.parse_args()
 
@@ -223,15 +250,17 @@ def main():
         generate_fixtures()
 
     base_url = args.url.rstrip("/")
+    enable_monitor = not args.no_monitor
 
     print("\n" + "=" * 72)
     print("  RFP ASSISTANT - LOAD TEST")
     print("=" * 72)
-    print(f"  Target:         {base_url}")
+    print(f"  Target:           {base_url}")
     print(f"  Concurrent users: {args.users}")
-    print(f"  Think time:     {args.think_time[0]}s - {args.think_time[1]}s")
-    print(f"  Stagger delay:  {args.stagger}s")
-    print(f"  Admin:          {args.admin_email}")
+    print(f"  Think time:       {args.think_time[0]}s - {args.think_time[1]}s")
+    print(f"  Stagger delay:    {args.stagger}s")
+    print(f"  Admin:            {args.admin_email}")
+    print(f"  Server monitor:   {'ON' if enable_monitor else 'OFF'}")
     print("=" * 72)
 
     # Pre-flight connectivity check
@@ -249,9 +278,14 @@ def main():
 
     collector = MetricsCollector()
 
-    try:
-        asyncio.run(
-            run_concurrent_users(
+    async def run_test_with_monitoring():
+        monitor = None
+        if enable_monitor:
+            monitor = ServerMonitor(interval=args.monitor_interval)
+            await monitor.start()
+
+        try:
+            await run_concurrent_users(
                 num_users=args.users,
                 base_url=base_url,
                 admin_email=args.admin_email,
@@ -260,7 +294,16 @@ def main():
                 stagger_delay=args.stagger,
                 think_time=tuple(args.think_time),
             )
-        )
+        finally:
+            if monitor:
+                await monitor.stop()
+                resource_report = monitor.get_report()
+                if resource_report:
+                    collector.set_server_resources(resource_report)
+                monitor.print_report()
+
+    try:
+        asyncio.run(run_test_with_monitoring())
     except KeyboardInterrupt:
         print("\n  Interrupted by user. Collecting partial results...")
         collector.stop()
