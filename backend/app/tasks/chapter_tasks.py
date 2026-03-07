@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 # Timeout for vector_search sub-task calls (seconds).
 # The documents worker runs the search; AI workers wait for the result.
-_VECTOR_SEARCH_TIMEOUT = 30
+_VECTOR_SEARCH_TIMEOUT = 120
 
 
 def _vector_search(project_id: str, query: str, top_k: int = 10,

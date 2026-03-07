@@ -83,7 +83,7 @@ celery.conf.update(
         "retry_on_timeout": True,
         "socket_keepalive": True,
         "socket_connect_timeout": 10,
-        "socket_timeout": 30,
+        "socket_timeout": 120,
         # Priority support: 10 levels (0=highest) for the ai queue.
         # Redis creates a sub-queue per priority level; list them low→high.
         "priority_steps": list(range(10)),
