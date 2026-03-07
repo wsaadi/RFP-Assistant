@@ -44,10 +44,13 @@ celery = Celery(
 )
 
 # ── Queue definitions ──
-# Separate heavy document processing from lighter AI / export tasks
-# so that a large PDF doesn't block chapter generation.
+# Three dedicated queues for different workload profiles:
+# - documents: heavy CPU-bound processing (NER, embedding, image analysis)
+# - default: lightweight tasks (exports, backups)
+# - ai: LLM-powered tasks (I/O-bound, waiting on external AI APIs)
 default_exchange = Exchange("default", type="direct")
 document_exchange = Exchange("documents", type="direct")
+ai_exchange = Exchange("ai", type="direct")
 
 celery.conf.update(
     # Serialization
@@ -99,25 +102,34 @@ celery.conf.update(
     task_queues=(
         Queue("default", default_exchange, routing_key="default"),
         Queue("documents", document_exchange, routing_key="documents"),
+        Queue("ai", ai_exchange, routing_key="ai"),
     ),
     task_default_queue="default",
     task_default_exchange="default",
     task_default_routing_key="default",
 
     # ── Task routing ──
-    # Route heavy document tasks to the dedicated 'documents' queue.
+    # Three queue strategy:
+    # - documents: CPU-bound processing (NER, embedding, image analysis)
+    # - ai: I/O-bound LLM calls (external API wait, high concurrency safe)
+    # - default: lightweight tasks (exports, backups)
     task_routes={
+        # CPU-bound document processing → documents queue
         "tasks.process_document": {"queue": "documents"},
-        "tasks.generate_chapter_content": {"queue": "default"},
-        "tasks.gap_analysis": {"queue": "default"},
-        "tasks.generate_structure": {"queue": "default"},
-        "tasks.prefill_chapters": {"queue": "default"},
-        "tasks.detect_deliverables": {"queue": "default"},
-        "tasks.fill_deliverables": {"queue": "default"},
-        "tasks.compliance_analysis": {"queue": "default"},
-        "tasks.generate_recommendation": {"queue": "default"},
         "tasks.reanonymize": {"queue": "documents"},
         "tasks.analyze_images": {"queue": "documents"},
+        # I/O-bound AI/LLM tasks → ai queue (high concurrency)
+        "tasks.generate_chapter_content": {"queue": "ai"},
+        "tasks.gap_analysis": {"queue": "ai"},
+        "tasks.generate_structure": {"queue": "ai"},
+        "tasks.prefill_chapters": {"queue": "ai"},
+        "tasks.detect_deliverables": {"queue": "ai"},
+        "tasks.fill_deliverables": {"queue": "ai"},
+        "tasks.compliance_analysis": {"queue": "ai"},
+        "tasks.generate_recommendation": {"queue": "ai"},
+        "tasks.export_soutenance": {"queue": "ai"},
+        "tasks.preview_chat": {"queue": "ai"},
+        # Lightweight tasks → default queue
         "tasks.export_word": {"queue": "default"},
         "tasks.export_backup": {"queue": "default"},
     },

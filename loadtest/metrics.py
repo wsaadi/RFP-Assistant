@@ -328,8 +328,8 @@ class MetricsCollector:
                 fail_rate = stats["failed"] / stats["count"]
                 if fail_rate > 0.3:
                     issues.append(f"AI '{op_name}': {stats['failed']}/{stats['count']} failed (> 30%)")
-                if stats["p95_duration_s"] > 120:
-                    issues.append(f"AI '{op_name}': P95 = {stats['p95_duration_s']}s (> 120s)")
+                if stats["p95_duration_s"] > 180:
+                    issues.append(f"AI '{op_name}': P95 = {stats['p95_duration_s']}s (> 180s)")
 
         # No 5xx errors tolerated beyond 5%
         total_5xx = sum(

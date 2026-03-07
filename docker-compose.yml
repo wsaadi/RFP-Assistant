@@ -151,13 +151,20 @@ services:
         limits:
           memory: 2G
 
-  # Beta scaling: 2 dedicated workers split by queue type.
-  # This prevents heavy document processing from blocking chapter generation/exports.
-  # Each worker loads its own ~800MB embedding model, so each needs 4GB RAM.
+  # ── Celery Workers ──
+  # Three dedicated workers split by workload profile:
   #
-  # concurrency=1 per worker: avoids doubling the model in memory within a single
-  #   worker process. With 2 separate workers, we get true parallelism (2 tasks
-  #   at once) while keeping each container's memory bounded.
+  # 1. documents (concurrency=1): CPU-bound processing (NER, embedding, images).
+  #    Single process avoids doubling the ~800MB embedding model in memory.
+  #
+  # 2. default (concurrency=2): Lightweight tasks (Word/PDF export, backups).
+  #    Two processes for parallel exports without heavy memory usage.
+  #
+  # 3. ai (concurrency=4): I/O-bound LLM calls (external API wait).
+  #    High concurrency is safe because these tasks spend 95%+ of their time
+  #    waiting on network responses from external AI APIs (OpenAI, Ollama, etc).
+  #    4 concurrent tasks = 4 users can get AI responses simultaneously.
+  #
   # max-memory-per-child=2000000: ~2GB — must exceed embedding model (~800MB)
   #   plus processing overhead.
   # max-tasks-per-child=50: periodic recycling for clean state.
@@ -176,19 +183,35 @@ services:
       --without-heartbeat
       --hostname=worker-documents@%h
 
-  # Worker 2: Light tasks (chapter generation, exports, analysis)
+  # Worker 2: Lightweight tasks (exports, backups)
   celery-worker-default:
     <<: *celery-worker
     container_name: rfp-assistant-celery-worker-default
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=1
+      --concurrency=2
       --queues=default
       --max-memory-per-child=2000000
       --max-tasks-per-child=50
       --without-heartbeat
       --hostname=worker-default@%h
+
+  # Worker 3: AI/LLM tasks (I/O-bound, external API calls)
+  # High concurrency because tasks are network-bound (waiting on LLM responses),
+  # not CPU-bound. Each concurrent task uses minimal CPU/RAM while waiting.
+  celery-worker-ai:
+    <<: *celery-worker
+    container_name: rfp-assistant-celery-worker-ai
+    command: >
+      celery -A app.celery_app worker
+      --loglevel=info
+      --concurrency=4
+      --queues=ai
+      --max-memory-per-child=2000000
+      --max-tasks-per-child=50
+      --without-heartbeat
+      --hostname=worker-ai@%h
 
   frontend:
     build:
