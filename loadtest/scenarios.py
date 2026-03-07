@@ -474,7 +474,7 @@ class UserSession:
         )
         if resp and resp.status_code == 200:
             self._report("generate_structure", 6, "polling...")
-            await self._poll_progress("structure_status", f"/api/projects/{self.project_id}/generate-structure-status")
+            await self._poll_progress("structure_status", f"/api/projects/{self.project_id}/generation-status")
             self._report("structure_status", 6, "done")
         else:
             status = resp.status_code if resp else "no response"
