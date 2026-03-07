@@ -48,8 +48,8 @@ def _get_redis() -> redis.Redis:
         _redis = redis.from_url(
             _REDIS_URL,
             decode_responses=True,
-            socket_connect_timeout=5,
-            socket_timeout=5,
+            socket_connect_timeout=10,
+            socket_timeout=30,
             retry_on_timeout=True,
             health_check_interval=30,
         )
