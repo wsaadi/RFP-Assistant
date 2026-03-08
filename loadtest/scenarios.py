@@ -116,6 +116,43 @@ class LiveDashboard:
         return f"[{bar}] {current:>2d}/{total}"
 
 FIXTURES_DIR = os.path.join(os.path.dirname(__file__), "fixtures")
+# Real test documents directory — organized by category (new_rfp/, old_rfp/, etc.)
+DOCUMENTS_TEST_DIR = os.path.join(os.path.dirname(__file__), "..", "documents_test")
+_SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".xlsx", ".doc", ".xls"}
+
+
+def _discover_test_documents() -> list[tuple[str, str]]:
+    """Scan documents_test/ for real documents organized by category.
+
+    Returns list of (filepath, category) tuples.
+    Falls back to generated fixtures if documents_test/ is empty.
+    """
+    uploads: list[tuple[str, str]] = []
+    categories = ["new_rfp", "old_rfp", "old_response", "inspiration"]
+
+    if os.path.isdir(DOCUMENTS_TEST_DIR):
+        for category in categories:
+            cat_dir = os.path.join(DOCUMENTS_TEST_DIR, category)
+            if not os.path.isdir(cat_dir):
+                continue
+            for fname in sorted(os.listdir(cat_dir)):
+                if os.path.splitext(fname)[1].lower() in _SUPPORTED_EXTENSIONS:
+                    uploads.append((os.path.join(cat_dir, fname), category))
+
+    if uploads:
+        return uploads
+
+    # Fallback to generated fixtures
+    return [
+        (os.path.join(FIXTURES_DIR, "sample_rfp.pdf"), "new_rfp"),
+        (os.path.join(FIXTURES_DIR, "sample_old_rfp.pdf"), "old_rfp"),
+        (os.path.join(FIXTURES_DIR, "sample_response.docx"), "old_response"),
+        (os.path.join(FIXTURES_DIR, "sample_old_response.docx"), "inspiration"),
+    ]
+
+
+# Discovered at import time so all users upload the same documents
+TEST_DOCUMENTS = _discover_test_documents()
 
 # Realistic chapter structures for RFP responses
 CHAPTER_TEMPLATES = [
@@ -400,20 +437,13 @@ class UserSession:
             raise RuntimeError(f"Failed to create project: {resp.status_code if resp else 'no response'}")
 
     async def _step_upload_documents(self):
-        """Upload sample PDF and DOCX documents."""
-        uploads = [
-            ("sample_rfp.pdf", "new_rfp"),
-            ("sample_old_rfp.pdf", "old_rfp"),
-            ("sample_response.docx", "old_response"),
-            ("sample_old_response.docx", "inspiration"),
-        ]
-
-        for filename, category in uploads:
-            filepath = os.path.join(FIXTURES_DIR, filename)
+        """Upload test documents (real docs from documents_test/ or generated fixtures)."""
+        for filepath, category in TEST_DOCUMENTS:
             if not os.path.exists(filepath):
-                self._report("upload_document", 3, f"skip {filename}")
+                self._report("upload_document", 3, f"skip {os.path.basename(filepath)}")
                 continue
 
+            filename = os.path.basename(filepath)
             with open(filepath, "rb") as f:
                 file_bytes = f.read()
 
@@ -426,7 +456,7 @@ class UserSession:
             if resp and resp.status_code == 200:
                 doc_id = resp.json()["id"]
                 self.document_ids.append(doc_id)
-                self._report("upload_document", 3, f"{filename}")
+                self._report("upload_document", 3, f"{filename} ({category})")
             else:
                 status = resp.status_code if resp else "no response"
                 self._report("upload_document", 3, f"FAIL {filename}: {status}")
@@ -745,7 +775,7 @@ class UserSession:
                 status = data.get("status", "")
                 if status in ("completed", "ready", "idle"):
                     return status, poll_count
-                if status == "failed":
+                if status in ("failed", "error"):
                     return "failed", poll_count
                 # Show live AI progress: phase, progress%, message (tokens, elapsed)
                 if status == "running" and step_num:
@@ -774,7 +804,7 @@ class UserSession:
                 status = data.get("status", "")
                 if status in ("completed", "idle"):
                     return status, poll_count
-                if status == "failed":
+                if status in ("failed", "error"):
                     return "failed", poll_count
                 # Show live AI progress for chapter generation
                 if status == "running":
@@ -801,6 +831,15 @@ async def run_concurrent_users(
     Creates test users via the admin API, then runs them all concurrently.
     Each user starts immediately as a real asyncio task with staggered delays.
     """
+    # Show which documents will be uploaded
+    doc_source = "documents_test/" if any(DOCUMENTS_TEST_DIR in fp for fp, _ in TEST_DOCUMENTS) else "fixtures/"
+    print(f"\n  Documents ({doc_source}): {len(TEST_DOCUMENTS)} files per user")
+    by_cat: dict[str, list[str]] = {}
+    for fp, cat in TEST_DOCUMENTS:
+        by_cat.setdefault(cat, []).append(os.path.basename(fp))
+    for cat, files in by_cat.items():
+        print(f"    {cat}: {', '.join(files)}")
+
     print(f"\n  Preparing {num_users} concurrent user(s)...")
 
     # First, login as admin to create test users

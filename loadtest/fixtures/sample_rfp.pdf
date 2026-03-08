@@ -3,78 +3,180 @@
 << /Type /Catalog /Pages 2 0 R >>
 endobj
 2 0 obj
-<< /Type /Pages /Kids [6 0 R 8 0 R 10 0 R 12 0 R 14 0 R] /Count 5 >>
+<< /Type /Pages /Kids [5 0 R 7 0 R 9 0 R] /Count 3 >>
 endobj
 3 0 obj
-<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
 endobj
 4 0 obj
-[/PDF /Text]
+<< /Length 2244 >>
+stream
+BT
+/F1 11 Tf
+50 750 Td
+14 TL
+(APPEL D'OFFRES - MODERNISATION DU SYSTEME D'INFORMATION) '
+() '
+(1. OBJET DU MARCHE) '
+() '
+(Le present appel d'offres a pour objet la selection d'un prestataire pour la) '
+(conception, le developpement et le deploiement d'une solution de modernisation) '
+(du systeme d'information de notre organisation. Cette modernisation couvre) '
+(l'ensemble des processus metier, depuis la gestion documentaire jusqu'au) '
+(pilotage strategique.) '
+() '
+(Le prestataire retenu devra demontrer une expertise avancee dans les) '
+(technologies cloud, les architectures microservices et les methodologies agiles.) '
+(Il devra egalement garantir la conformite aux normes de securite en vigueur,) '
+(notamment le RGPD et la norme ISO 27001.) '
+() '
+(2. CONTEXTE ET ENJEUX) '
+() '
+(Notre organisation emploie 2500 collaborateurs repartis sur 15 sites en France.) '
+(Le systeme d'information actuel, base sur des technologies legacy \(mainframe) '
+(COBOL, bases Oracle 11g\), ne repond plus aux besoins d'agilite et de performance) '
+(requis par nos activites. Les principaux enjeux sont les suivants :) '
+() '
+(- Reduction des couts d'exploitation de 30% sur 3 ans) '
+() '
+(- Amelioration de la disponibilite des services \(objectif 99.9%\)) '
+() '
+(- Acceleration du time-to-market pour les nouveaux produits) '
+() '
+(- Mise en conformite reglementaire complete) '
+() '
+(- Amelioration de l'experience utilisateur interne et externe) '
+() '
+(3. PERIMETRE DE LA PRESTATION) '
+() '
+(3.1 Lot 1 : Audit et cadrage strategique) '
+() '
+(Le prestataire realisera un audit complet du SI existant comprenant la) '
+(cartographie applicative, l'analyse des flux de donnees, l'evaluation de la) '
+(dette technique et la definition de la trajectoire de transformation. Cette) '
+(phase inclut egalement la redaction du schema directeur SI sur 5 ans.) '
+() '
+(3.2 Lot 2 : Conception et architecture) '
+() '
+(La conception de la nouvelle architecture devra s'appuyer sur les principes) '
+(suivants : architecture orientee services, containerisation avec Kubernetes, API) '
+(Gateway pour l'exposition des services, event-driven architecture pour les flux) '
+(temps reel. Le prestataire proposera une architecture de reference documentee.) '
+() '
+ET
+endstream
 endobj
 5 0 obj
-<< /Length 368 >>
-stream
-BT /F1 12 Tf 50 750 Td (Page 1 - Appel d'Offres - Modernisation SI\nAppel d offres pour la fourniture de services informatiques.\nLe prestataire devra demontrer sa capacite a fournir des solutions innovantes.\nCriteres d evaluation : expertise technique, references clients, prix.\nDate limite de soumission : 15 mars 2026.\nBudget estimatif : 500 000 EUR HT.\n) Tj ET
-endstream
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 3 0 R >> >> >>
 endobj
 6 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 3 0 R >> /ProcSet 4 0 R >> >>
+<< /Length 2261 >>
+stream
+BT
+/F1 11 Tf
+50 750 Td
+14 TL
+(3.3 Lot 3 : Developpement et integration) '
+() '
+(Le developpement sera realise en methodologie agile \(Scrum\) avec des sprints de) '
+(2 semaines. Le prestataire mettra en place une chaine CI/CD complete incluant) '
+(les tests automatises, l'analyse de code statique et le deploiement continu. Les) '
+(technologies privilegiees sont Python, React, PostgreSQL et Redis.) '
+() '
+(3.4 Lot 4 : Migration des donnees) '
+() '
+(La migration des donnees depuis les systemes legacy vers la nouvelle plateforme) '
+(devra etre realisee sans interruption de service. Le prestataire proposera une) '
+(strategie de migration progressive avec validation par lot et mecanisme de) '
+(rollback.) '
+() '
+(3.5 Lot 5 : Formation et conduite du changement) '
+() '
+(Le prestataire assurera la formation de 200 utilisateurs cles et la mise en) '
+(place d'un dispositif d'accompagnement au changement incluant des ambassadeurs) '
+(internes, une documentation utilisateur complete et un support de niveau 1) '
+(pendant 6 mois.) '
+() '
+(4. CRITERES D'EVALUATION) '
+() '
+(Les offres seront evaluees selon les criteres suivants :) '
+() '
+(- Qualite technique de la solution proposee : 40%) '
+() '
+(- References et experience sur des projets similaires : 20%) '
+() '
+(- Prix global de la prestation : 25%) '
+() '
+(- Respect du calendrier et des engagements de qualite : 15%) '
+() '
+(5. CALENDRIER PREVISIONNEL) '
+() '
+(Phase 1 : Audit et cadrage - 3 mois \(T1 2026\)) '
+() '
+(Phase 2 : Conception et architecture - 4 mois \(T2-T3 2026\)) '
+() '
+(Phase 3 : Developpement - 12 mois \(T3 2026 - T3 2027\)) '
+() '
+(Phase 4 : Migration et deploiement - 6 mois \(T3-T4 2027\)) '
+() '
+(Phase 5 : Stabilisation et transfert - 3 mois \(T1 2028\)) '
+() '
+(6. BUDGET ESTIMATIF) '
+() '
+(Le budget estimatif pour l'ensemble de la prestation est de 2 500 000 EUR HT,) '
+(reparti comme suit :) '
+() '
+(- Lot 1 : 150 000 EUR HT) '
+() '
+(- Lot 2 : 300 000 EUR HT) '
+() '
+(- Lot 3 : 1 200 000 EUR HT) '
+() '
+(- Lot 4 : 400 000 EUR HT) '
+() '
+(- Lot 5 : 450 000 EUR HT) '
+() '
+(7. MODALITES DE REPONSE) '
+() '
+(Les candidats devront soumettre leur offre avant le 30 avril 2026. Le dossier de) '
+(reponse comprendra un memoire technique detaille, un planning de realisation,) '
+ET
+endstream
 endobj
 7 0 obj
-<< /Length 368 >>
-stream
-BT /F1 12 Tf 50 750 Td (Page 2 - Appel d'Offres - Modernisation SI\nAppel d offres pour la fourniture de services informatiques.\nLe prestataire devra demontrer sa capacite a fournir des solutions innovantes.\nCriteres d evaluation : expertise technique, references clients, prix.\nDate limite de soumission : 15 mars 2026.\nBudget estimatif : 500 000 EUR HT.\n) Tj ET
-endstream
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 6 0 R /Resources << /Font << /F1 3 0 R >> >> >>
 endobj
 8 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R /Resources << /Font << /F1 3 0 R >> /ProcSet 4 0 R >> >>
+<< /Length 261 >>
+stream
+BT
+/F1 11 Tf
+50 750 Td
+14 TL
+(les CV des intervenants cles et une proposition financiere decomposee par lot.) '
+(Les offres seront evaluees par un comite de selection compose de la DSI, de la) '
+(direction generale et d'un expert externe independant.) '
+() '
+ET
+endstream
 endobj
 9 0 obj
-<< /Length 368 >>
-stream
-BT /F1 12 Tf 50 750 Td (Page 3 - Appel d'Offres - Modernisation SI\nAppel d offres pour la fourniture de services informatiques.\nLe prestataire devra demontrer sa capacite a fournir des solutions innovantes.\nCriteres d evaluation : expertise technique, references clients, prix.\nDate limite de soumission : 15 mars 2026.\nBudget estimatif : 500 000 EUR HT.\n) Tj ET
-endstream
-endobj
-10 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 9 0 R /Resources << /Font << /F1 3 0 R >> /ProcSet 4 0 R >> >>
-endobj
-11 0 obj
-<< /Length 368 >>
-stream
-BT /F1 12 Tf 50 750 Td (Page 4 - Appel d'Offres - Modernisation SI\nAppel d offres pour la fourniture de services informatiques.\nLe prestataire devra demontrer sa capacite a fournir des solutions innovantes.\nCriteres d evaluation : expertise technique, references clients, prix.\nDate limite de soumission : 15 mars 2026.\nBudget estimatif : 500 000 EUR HT.\n) Tj ET
-endstream
-endobj
-12 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 11 0 R /Resources << /Font << /F1 3 0 R >> /ProcSet 4 0 R >> >>
-endobj
-13 0 obj
-<< /Length 368 >>
-stream
-BT /F1 12 Tf 50 750 Td (Page 5 - Appel d'Offres - Modernisation SI\nAppel d offres pour la fourniture de services informatiques.\nLe prestataire devra demontrer sa capacite a fournir des solutions innovantes.\nCriteres d evaluation : expertise technique, references clients, prix.\nDate limite de soumission : 15 mars 2026.\nBudget estimatif : 500 000 EUR HT.\n) Tj ET
-endstream
-endobj
-14 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 13 0 R /Resources << /Font << /F1 3 0 R >> /ProcSet 4 0 R >> >>
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 8 0 R /Resources << /Font << /F1 3 0 R >> >> >>
 endobj
 xref
-0 15
+0 10
 0000000000 65535 f 
 0000000009 00000 n 
 0000000058 00000 n 
-0000000142 00000 n 
-0000000212 00000 n 
-0000000240 00000 n 
-0000000659 00000 n 
-0000000800 00000 n 
-0000001219 00000 n 
-0000001360 00000 n 
-0000001779 00000 n 
-0000001921 00000 n 
-0000002341 00000 n 
-0000002484 00000 n 
-0000002904 00000 n 
+0000000127 00000 n 
+0000000224 00000 n 
+0000002520 00000 n 
+0000002646 00000 n 
+0000004959 00000 n 
+0000005085 00000 n 
+0000005397 00000 n 
 trailer
-<< /Size 15 /Root 1 0 R >>
+<< /Size 10 /Root 1 0 R >>
 startxref
-3047
+5523
 %%EOF

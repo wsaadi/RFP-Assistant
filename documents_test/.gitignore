@@ -1,0 +1,10 @@
+# Ignore real test documents (can be large)
+*.pdf
+*.docx
+*.xlsx
+*.doc
+*.xls
+
+# Keep the directory structure
+!.gitkeep
+!README.md

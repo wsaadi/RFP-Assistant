@@ -3,56 +3,79 @@
 << /Type /Catalog /Pages 2 0 R >>
 endobj
 2 0 obj
-<< /Type /Pages /Kids [6 0 R 8 0 R 10 0 R] /Count 3 >>
+<< /Type /Pages /Kids [5 0 R] /Count 1 >>
 endobj
 3 0 obj
-<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>
+<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>
 endobj
 4 0 obj
-[/PDF /Text]
+<< /Length 1424 >>
+stream
+BT
+/F1 11 Tf
+50 750 Td
+14 TL
+(ANCIEN APPEL D'OFFRES - TRANSFORMATION DIGITALE) '
+() '
+(1. OBJET) '
+() '
+(Le marche porte sur la transformation digitale des processus metier de) '
+(l'organisation. Il comprend la mise en place d'outils collaboratifs, la) '
+(digitalisation des parcours clients et l'optimisation des processus internes) '
+(grace aux technologies numeriques.) '
+() '
+(2. CONTEXTE) '
+() '
+(L'organisation compte 2000 collaborateurs et souhaite accelerer sa) '
+(transformation digitale. Le SI actuel repose sur des technologies vieillissantes) '
+(necessitant une modernisation progressive pour repondre aux nouveaux usages.) '
+() '
+(3. PRESTATIONS ATTENDUES) '
+() '
+(3.1 Mise en place d'une plateforme collaborative \(Microsoft 365 ou equivalent\)) '
+() '
+(3.2 Deploiement d'un CRM pour la gestion de la relation client) '
+() '
+(3.3 Digitalisation des processus RH \(recrutement, formation, evaluation\)) '
+() '
+(3.4 Mise en place d'un portail client self-service) '
+() '
+(3.5 Formation des equipes aux nouveaux outils) '
+() '
+(4. CRITERES D'ATTRIBUTION) '
+() '
+(- Valeur technique : 50%) '
+() '
+(- Prix : 30%) '
+() '
+(- Delais : 20%) '
+() '
+(5. BUDGET) '
+() '
+(Budget maximal : 800 000 EUR HT sur 24 mois.) '
+() '
+(6. CALENDRIER) '
+() '
+(Demarrage prevu : septembre 2024. Duree : 18 mois. La phase de recette) '
+(interviendra au T2 2025 avec une mise en production progressive par lot) '
+(fonctionnel.) '
+() '
+ET
+endstream
 endobj
 5 0 obj
-<< /Length 370 >>
-stream
-BT /F1 12 Tf 50 750 Td (Page 1 - Ancien AO - Transformation Digitale\nAppel d offres pour la fourniture de services informatiques.\nLe prestataire devra demontrer sa capacite a fournir des solutions innovantes.\nCriteres d evaluation : expertise technique, references clients, prix.\nDate limite de soumission : 15 mars 2026.\nBudget estimatif : 500 000 EUR HT.\n) Tj ET
-endstream
-endobj
-6 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 5 0 R /Resources << /Font << /F1 3 0 R >> /ProcSet 4 0 R >> >>
-endobj
-7 0 obj
-<< /Length 370 >>
-stream
-BT /F1 12 Tf 50 750 Td (Page 2 - Ancien AO - Transformation Digitale\nAppel d offres pour la fourniture de services informatiques.\nLe prestataire devra demontrer sa capacite a fournir des solutions innovantes.\nCriteres d evaluation : expertise technique, references clients, prix.\nDate limite de soumission : 15 mars 2026.\nBudget estimatif : 500 000 EUR HT.\n) Tj ET
-endstream
-endobj
-8 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 7 0 R /Resources << /Font << /F1 3 0 R >> /ProcSet 4 0 R >> >>
-endobj
-9 0 obj
-<< /Length 370 >>
-stream
-BT /F1 12 Tf 50 750 Td (Page 3 - Ancien AO - Transformation Digitale\nAppel d offres pour la fourniture de services informatiques.\nLe prestataire devra demontrer sa capacite a fournir des solutions innovantes.\nCriteres d evaluation : expertise technique, references clients, prix.\nDate limite de soumission : 15 mars 2026.\nBudget estimatif : 500 000 EUR HT.\n) Tj ET
-endstream
-endobj
-10 0 obj
-<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 9 0 R /Resources << /Font << /F1 3 0 R >> /ProcSet 4 0 R >> >>
+<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Contents 4 0 R /Resources << /Font << /F1 3 0 R >> >> >>
 endobj
 xref
-0 11
+0 6
 0000000000 65535 f 
 0000000009 00000 n 
 0000000058 00000 n 
-0000000128 00000 n 
-0000000198 00000 n 
-0000000226 00000 n 
-0000000647 00000 n 
-0000000788 00000 n 
-0000001209 00000 n 
-0000001350 00000 n 
-0000001771 00000 n 
+0000000115 00000 n 
+0000000212 00000 n 
+0000001688 00000 n 
 trailer
-<< /Size 11 /Root 1 0 R >>
+<< /Size 6 /Root 1 0 R >>
 startxref
-1913
+1814
 %%EOF
