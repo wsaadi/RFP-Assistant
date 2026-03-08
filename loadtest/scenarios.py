@@ -745,7 +745,7 @@ class UserSession:
                 status = data.get("status", "")
                 if status in ("completed", "ready", "idle"):
                     return status, poll_count
-                if status == "failed":
+                if status in ("failed", "error"):
                     return "failed", poll_count
                 # Show live AI progress: phase, progress%, message (tokens, elapsed)
                 if status == "running" and step_num:
@@ -774,7 +774,7 @@ class UserSession:
                 status = data.get("status", "")
                 if status in ("completed", "idle"):
                     return status, poll_count
-                if status == "failed":
+                if status in ("failed", "error"):
                     return "failed", poll_count
                 # Show live AI progress for chapter generation
                 if status == "running":
