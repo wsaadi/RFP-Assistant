@@ -161,7 +161,7 @@ services:
   # 2. default (concurrency=4): Lightweight tasks (Word/PDF export, backups).
   #    No embedding model loaded — saves ~3.2GB RAM.
   #
-  # 3-4. ai ×2 (concurrency=6 each = 12 total): I/O-bound LLM calls.
+  # 3-5. ai ×3 (concurrency=6 each = 18 total): I/O-bound LLM calls.
   #    No embedding model loaded — saves ~9.6GB RAM.  Vector searches are
   #    delegated to the documents worker via tasks.vector_search.
   #
@@ -208,11 +208,11 @@ services:
       --without-heartbeat
       --hostname=worker-default@%h
 
-  # Workers 3-4: AI/LLM tasks (I/O-bound, external API calls)
-  # Two workers with concurrency=6 each = 12 total concurrent AI slots.
+  # Workers 3-5: AI/LLM tasks (I/O-bound, external API calls)
+  # Three workers with concurrency=6 each = 18 total concurrent AI slots.
   # Tasks are network-bound (waiting on LLM responses), not CPU-bound.
-  # Splitting across two workers distributes CPU and avoids single-process
-  # bottlenecks. With 12 slots, 10 users can run AI tasks with minimal queuing.
+  # Splitting across three workers distributes CPU and avoids single-process
+  # bottlenecks. With 18 slots, 10 users can run AI tasks without queuing.
   celery-worker-ai-1:
     <<: *celery-worker
     container_name: rfp-assistant-celery-worker-ai-1
@@ -242,6 +242,23 @@ services:
       --max-tasks-per-child=50
       --without-heartbeat
       --hostname=worker-ai-2@%h
+    deploy:
+      resources:
+        limits:
+          memory: 6G
+
+  celery-worker-ai-3:
+    <<: *celery-worker
+    container_name: rfp-assistant-celery-worker-ai-3
+    command: >
+      celery -A app.celery_app worker
+      --loglevel=info
+      --concurrency=6
+      --queues=ai
+      --max-memory-per-child=2000000
+      --max-tasks-per-child=50
+      --without-heartbeat
+      --hostname=worker-ai-3@%h
     deploy:
       resources:
         limits:

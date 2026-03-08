@@ -157,9 +157,9 @@ class UserSession:
     # Per-step polling timeouts (seconds).
     # These must be generous enough for the worst-case scenario where N users
     # are competing for limited worker slots.  With 10 users:
-    #   - doc processing: 40 docs on 3 document workers → up to ~400s
-    #   - chapter content: 20 chapters on 12 AI workers → up to ~200s
-    #   - structure/soutenance: 10 tasks on 12 AI workers → up to ~120s
+    #   - doc processing: 40 docs on 5 document workers → up to ~240s
+    #   - chapter content: 20 chapters on 18 AI workers → up to ~120s
+    #   - structure/soutenance: 10 tasks on 18 AI workers → up to ~60s
     POLL_TIMEOUT_DOC_PROCESSING = 600   # step 5: heaviest queue pressure
     POLL_TIMEOUT_AI_TASK = 600          # steps 7, 9, 10, 12: AI queue
     POLL_TIMEOUT_EXPORT = 300           # step 11: lightweight, rarely queued
