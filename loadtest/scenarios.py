@@ -505,7 +505,7 @@ class UserSession:
             self._report("generate_structure", 6, "polling...")
             final_status, polls = await self._poll_progress(
                 "structure_status", f"/api/projects/{self.project_id}/generation-status",
-                max_wait=self.POLL_TIMEOUT_AI_TASK,
+                max_wait=self.POLL_TIMEOUT_AI_TASK, step_num=6,
             )
             ai_op.finish(final_status, polls)
             self._report("structure_status", 6, f"{final_status} ({ai_op.duration_s}s)")
@@ -610,7 +610,7 @@ class UserSession:
                 final_status, polls = await self._poll_progress(
                     "compliance_status",
                     f"/api/projects/{self.project_id}/compliance-analysis-status",
-                    max_wait=self.POLL_TIMEOUT_AI_TASK,
+                    max_wait=self.POLL_TIMEOUT_AI_TASK, step_num=9,
                 )
                 ai_op.finish(final_status, polls)
                 self._report("compliance_status", 9, f"{final_status} ({ai_op.duration_s}s)")
@@ -695,14 +695,21 @@ class UserSession:
                     poll_count += 1
                     if status_resp and status_resp.status_code == 200:
                         data = status_resp.json()
-                        if data.get("status") in ("completed", "ready", "idle"):
-                            final_status = data.get("status", "completed")
+                        st = data.get("status", "")
+                        if st in ("completed", "ready", "idle"):
+                            final_status = st
                             self._report("soutenance_status", 11, f"{final_status} ({ai_op.duration_s}s)")
                             break
-                        elif data.get("status") == "failed":
+                        elif st == "failed":
                             final_status = "failed"
                             self._report("soutenance_status", 11, "failed")
                             break
+                        elif st == "running":
+                            pct = data.get("progress", 0)
+                            msg = data.get("message", "")
+                            if len(msg) > 60:
+                                msg = msg[:57] + "..."
+                            self._report("soutenance_status", 11, f"{pct}% — {msg}")
                     await asyncio.sleep(3)
                 ai_op.finish(final_status, poll_count)
             else:
@@ -720,8 +727,14 @@ class UserSession:
                 f"/api/projects/{self.project_id}",
             )
 
-    async def _poll_progress(self, step_name: str, status_url: str, max_wait: int = 600) -> tuple[str, int]:
-        """Generic progress polling. Returns (final_status, poll_count)."""
+    async def _poll_progress(
+        self, step_name: str, status_url: str, max_wait: int = 600, step_num: int = 0,
+    ) -> tuple[str, int]:
+        """Generic progress polling. Returns (final_status, poll_count).
+
+        When *step_num* is provided, live AI progress (phase, percentage,
+        token counts) is forwarded to the dashboard during polling.
+        """
         poll_count = 0
         start = time.monotonic()
         while (time.monotonic() - start) < max_wait:
@@ -734,6 +747,15 @@ class UserSession:
                     return status, poll_count
                 if status == "failed":
                     return "failed", poll_count
+                # Show live AI progress: phase, progress%, message (tokens, elapsed)
+                if status == "running" and step_num:
+                    phase = data.get("step", "")
+                    pct = data.get("progress", 0)
+                    msg = data.get("message", "")
+                    # Truncate message for dashboard readability
+                    if len(msg) > 60:
+                        msg = msg[:57] + "..."
+                    self._report(step_name, step_num, f"{phase} {pct}% — {msg}")
             await asyncio.sleep(3)
         return "timeout", poll_count
 
@@ -754,6 +776,13 @@ class UserSession:
                     return status, poll_count
                 if status == "failed":
                     return "failed", poll_count
+                # Show live AI progress for chapter generation
+                if status == "running":
+                    pct = data.get("progress", 0)
+                    msg = data.get("message", "")
+                    if len(msg) > 50:
+                        msg = msg[:47] + "..."
+                    self._report("chapter_gen_status", 8, f"{pct}% — {msg}")
             await asyncio.sleep(3)
         return "timeout", poll_count
 
