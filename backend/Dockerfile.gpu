@@ -4,6 +4,9 @@ FROM nvidia/cuda:12.6.3-runtime-ubuntu22.04
 
 WORKDIR /app
 
+# Prevent interactive prompts during apt-get install
+ENV DEBIAN_FRONTEND=noninteractive
+
 # Install Python 3.11 from deadsnakes PPA + system dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     software-properties-common \
