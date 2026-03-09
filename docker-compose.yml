@@ -183,16 +183,16 @@ services:
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=5
+      --concurrency=10
       --queues=documents
-      --max-memory-per-child=2000000
+      --max-memory-per-child=4000000
       --max-tasks-per-child=50
       --without-heartbeat
       --hostname=worker-documents@%h
     deploy:
       resources:
         limits:
-          memory: 6G
+          memory: 16G
         reservations:
           devices:
             - driver: nvidia
@@ -217,26 +217,26 @@ services:
       --hostname=worker-default@%h
 
   # Workers 3-5: AI/LLM tasks (I/O-bound, external API calls)
-  # Three workers with concurrency=6 each = 18 total concurrent AI slots.
+  # Three workers with concurrency=10 each = 30 total concurrent AI slots.
   # Tasks are network-bound (waiting on LLM responses), not CPU-bound.
   # Splitting across three workers distributes CPU and avoids single-process
-  # bottlenecks. With 18 slots, 10 users can run AI tasks without queuing.
+  # bottlenecks. With 30 slots, 10+ users can run AI tasks without queuing.
   celery-worker-ai-1:
     <<: *celery-worker
     container_name: rfp-assistant-celery-worker-ai-1
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=6
+      --concurrency=10
       --queues=ai
-      --max-memory-per-child=2000000
+      --max-memory-per-child=4000000
       --max-tasks-per-child=50
       --without-heartbeat
       --hostname=worker-ai-1@%h
     deploy:
       resources:
         limits:
-          memory: 6G
+          memory: 12G
 
   celery-worker-ai-2:
     <<: *celery-worker
@@ -244,16 +244,16 @@ services:
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=6
+      --concurrency=10
       --queues=ai
-      --max-memory-per-child=2000000
+      --max-memory-per-child=4000000
       --max-tasks-per-child=50
       --without-heartbeat
       --hostname=worker-ai-2@%h
     deploy:
       resources:
         limits:
-          memory: 6G
+          memory: 12G
 
   celery-worker-ai-3:
     <<: *celery-worker
@@ -261,16 +261,16 @@ services:
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=6
+      --concurrency=10
       --queues=ai
-      --max-memory-per-child=2000000
+      --max-memory-per-child=4000000
       --max-tasks-per-child=50
       --without-heartbeat
       --hostname=worker-ai-3@%h
     deploy:
       resources:
         limits:
-          memory: 6G
+          memory: 12G
 
   frontend:
     build:
