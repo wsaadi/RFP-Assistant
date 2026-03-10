@@ -200,7 +200,7 @@ services:
               capabilities: [gpu]
 
   # Worker 2: Lightweight tasks (exports, backups)
-  # Concurrency=4 so 10 concurrent users can export in parallel.
+  # Concurrency=10 so 10 concurrent users can export in parallel without queuing.
   # Note: embedding model preload is skipped for this worker (see celery_app.py)
   # since exports/backups never use embeddings. Saves ~3.2GB RAM.
   celery-worker-default:
@@ -209,7 +209,7 @@ services:
     command: >
       celery -A app.celery_app worker
       --loglevel=info
-      --concurrency=4
+      --concurrency=10
       --queues=default
       --max-memory-per-child=2000000
       --max-tasks-per-child=50

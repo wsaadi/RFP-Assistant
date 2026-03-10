@@ -1,5 +1,6 @@
 """Realistic user journey scenarios for load testing the RFP Assistant."""
 import asyncio
+import mimetypes
 import os
 import time
 import random
@@ -197,9 +198,9 @@ class UserSession:
     #   - doc processing: 40 docs on 5 document workers → up to ~240s
     #   - chapter content: 20 chapters on 18 AI workers → up to ~120s
     #   - structure/soutenance: 10 tasks on 18 AI workers → up to ~60s
-    POLL_TIMEOUT_DOC_PROCESSING = 600   # step 5: heaviest queue pressure
-    POLL_TIMEOUT_AI_TASK = 600          # steps 7, 9, 10, 12: AI queue
-    POLL_TIMEOUT_EXPORT = 300           # step 11: lightweight, rarely queued
+    POLL_TIMEOUT_DOC_PROCESSING = 900   # step 5: heaviest queue pressure (10 users × ~46 docs)
+    POLL_TIMEOUT_AI_TASK = 900          # steps 7, 9, 10, 12: AI queue
+    POLL_TIMEOUT_EXPORT = 600           # step 11: can queue behind other exports
 
     def __init__(
         self,
@@ -444,13 +445,14 @@ class UserSession:
                 continue
 
             filename = os.path.basename(filepath)
+            content_type = mimetypes.guess_type(filename)[0] or "application/octet-stream"
             with open(filepath, "rb") as f:
                 file_bytes = f.read()
 
             resp, _ = await self._request(
                 "upload_document", "POST",
                 f"/api/documents/upload/{self.project_id}",
-                files={"file": (filename, file_bytes)},
+                files={"file": (filename, file_bytes, content_type)},
                 data={"category": category},
             )
             if resp and resp.status_code == 200:
