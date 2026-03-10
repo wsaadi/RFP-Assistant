@@ -111,7 +111,7 @@ async def _process_document_async(document_id: str, project_id: str):
                     _rp = os.environ.get("REDIS_PASSWORD", "")
                     _redis_url = f"redis://:{_rp}@redis:6379/0" if _rp else "redis://redis:6379/0"
                 _lock_redis = _redis_lib.from_url(_redis_url, decode_responses=True)
-                lock_key = f"docproc:lock:{content_hash}"
+                lock_key = f"docproc:lock:{document.project_id}:{content_hash}"
                 _content_lock = _lock_redis.lock(
                     lock_key, timeout=1200, blocking_timeout=5,
                 )
