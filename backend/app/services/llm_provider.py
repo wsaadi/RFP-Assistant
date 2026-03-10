@@ -169,7 +169,7 @@ async def _call_with_retries(
     - Rate-limit responses (429) and server overload (503)
       Uses Retry-After header when available, otherwise exponential backoff.
     """
-    last_exc: Exception | None = None
+    last_exc: Optional[Exception] = None
 
     for attempt in range(1 + _MAX_RETRIES):
         try:
