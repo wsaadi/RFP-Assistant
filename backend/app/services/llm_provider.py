@@ -19,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 # Default timeout for API calls (seconds)
 _DEFAULT_TIMEOUT = 300
-_MAX_RETRIES = 2
+_MAX_RETRIES = 4
+_RATE_LIMIT_STATUSES = (429, 503)
 
 
 @dataclass
@@ -161,8 +162,14 @@ async def _call_with_retries(
     max_tokens: int,
     client: httpx.AsyncClient,
 ) -> LLMResponse:
-    """Call the appropriate API endpoint with retry logic."""
-    last_exc = None
+    """Call the appropriate API endpoint with retry logic.
+
+    Retries on:
+    - Transient network errors (connect, read, protocol)
+    - Rate-limit responses (429) and server overload (503)
+      Uses Retry-After header when available, otherwise exponential backoff.
+    """
+    last_exc: Exception | None = None
 
     for attempt in range(1 + _MAX_RETRIES):
         try:
@@ -174,7 +181,21 @@ async def _call_with_retries(
                 return await _call_ollama(
                     config, messages, temperature, max_tokens, client,
                 )
-        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError) as e:
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code not in _RATE_LIMIT_STATUSES:
+                raise  # 400, 401, etc. — don't retry
+            last_exc = e
+            if attempt < _MAX_RETRIES:
+                retry_after = e.response.headers.get("retry-after")
+                wait = int(retry_after) if retry_after and retry_after.isdigit() else 2 ** (attempt + 1)
+                wait = min(wait, 60)  # cap at 60s
+                logger.warning(
+                    "LLM rate-limited (%d) attempt %d/%d, retrying in %ds",
+                    e.response.status_code, attempt + 1, 1 + _MAX_RETRIES, wait,
+                )
+                await asyncio.sleep(wait)
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.ConnectError,
+                httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout) as e:
             last_exc = e
             if attempt < _MAX_RETRIES:
                 wait = 2 ** (attempt + 1)
