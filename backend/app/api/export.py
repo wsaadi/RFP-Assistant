@@ -1192,12 +1192,22 @@ async def export_soutenance(
     if not config or not config.mistral_api_key_encrypted:
         raise HTTPException(status_code=400, detail="Configuration IA non definie")
 
+    # Clear ALL previous soutenance data (Redis + filesystem) to allow clean regeneration
+    delete_progress(_NS_SOUTENANCE, pid)
+    delete_export_result("soutenance_pptx", pid)
+    delete_export_result("soutenance_script", pid)
+
+    # Clear old filesystem files
+    import os, shutil
+    sout_dir = os.path.join(settings.export_dir, "soutenance", pid)
+    if os.path.isdir(sout_dir):
+        shutil.rmtree(sout_dir, ignore_errors=True)
+
+    # Set initial progress AFTER clearing everything
     set_progress(_NS_SOUTENANCE, pid, {
         "status": "running", "step": "starting", "progress": 0,
         "message": "Demarrage de la preparation de soutenance...",
     })
-    delete_export_result("soutenance_pptx", pid)
-    delete_export_result("soutenance_script", pid)
 
     from ..tasks.export_tasks import export_soutenance_task
     export_soutenance_task.apply_async(
@@ -1409,7 +1419,7 @@ async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID,
             proj_ref = project.rfp_reference or ""
             proj_ai_context = project.ai_context or ""
 
-        _update("generating", 15, "Generation du contenu de soutenance par l'IA (cela peut prendre quelques minutes)...")
+        _update("generating", 15, "Generation du contenu de soutenance par l'IA...")
 
         # Build and send prompt
         system_prompt, user_prompt = build_soutenance_prompt(
@@ -1422,11 +1432,31 @@ async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID,
             slide_count=slide_count,
         )
 
+        # Progress callback for streaming: update between 15% and 55%
+        # based on tokens received vs expected max
+        expected_max_tokens = 16000
+
+        async def _on_stream_progress(token_count: int, char_count: int):
+            # Map token progress from 15% to 55%
+            ratio = min(token_count / expected_max_tokens, 1.0)
+            pct = 15 + int(ratio * 40)  # 15% → 55%
+            # Provide detailed messages at key milestones
+            if pct < 25:
+                msg = f"L'IA redige le contenu... ({token_count} tokens generes)"
+            elif pct < 35:
+                msg = f"Structuration des sections... ({token_count} tokens)"
+            elif pct < 45:
+                msg = f"Redaction des slides et notes... ({token_count} tokens)"
+            else:
+                msg = f"Finalisation du contenu... ({token_count} tokens)"
+            _update("generating", pct, msg)
+
         raw_response = await ai_service.generate_streaming(
             system_prompt, user_prompt,
             temperature=0.3,
-            max_tokens=16000,
+            max_tokens=expected_max_tokens,
             timeout=900,
+            on_progress=_on_stream_progress,
         )
 
         # Log AI usage for soutenance generation
@@ -1438,7 +1468,8 @@ async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID,
 
         soutenance_data = parse_soutenance_json(raw_response)
 
-        _update("building_pptx", 70, "Construction du PowerPoint...")
+        total_slides = sum(len(s.get("slides", [])) for s in soutenance_data.get("sections", []))
+        _update("building_pptx", 65, f"Construction du PowerPoint ({total_slides} slides)...")
 
         def _generate_pptx():
             return RFPPptxService.generate_presentation(
@@ -1451,7 +1482,8 @@ async def _run_soutenance_export(project_id: uuid.UUID, workspace_id: uuid.UUID,
 
         pptx_stream = await asyncio.to_thread(_generate_pptx)
 
-        _update("saving", 90, "Sauvegarde des fichiers...")
+        _update("building_pptx", 80, "PowerPoint genere, preparation des fichiers...")
+        _update("saving", 85, "Sauvegarde du PowerPoint et du script...")
 
         # Store PPTX
         pptx_bytes = pptx_stream.getvalue()
