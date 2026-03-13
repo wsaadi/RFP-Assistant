@@ -119,6 +119,24 @@ def _get_section_icon(title: str) -> str:
     return ICON_DIAMOND
 
 
+def _normalize_bullet(item) -> str:
+    """Ensure a bullet point is a plain string, regardless of AI output format."""
+    if isinstance(item, str):
+        return item
+    if isinstance(item, dict):
+        # AI sometimes returns {"text": "...", "icon": "..."} or {"value": "...", "label": "..."}
+        return (
+            item.get("text")
+            or item.get("value")
+            or item.get("label")
+            or item.get("title")
+            or item.get("content")
+            or item.get("description")
+            or str(item)
+        )
+    return str(item)
+
+
 class RFPPptxService:
     """Service for generating professional soutenance PowerPoint presentations."""
 
@@ -451,6 +469,7 @@ class RFPPptxService:
                               speaker_notes="", section_label="",
                               section_idx=0):
         """Content slide with sidebar accent and icon bullets."""
+        bullet_points = [_normalize_bullet(b) for b in bullet_points]
         slide = prs.slides.add_slide(prs.slide_layouts[6])
         cls._add_background(slide, COLOR_WHITE)
 
@@ -1086,6 +1105,8 @@ class RFPPptxService:
                                       speaker_notes="", section_label="",
                                       section_idx=0, layout=LAYOUT_BULLETS):
         """Route to the appropriate visual layout based on the layout field."""
+        # Normalize all bullet items to plain strings (AI may return dicts)
+        bullet_points = [_normalize_bullet(b) for b in bullet_points]
         if layout == LAYOUT_PROCESS:
             cls._create_process_flow_slide(prs, title, bullet_points, subtitle,
                                            speaker_notes, section_label, section_idx)
@@ -1165,6 +1186,7 @@ class RFPPptxService:
     @classmethod
     def _create_strengths_slide(cls, prs, strengths):
         """Strengths slides with numbered badges and star icons."""
+        strengths = [_normalize_bullet(s) for s in strengths]
         per_slide = 5
         for page in range(0, len(strengths), per_slide):
             chunk = strengths[page:page + per_slide]
