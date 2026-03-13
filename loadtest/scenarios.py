@@ -978,3 +978,29 @@ async def run_concurrent_users(
     await asyncio.gather(*tasks, return_exceptions=True)
 
     collector.stop()
+
+    # --- Clean up test users created during this run ---
+    created_user_ids = [u["id"] for u in users if "id" in u]
+    if created_user_ids:
+        print(f"\n  Cleaning up {len(created_user_ids)} test user(s)...")
+        try:
+            timeout_cleanup = httpx.Timeout(connect=10, read=30, write=10, pool=10)
+            async with httpx.AsyncClient(timeout=timeout_cleanup) as cleanup_client:
+                login_resp = await cleanup_client.post(
+                    f"{base_url}/api/auth/login",
+                    json={"email": admin_email, "password": admin_password},
+                )
+                if login_resp.status_code == 200:
+                    cleanup_client.headers["Authorization"] = f"Bearer {login_resp.json()['access_token']}"
+                    deleted = 0
+                    for uid in created_user_ids:
+                        del_resp = await cleanup_client.delete(f"{base_url}/api/admin/users/{uid}")
+                        if del_resp.status_code in (200, 204):
+                            deleted += 1
+                        else:
+                            print(f"    Failed to delete user {uid}: HTTP {del_resp.status_code}")
+                    print(f"  Deleted {deleted}/{len(created_user_ids)} test user(s)")
+                else:
+                    print(f"  Could not login as admin for user cleanup (HTTP {login_resp.status_code})")
+        except Exception as e:
+            print(f"  User cleanup error: {e}")
