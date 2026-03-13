@@ -4584,6 +4584,142 @@ async def delete_ai_pricing(
     return {"status": "ok"}
 
 
+# ── Public pricing catalog ─────────────────────────────────────────
+
+# Comprehensive catalog of public AI model pricing (EUR per 1K tokens)
+# Sources: official provider pricing pages, converted to EUR where needed (~0.92 EUR/USD)
+PUBLIC_PRICING_CATALOG = [
+    # ── Mistral AI (Cloud) ──
+    {"provider": "mistral", "model_name": "mistral-large-latest", "price_per_1k_input": 0.0018, "price_per_1k_output": 0.0055},
+    {"provider": "mistral", "model_name": "mistral-medium-latest", "price_per_1k_input": 0.0025, "price_per_1k_output": 0.0075},
+    {"provider": "mistral", "model_name": "mistral-small-latest", "price_per_1k_input": 0.0002, "price_per_1k_output": 0.0006},
+    {"provider": "mistral", "model_name": "open-mistral-nemo", "price_per_1k_input": 0.00015, "price_per_1k_output": 0.00015},
+    {"provider": "mistral", "model_name": "codestral-latest", "price_per_1k_input": 0.0003, "price_per_1k_output": 0.0009},
+    {"provider": "mistral", "model_name": "pixtral-large-latest", "price_per_1k_input": 0.0018, "price_per_1k_output": 0.0055},
+    {"provider": "mistral", "model_name": "pixtral-12b-2409", "price_per_1k_input": 0.00015, "price_per_1k_output": 0.00015},
+    # ── Ollama (Local) – coût 0 par défaut ──
+    {"provider": "ollama", "model_name": "mistral:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "mistral-nemo:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "mixtral:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "llama3.1:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "llama3.1:70b", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "qwen2.5:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "qwen2.5:14b", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "qwen2.5:32b", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "gemma3:12b", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "deepseek-r1:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "command-r:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "llama3.2-vision:11b", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "llama3.2-vision:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "llava:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "llava:13b", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    {"provider": "ollama", "model_name": "bakllava:latest", "price_per_1k_input": 0.0, "price_per_1k_output": 0.0},
+    # ── Scaleway (EU API) ──
+    {"provider": "scaleway", "model_name": "mistral-large-3-675b-instruct-2512", "price_per_1k_input": 0.002, "price_per_1k_output": 0.006},
+    {"provider": "scaleway", "model_name": "mistral-small-3.2-24b-instruct-2506", "price_per_1k_input": 0.0002, "price_per_1k_output": 0.0006},
+    {"provider": "scaleway", "model_name": "mistral-small-3.1-24b-instruct-2503", "price_per_1k_input": 0.0002, "price_per_1k_output": 0.0006},
+    {"provider": "scaleway", "model_name": "llama-3.3-70b-instruct", "price_per_1k_input": 0.00035, "price_per_1k_output": 0.0008},
+    {"provider": "scaleway", "model_name": "qwen2.5-coder-32b-instruct", "price_per_1k_input": 0.0003, "price_per_1k_output": 0.0006},
+    {"provider": "scaleway", "model_name": "pixtral-12b-2409", "price_per_1k_input": 0.00015, "price_per_1k_output": 0.00015},
+    # ── OpenAI ──
+    {"provider": "openai", "model_name": "gpt-4o", "price_per_1k_input": 0.0023, "price_per_1k_output": 0.0092},
+    {"provider": "openai", "model_name": "gpt-4o-mini", "price_per_1k_input": 0.000138, "price_per_1k_output": 0.00055},
+    {"provider": "openai", "model_name": "gpt-4-turbo", "price_per_1k_input": 0.0092, "price_per_1k_output": 0.0276},
+    {"provider": "openai", "model_name": "gpt-4", "price_per_1k_input": 0.0276, "price_per_1k_output": 0.055},
+    {"provider": "openai", "model_name": "gpt-3.5-turbo", "price_per_1k_input": 0.00046, "price_per_1k_output": 0.00138},
+    {"provider": "openai", "model_name": "o1", "price_per_1k_input": 0.0138, "price_per_1k_output": 0.055},
+    {"provider": "openai", "model_name": "o1-mini", "price_per_1k_input": 0.00276, "price_per_1k_output": 0.011},
+    {"provider": "openai", "model_name": "o3-mini", "price_per_1k_input": 0.001, "price_per_1k_output": 0.004},
+    # ── Anthropic ──
+    {"provider": "anthropic", "model_name": "claude-opus-4", "price_per_1k_input": 0.0138, "price_per_1k_output": 0.069},
+    {"provider": "anthropic", "model_name": "claude-sonnet-4", "price_per_1k_input": 0.00276, "price_per_1k_output": 0.0138},
+    {"provider": "anthropic", "model_name": "claude-3.5-sonnet", "price_per_1k_input": 0.00276, "price_per_1k_output": 0.0138},
+    {"provider": "anthropic", "model_name": "claude-3.5-haiku", "price_per_1k_input": 0.00074, "price_per_1k_output": 0.0037},
+    {"provider": "anthropic", "model_name": "claude-3-opus", "price_per_1k_input": 0.0138, "price_per_1k_output": 0.069},
+    {"provider": "anthropic", "model_name": "claude-3-haiku", "price_per_1k_input": 0.000230, "price_per_1k_output": 0.00115},
+    # ── Google ──
+    {"provider": "google", "model_name": "gemini-2.0-flash", "price_per_1k_input": 0.000069, "price_per_1k_output": 0.000368},
+    {"provider": "google", "model_name": "gemini-2.0-flash-lite", "price_per_1k_input": 0.000069, "price_per_1k_output": 0.000276},
+    {"provider": "google", "model_name": "gemini-1.5-pro", "price_per_1k_input": 0.00115, "price_per_1k_output": 0.0046},
+    {"provider": "google", "model_name": "gemini-1.5-flash", "price_per_1k_input": 0.000069, "price_per_1k_output": 0.000276},
+    # ── DeepSeek ──
+    {"provider": "deepseek", "model_name": "deepseek-chat", "price_per_1k_input": 0.000253, "price_per_1k_output": 0.001104},
+    {"provider": "deepseek", "model_name": "deepseek-reasoner", "price_per_1k_input": 0.000506, "price_per_1k_output": 0.002116},
+    # ── Cohere ──
+    {"provider": "cohere", "model_name": "command-r-plus", "price_per_1k_input": 0.00276, "price_per_1k_output": 0.0138},
+    {"provider": "cohere", "model_name": "command-r", "price_per_1k_input": 0.000138, "price_per_1k_output": 0.000552},
+]
+
+
+@router.get("/{project_id}/ai-pricing/catalog")
+async def get_public_pricing_catalog(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Return the public pricing catalog for all known AI models (admin only)."""
+    from ..models.user import UserRole
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
+
+    return {"catalog": PUBLIC_PRICING_CATALOG}
+
+
+@router.post("/{project_id}/ai-pricing/load-public")
+async def load_public_pricing(
+    project_id: uuid.UUID,
+    request: dict,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Load public pricing for selected models. Only adds models that don't already exist.
+    Body: { "models": [ { "provider": "...", "model_name": "..." }, ... ] }
+    If "models" is empty or absent, loads ALL catalog entries.
+    """
+    from ..models.user import UserRole
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
+
+    from ..models.project import AIModelPricing
+
+    requested = request.get("models", [])
+
+    # Build lookup of what's in the catalog
+    catalog_map = {(e["provider"], e["model_name"]): e for e in PUBLIC_PRICING_CATALOG}
+
+    # Determine which entries to load
+    if requested:
+        entries_to_load = []
+        for m in requested:
+            key = (m["provider"], m["model_name"])
+            if key in catalog_map:
+                entries_to_load.append(catalog_map[key])
+    else:
+        entries_to_load = list(PUBLIC_PRICING_CATALOG)
+
+    # Load existing pricing to avoid duplicates
+    existing_result = await db.execute(select(AIModelPricing))
+    existing_rows = existing_result.scalars().all()
+    existing_keys = {(r.provider, r.model_name) for r in existing_rows}
+
+    added = 0
+    for entry in entries_to_load:
+        key = (entry["provider"], entry["model_name"])
+        if key not in existing_keys:
+            new_pricing = AIModelPricing(
+                provider=entry["provider"],
+                model_name=entry["model_name"],
+                price_per_1k_input=entry["price_per_1k_input"],
+                price_per_1k_output=entry["price_per_1k_output"],
+                currency="EUR",
+            )
+            db.add(new_pricing)
+            existing_keys.add(key)
+            added += 1
+
+    await db.commit()
+    return {"status": "ok", "added": added, "total_catalog": len(entries_to_load)}
+
+
 # ── Project Members ─────────────────────────────────────────────────
 
 @router.get("/{project_id}/members")
