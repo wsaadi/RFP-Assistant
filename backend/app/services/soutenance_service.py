@@ -30,6 +30,7 @@ Tu dois retourner un JSON valide avec cette structure EXACTE:
         {
           "title": "Titre du slide",
           "subtitle": "Sous-titre optionnel",
+          "layout": "bullets",
           "bullets": ["Point 1", "Point 2", "Point 3"],
           "speaker_notes": "Notes detaillees pour le presentateur: ce qu'il doit dire, les points cles a aborder, les transitions..."
         }
@@ -96,7 +97,30 @@ REGLES IMPORTANTES:
 14. NE PAS inventer de chiffres, statistiques ou references qui ne sont pas dans le contenu
 15. Utiliser [A COMPLETER] pour les informations manquantes
 16. Decoupe bien les sections: Contexte/Comprehension, Solution proposee, Methodologie/Approche, Equipe/Moyens, Planning/Livrables, Retour d'experience/References, Engagement qualite, Valeur ajoutee
-17. Chaque section des anticipated_questions doit avoir au moins 2-3 questions"""
+17. Chaque section des anticipated_questions doit avoir au moins 2-3 questions
+
+LAYOUTS VISUELS - TRES IMPORTANT:
+Chaque slide DOIT avoir un champ "layout" qui determine sa mise en forme visuelle. Tu dois VARIER les layouts pour rendre la presentation visuellement riche et dynamique. N'utilise PAS "bullets" pour tous les slides!
+
+Layouts disponibles:
+- "bullets" : Liste a puces classique (utilise pour max 30% des slides)
+- "process_flow" : Schema en etapes horizontales avec fleches. Ideal pour les methodologies, processus, demarches pas-a-pas. Les bullets representent les etapes du processus (3 a 6 etapes). Utilise-le pour: approche projet, methodologie, processus de deploiement, cycle de vie, demarche qualite
+- "timeline" : Frise chronologique horizontale avec jalons alternes haut/bas. Ideal pour les plannings, phases projet, roadmaps. Les bullets representent les jalons (4 a 8 jalons). Utilise-le pour: planning projet, phases de deploiement, calendrier de transition, jalons cles
+- "icon_grid" : Grille de cartes avec icones. Ideal pour presenter des fonctionnalites, des valeurs, des engagements, des competences. Les bullets sont les elements de la grille (3 a 9 items). Utilise-le pour: fonctionnalites cles, valeurs ajoutees, engagements, competences equipe, outils/technologies
+- "comparison" : Deux colonnes en vis-a-vis. Ideal pour les avantages/benefices, avant/apres, points cles vs avantages. Les bullets sont repartis entre les deux colonnes. Utilise-le pour: avantages de la solution, benefices client, comparaison approches
+- "quote" : Slide de citation/message cle avec fond sombre et grande typographie. Le premier bullet est le message principal affiche en grand. Ideal pour les messages forts, valeurs propositions, engagements cles. Utilise-le pour: ouverture de section, message cle, engagement fort, valeur differenciante
+- "pyramid" : Pyramide/entonnoir en couches de largeur croissante. Ideal pour les hierarchies, niveaux de service, couches d'architecture. Les bullets sont les couches de haut en bas (3 a 6 couches). Utilise-le pour: architecture technique, niveaux de service, gouvernance, couches de securite
+- "dashboard" : Tableau de bord avec cartes metriques et indicateurs. Ideal pour les KPIs, indicateurs de performance, syntheses chiffrees. Utilise-le pour: indicateurs de performance, SLA, metriques, tableau de synthese
+
+REGLE DE VARIETE VISUELLE:
+- Au moins 50% des slides doivent utiliser un layout AUTRE que "bullets"
+- Chaque section devrait utiliser au moins 2 layouts differents
+- Le premier slide d'une section peut etre un "quote" pour introduire le message cle
+- Les slides de methodologie/processus doivent utiliser "process_flow" ou "timeline"
+- Les slides de fonctionnalites/competences doivent utiliser "icon_grid"
+- Les slides de planning doivent utiliser "timeline"
+- Les slides de synthese/engagements peuvent utiliser "pyramid" ou "dashboard"
+- Alterne les layouts pour maintenir l'attention du public"""
 
 
 def build_soutenance_prompt(
