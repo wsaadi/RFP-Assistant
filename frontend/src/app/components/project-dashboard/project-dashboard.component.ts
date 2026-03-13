@@ -113,12 +113,13 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
             <mat-icon>close</mat-icon>
           </button>
         </div>
-        <mat-progress-bar mode="determinate" [value]="soutenanceProgress.progress"></mat-progress-bar>
+        <mat-progress-bar mode="determinate" [value]="soutenanceProgress.progress" [class.animated-bar]="soutenanceProgress.step === 'generating'"></mat-progress-bar>
         <div class="gen-progress-details">
-          <span class="gen-step">{{ soutenanceProgress.step }}</span>
+          <span class="gen-step">{{ getSoutenanceStepLabel(soutenanceProgress.step) }}</span>
           <span class="gen-pct">{{ soutenanceProgress.progress }}%</span>
         </div>
         <p class="gen-message">{{ soutenanceProgress.message }}</p>
+        <p *ngIf="soutenanceProgress.step === 'generating'" class="gen-hint">La generation IA peut prendre 2 a 5 minutes. Vous pouvez naviguer ailleurs, la tache continue en arriere-plan.</p>
       </mat-card>
 
       <!-- Soutenance options dialog -->
@@ -1468,6 +1469,8 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .soutenance-progress-card { border-left-color: #e65100; }
     .soutenance-progress-card .gen-progress-header h3 { color: #e65100; }
     .soutenance-progress-card .spin-icon { color: #e65100; }
+    .soutenance-progress-card .gen-hint { font-size: 12px; color: #888; margin: 8px 0 0 0; font-style: italic; }
+    .soutenance-progress-card .animated-bar ::ng-deep .mdc-linear-progress__bar-inner { transition: flex-basis 2s ease-in-out !important; }
     .soutenance-options-card { border-left-color: #1565c0; padding: 16px 20px; }
     .soutenance-options-header { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
     .soutenance-options-header mat-icon { color: #1565c0; }
@@ -3176,14 +3179,20 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.showSoutenanceOptions = false;
     this.exportingSoutenance = true;
     this.soutenanceProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement de la preparation de soutenance...' };
-    this.api.exportSoutenance(this.projectId, this.selectedSlideCount).subscribe({
-      next: () => {
-        this.startSoutenancePolling();
-      },
-      error: (err) => {
-        this.snackBar.open(err.error?.detail || 'Erreur generation soutenance', 'OK', { duration: 5000 });
-        this.exportingSoutenance = false;
-        this.soutenanceProgress = null;
+    // Clear old progress first, then launch generation
+    this.api.clearSoutenanceProgress(this.projectId).subscribe({
+      complete: () => {
+        this.api.exportSoutenance(this.projectId, this.selectedSlideCount).subscribe({
+          next: () => {
+            this.soutenanceGenerationStartedAt = Date.now();
+            this.startSoutenancePolling();
+          },
+          error: (err) => {
+            this.snackBar.open(err.error?.detail || 'Erreur generation soutenance', 'OK', { duration: 5000 });
+            this.exportingSoutenance = false;
+            this.soutenanceProgress = null;
+          },
+        });
       },
     });
   }
@@ -3196,13 +3205,20 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.snackBar.open('Generation soutenance annulee', 'OK', { duration: 3000 });
   }
 
+  private soutenanceGenerationStartedAt = 0;
+
   private startSoutenancePolling(): void {
     this.stopSoutenancePolling();
-    this.soutenancePollSub = timer(500, 2000).pipe(
+    this.soutenancePollSub = timer(1000, 2000).pipe(
       switchMap(() => this.api.getSoutenanceStatus(this.projectId))
     ).subscribe({
       next: (status) => {
         if (status.status === 'completed') {
+          // Guard: ignore stale "completed" if we just started generation < 10s ago
+          const elapsed = Date.now() - this.soutenanceGenerationStartedAt;
+          if (elapsed < 10000) {
+            return; // Too fast to be real - wait for next poll
+          }
           this.stopSoutenancePolling();
           this.exportingSoutenance = false;
           this.soutenanceProgress = null;
@@ -3217,8 +3233,22 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         } else if (status.status === 'running') {
           this.soutenanceProgress = status;
         }
+        // status === 'idle' means old data cleared, task starting → keep polling
       },
     });
+  }
+
+  getSoutenanceStepLabel(step: string): string {
+    const labels: Record<string, string> = {
+      starting: 'Demarrage',
+      loading: 'Chargement des donnees',
+      generating: 'Generation IA',
+      parsing: 'Analyse du contenu',
+      building_pptx: 'Construction PowerPoint',
+      saving: 'Sauvegarde',
+      done: 'Termine',
+    };
+    return labels[step] || step;
   }
 
   private stopSoutenancePolling(): void {
