@@ -177,9 +177,6 @@ services:
   celery-worker-documents:
     <<: *celery-worker
     container_name: rfp-assistant-celery-worker-documents
-    build:
-      context: ./backend
-      dockerfile: Dockerfile.gpu
     command: >
       celery -A app.celery_app worker
       --loglevel=info
@@ -193,11 +190,6 @@ services:
       resources:
         limits:
           memory: 16G
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
 
   # Worker 2: Lightweight tasks (exports, backups)
   # Concurrency=4 so 10 concurrent users can export in parallel.

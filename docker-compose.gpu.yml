@@ -1,0 +1,22 @@
+# GPU override for NVIDIA DGX Spark / machines with NVIDIA GPU.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up --build
+#
+# This overrides the documents worker to use the CUDA-enabled Dockerfile
+# and reserves an NVIDIA GPU for accelerated embedding computation.
+
+services:
+  celery-worker-documents:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.gpu
+    deploy:
+      resources:
+        limits:
+          memory: 16G
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
