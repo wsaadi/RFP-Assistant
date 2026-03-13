@@ -1576,11 +1576,13 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .add-member-form { display: flex; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
     .member-select-field { flex: 1; min-width: 250px; }
     .role-select-field { width: 160px; }
-    .members-list .member-item { border-bottom: 1px solid #f0f0f0; height: auto !important; min-height: 56px; padding: 8px 0; }
+    .members-list .member-item { border-bottom: 1px solid #f0f0f0; height: auto !important; min-height: 56px; padding: 8px 0; overflow: visible !important; }
     .members-list .member-item ::ng-deep .mdc-list-item__content { overflow: visible; }
-    .member-actions { display: flex; align-items: center; gap: 4px; margin-left: auto; }
-    .role-inline-field { width: 140px; font-size: 13px; }
+    .members-list ::ng-deep .mdc-list-item__primary-text { overflow: visible !important; }
+    .member-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-shrink: 0; }
+    .role-inline-field { width: 160px; font-size: 13px; }
     .role-inline-field ::ng-deep .mat-mdc-form-field-subscript-wrapper { display: none; }
+    .role-inline-field ::ng-deep .mat-mdc-text-field-wrapper { overflow: visible; }
     .role-badge { background: #e8eaf6; color: #3f51b5; padding: 2px 10px; border-radius: 12px; font-size: 12px; font-weight: 500; }
     .inherited-chip { font-size: 10px !important; height: 20px !important; min-height: 20px !important; }
     .member-source-info { display: flex; align-items: center; gap: 8px; padding: 12px 16px; background: #e3f2fd; border-radius: 8px; margin-bottom: 16px; font-size: 13px; color: #1565c0; }
@@ -1589,8 +1591,10 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .members-section-title mat-icon { font-size: 20px; width: 20px; height: 20px; }
     .section-subtitle { font-size: 12px; color: #888; font-weight: 400; }
     .ws-member-item { opacity: 0.85; }
-    .quick-add-btn { font-size: 12px !important; line-height: 32px !important; height: 32px !important; }
+    .quick-add-btn { font-size: 12px !important; line-height: 32px !important; height: 32px !important; white-space: nowrap; }
     .quick-add-btn mat-icon { font-size: 16px; width: 16px; height: 16px; margin-right: 4px; }
+    .members-list { overflow: visible !important; }
+    .members-list ::ng-deep .mat-mdc-list-item { overflow: visible !important; }
 
     /* Content Reuse Stats */
     .reuse-stats-card { padding: 24px; }
