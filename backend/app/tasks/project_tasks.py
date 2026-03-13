@@ -60,6 +60,18 @@ def generate_recommendation_task(
     ))
 
 
+@celery.task(name="tasks.fill_excel", bind=True, max_retries=1)
+def fill_excel_task(self, project_id: str, doc_id: str, workspace_id: str):
+    from ..api.projects import _run_fill_excel
+    asyncio.run(_run_fill_excel(uuid.UUID(project_id), uuid.UUID(doc_id), uuid.UUID(workspace_id)))
+
+
+@celery.task(name="tasks.fill_pdf", bind=True, max_retries=1)
+def fill_pdf_task(self, project_id: str, doc_id: str, workspace_id: str):
+    from ..api.projects import _run_fill_pdf
+    asyncio.run(_run_fill_pdf(uuid.UUID(project_id), uuid.UUID(doc_id), uuid.UUID(workspace_id)))
+
+
 @celery.task(name="tasks.reanonymize", bind=True, max_retries=1)
 def reanonymize_task(self, project_id: str):
     from ..api.projects import _run_reanonymize

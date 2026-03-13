@@ -322,16 +322,32 @@ export class ApiService {
     );
   }
 
-  fillExcelDocument(projectId: string, docId: string): Observable<Blob> {
-    return this.http.post(
-      `${this.baseUrl}/projects/${projectId}/fill-excel/${docId}`, {},
+  fillExcelDocument(projectId: string, docId: string): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/fill-excel/${docId}`, {});
+  }
+
+  getFillExcelStatus(projectId: string, docId: string): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/fill-excel-status/${docId}`);
+  }
+
+  downloadFilledExcel(projectId: string, docId: string): Observable<Blob> {
+    return this.http.get(
+      `${this.baseUrl}/projects/${projectId}/fill-excel-download/${docId}`,
       { responseType: 'blob' }
     );
   }
 
-  fillPdfDocument(projectId: string, docId: string): Observable<Blob> {
-    return this.http.post(
-      `${this.baseUrl}/projects/${projectId}/fill-pdf/${docId}`, {},
+  fillPdfDocument(projectId: string, docId: string): Observable<any> {
+    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/fill-pdf/${docId}`, {});
+  }
+
+  getFillPdfStatus(projectId: string, docId: string): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/fill-pdf-status/${docId}`);
+  }
+
+  downloadFilledPdf(projectId: string, docId: string): Observable<Blob> {
+    return this.http.get(
+      `${this.baseUrl}/projects/${projectId}/fill-pdf-download/${docId}`,
       { responseType: 'blob' }
     );
   }

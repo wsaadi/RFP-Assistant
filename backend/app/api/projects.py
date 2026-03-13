@@ -47,6 +47,8 @@ _NS_COMPLIANCE = "compliance"
 _NS_REC = "rec_gen"
 _NS_DETECT = "detect_deliverables"
 _NS_FILL = "fill_deliverables"
+_NS_FILL_EXCEL = "fill_excel"
+_NS_FILL_PDF = "fill_pdf"
 _NS_REANON = "reanon"
 
 
@@ -4973,10 +4975,7 @@ async def fill_excel_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate a filled Excel file for a completion-type document (BPU, DQE, conformité, etc.)
-    by using data from the old response and the original Excel template from the DCE."""
-
-    # 1. Get the response document
+    """Launch async Excel fill as a background task (returns immediately)."""
     result = await db.execute(
         select(ResponseDocument)
         .where(ResponseDocument.id == doc_id, ResponseDocument.project_id == project_id)
@@ -4985,124 +4984,211 @@ async def fill_excel_document(
     if not resp_doc:
         raise HTTPException(status_code=404, detail="Document livrable non trouvé")
 
-    # 2. Find the source Excel file in uploaded DCE documents
-    doc_title_lower = (resp_doc.title or "").lower()
-    rfp_source_lower = (resp_doc.rfp_source or "").lower()
-
-    docs_result = await db.execute(
-        select(Document)
-        .where(Document.project_id == project_id)
-        .where(Document.category == DocumentCategory.NEW_RFP)
-    )
-    all_dce_docs = docs_result.scalars().all()
-
-    excel_candidates = [
-        doc for doc in all_dce_docs
-        if doc.file_type.value in ("xlsx", "xls")
-    ]
-
-    excel_doc = _match_source_document(resp_doc, excel_candidates)
-
-    # Last fallback: pick the first Excel file
-    if not excel_doc and excel_candidates:
-        excel_doc = excel_candidates[0]
-        logger.warning(
-            "fill-excel: no good match for '%s', falling back to first Excel: %s",
-            resp_doc.title, excel_doc.original_filename,
-        )
-
-    if not excel_doc or not os.path.isfile(excel_doc.file_path):
-        raise HTTPException(
-            status_code=404,
-            detail="Aucun fichier Excel source trouvé dans le DCE. "
-                   "Assurez-vous d'avoir uploadé le BPU Excel dans les documents du nouvel AO.",
-        )
-
-    # 3. Read Excel structure
-    excel_structure = _read_excel_structure(excel_doc.file_path)
-
-    # 4. Get project for workspace_id
     proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = proj_result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    # 5. Load context: new RFP + old response (with pricing)
-    anon_new_rfp, anon_old_response = await asyncio.gather(
-        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
-        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+    task_key = str(doc_id)
+    existing = get_or_idle(_NS_FILL_EXCEL, task_key)
+    if existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Remplissage deja en cours pour ce document")
+
+    set_progress(_NS_FILL_EXCEL, task_key, {
+        "status": "running", "step": "queued", "progress": 0,
+        "message": f"En file d'attente: {resp_doc.title}",
+        "doc_title": resp_doc.title,
+    })
+
+    from ..tasks.project_tasks import fill_excel_task
+    fill_excel_task.apply_async(
+        args=(str(project_id), str(doc_id), str(project.workspace_id)),
+        priority=1,
     )
+    return {"success": True, "message": "Remplissage Excel lance en arriere-plan"}
 
-    # Targeted vector search - adapt query based on document type
-    doc_title_for_search = resp_doc.title or ""
-    title_lower_for_search = doc_title_for_search.lower()
-    conformity_keywords = ["rgpd", "conformit", "gdpr", "protection des données",
-                           "questionnaire", "grille", "annexe", "déclaration",
-                           "engagement", "certification", "audit", "sécurité",
-                           "environnement", "rse", "social", "qualité"]
-    is_conformity_doc = any(kw in title_lower_for_search for kw in conformity_keywords)
 
-    if is_conformity_doc:
-        search_query = (
-            f"{doc_title_for_search} conformité RGPD protection données personnelles "
-            "politique sécurité mesures techniques organisationnelles DPO registre "
-            "sous-traitant transfert consentement droits personnes concernées"
-        )
-    else:
-        search_query = (
-            f"prix unitaire tarif {doc_title_for_search} BPU bordereau montant "
-            "coût forfait taux journalier"
-        )
+@router.get("/{project_id}/fill-excel-status/{doc_id}")
+async def get_fill_excel_status(
+    project_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll progress of Excel fill task."""
+    return get_or_idle(_NS_FILL_EXCEL, str(doc_id))
 
-    relevant_chunks = VectorService.search(
-        str(project_id),
-        search_query,
-        top_k=20,
-        category_filter="old_response",
-    )
-    relevant_context = "\n\n".join([
-        f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
-        for c in relevant_chunks
-    ])
 
-    old_response_with_context = anon_old_response
-    if relevant_context:
-        label = "EXTRAITS PERTINENTS" if is_conformity_doc else "EXTRAITS PERTINENTS SUR LES PRIX"
-        old_response_with_context = (
-            f"=== {label} ===\n{relevant_context}\n\n"
-            f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
-        )
+@router.get("/{project_id}/fill-excel-download/{doc_id}")
+async def download_filled_excel(
+    project_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Download the filled Excel file once the task is complete."""
+    status = get_or_idle(_NS_FILL_EXCEL, str(doc_id))
+    if status.get("status") != "completed":
+        raise HTTPException(status_code=404, detail="Fichier pas encore pret")
 
-    # 6. Call AI to generate structured fill data
-    logger.info(
-        "fill-excel %s: excel_structure=%d chars, old_response=%d chars, relevant_chunks=%d, new_rfp=%d chars",
-        resp_doc.title, len(excel_structure), len(old_response_with_context),
-        len(relevant_chunks), len(anon_new_rfp),
-    )
-    ai_service = await _get_ai_service(project.workspace_id, db)
-    fill_data = await ai_service.generate_excel_fill_data(
-        document_title=resp_doc.title,
-        excel_structure=excel_structure,
-        new_rfp_content=anon_new_rfp,
-        old_response_content=old_response_with_context,
-    )
-    logger.info("fill-excel %s: AI returned %d cell entries", resp_doc.title, len(fill_data))
+    file_path = status.get("file_path", "")
+    filename = status.get("filename", "document_rempli.xlsx")
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Fichier genere introuvable")
 
-    # Log AI usage for Excel fill
-    await log_ai_usage_from_service(db, project_id, "fill_excel", ai_service)
-
-    # 7. Fill the Excel and return as download
-    filled_bytes = _fill_excel_with_data(excel_doc.file_path, fill_data)
-
-    # Generate output filename
-    base_name = os.path.splitext(excel_doc.original_filename)[0]
-    output_filename = f"{base_name}_rempli.xlsx"
-
-    return StreamingResponse(
-        io.BytesIO(filled_bytes),
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        file_path,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": f'attachment; filename="{output_filename}"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: uuid.UUID):
+    """Background task: generate a filled Excel file for a completion-type document."""
+    from ..database import task_session
+    task_key = str(doc_id)
+
+    def _update(step: str, progress: int, message: str):
+        set_progress(_NS_FILL_EXCEL, task_key, {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+        })
+
+    try:
+        # ── Phase 1: Load data (short DB session) ──
+        async with task_session() as db:
+            result = await db.execute(
+                select(ResponseDocument)
+                .where(ResponseDocument.id == doc_id, ResponseDocument.project_id == project_id)
+            )
+            resp_doc = result.scalar_one_or_none()
+            if not resp_doc:
+                set_progress(_NS_FILL_EXCEL, task_key, {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "Document livrable non trouve",
+                })
+                return
+
+            doc_title = resp_doc.title or ""
+            _update("loading", 5, f"Chargement: {doc_title}")
+
+            docs_result = await db.execute(
+                select(Document)
+                .where(Document.project_id == project_id)
+                .where(Document.category == DocumentCategory.NEW_RFP)
+            )
+            all_dce_docs = docs_result.scalars().all()
+
+            excel_candidates = [
+                doc for doc in all_dce_docs
+                if doc.file_type.value in ("xlsx", "xls")
+            ]
+            excel_doc = _match_source_document(resp_doc, excel_candidates)
+            if not excel_doc and excel_candidates:
+                excel_doc = excel_candidates[0]
+
+            if not excel_doc or not os.path.isfile(excel_doc.file_path):
+                set_progress(_NS_FILL_EXCEL, task_key, {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "Aucun fichier Excel source trouve dans le DCE.",
+                })
+                return
+
+            excel_file_path = excel_doc.file_path
+            excel_original_filename = excel_doc.original_filename
+
+        _update("reading", 10, "Lecture de la structure Excel...")
+        excel_structure = _read_excel_structure(excel_file_path)
+
+        # ── Phase 2: Load context (short DB session) ──
+        _update("loading_context", 15, "Chargement du contexte AO + ancienne reponse...")
+        async with task_session() as db:
+            ai_service = await _get_ai_service(workspace_id, db)
+
+            anon_new_rfp, anon_old_response = await asyncio.gather(
+                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+            )
+
+        # Vector search (no DB needed)
+        _update("searching", 25, "Recherche de contenu pertinent...")
+        title_lower = doc_title.lower()
+        conformity_keywords = ["rgpd", "conformit", "gdpr", "protection des données",
+                               "questionnaire", "grille", "annexe", "déclaration",
+                               "engagement", "certification", "audit", "sécurité",
+                               "environnement", "rse", "social", "qualité"]
+        is_conformity_doc = any(kw in title_lower for kw in conformity_keywords)
+
+        if is_conformity_doc:
+            search_query = (
+                f"{doc_title} conformité RGPD protection données personnelles "
+                "politique sécurité mesures techniques organisationnelles DPO registre "
+                "sous-traitant transfert consentement droits personnes concernées"
+            )
+        else:
+            search_query = (
+                f"prix unitaire tarif {doc_title} BPU bordereau montant "
+                "coût forfait taux journalier"
+            )
+
+        from ..tasks.chapter_tasks import _vector_search
+        relevant_chunks = _vector_search(str(project_id), search_query, top_k=20, category_filter="old_response")
+        relevant_context = "\n\n".join([
+            f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
+            for c in relevant_chunks
+        ])
+
+        old_response_with_context = anon_old_response
+        if relevant_context:
+            label = "EXTRAITS PERTINENTS" if is_conformity_doc else "EXTRAITS PERTINENTS SUR LES PRIX"
+            old_response_with_context = (
+                f"=== {label} ===\n{relevant_context}\n\n"
+                f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
+            )
+
+        # ── Phase 3: AI generation (NO DB held) ──
+        _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")
+        logger.info(
+            "fill-excel %s: excel_structure=%d chars, old_response=%d chars, new_rfp=%d chars",
+            doc_title, len(excel_structure), len(old_response_with_context), len(anon_new_rfp),
+        )
+        fill_data = await ai_service.generate_excel_fill_data(
+            document_title=doc_title,
+            excel_structure=excel_structure,
+            new_rfp_content=anon_new_rfp,
+            old_response_content=old_response_with_context,
+        )
+        logger.info("fill-excel %s: AI returned %d cell entries", doc_title, len(fill_data))
+
+        # Log AI usage
+        async with task_session() as usage_db:
+            await log_ai_usage_from_service(usage_db, project_id, "fill_excel", ai_service)
+
+        # ── Phase 4: Fill Excel and save to disk ──
+        _update("filling", 85, "Remplissage du fichier Excel...")
+        filled_bytes = _fill_excel_with_data(excel_file_path, fill_data)
+
+        base_name = os.path.splitext(excel_original_filename)[0]
+        output_filename = f"{base_name}_rempli.xlsx"
+        from ..config import settings
+        output_path = os.path.join(settings.export_dir, f"{doc_id}_{output_filename}")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(filled_bytes)
+
+        set_progress(_NS_FILL_EXCEL, task_key, {
+            "status": "completed", "step": "done", "progress": 100,
+            "message": f"Excel rempli: {output_filename} ({len(fill_data)} cellules)",
+            "file_path": output_path,
+            "filename": output_filename,
+            "cell_count": len(fill_data),
+        })
+
+    except Exception as e:
+        logger.exception("Fill Excel failed for doc %s", doc_id)
+        set_progress(_NS_FILL_EXCEL, task_key, {
+            "status": "error", "step": "error", "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        })
 
 
 # ── Fill PDF endpoint ──────────────────────────────────────────────
@@ -5460,10 +5546,7 @@ async def fill_pdf_document(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Generate a filled PDF file for a completion-type document
-    by using data from the old response and the original PDF template from the DCE."""
-
-    # 1. Get the response document
+    """Launch async PDF fill as a background task (returns immediately)."""
     result = await db.execute(
         select(ResponseDocument)
         .where(ResponseDocument.id == doc_id, ResponseDocument.project_id == project_id)
@@ -5472,105 +5555,189 @@ async def fill_pdf_document(
     if not resp_doc:
         raise HTTPException(status_code=404, detail="Document livrable non trouvé")
 
-    # 2. Find the source PDF file in uploaded DCE documents
-    docs_result = await db.execute(
-        select(Document)
-        .where(Document.project_id == project_id)
-        .where(Document.category == DocumentCategory.NEW_RFP)
-    )
-    all_dce_docs = docs_result.scalars().all()
-
-    all_pdfs = [doc for doc in all_dce_docs if doc.file_type.value == "pdf"]
-    logger.info(
-        "fill-pdf: looking for PDF source for '%s' (rfp_source='%s'), %d PDFs in DCE: %s",
-        resp_doc.title, resp_doc.rfp_source, len(all_pdfs),
-        [d.original_filename for d in all_pdfs],
-    )
-
-    pdf_doc = _match_source_document(resp_doc, all_pdfs)
-
-    # Last fallback: pick the first available PDF
-    if not pdf_doc and all_pdfs:
-        pdf_doc = all_pdfs[0]
-        logger.warning("fill-pdf: no good match for '%s', falling back to first PDF: %s",
-                        resp_doc.title, pdf_doc.original_filename)
-
-    if not pdf_doc or not os.path.isfile(pdf_doc.file_path):
-        raise HTTPException(
-            status_code=404,
-            detail="Aucun fichier PDF source trouvé dans le DCE. "
-                   "Assurez-vous d'avoir uploadé le PDF correspondant dans les documents du nouvel AO.",
-        )
-    logger.info("fill-pdf: matched PDF source '%s' for deliverable '%s'", pdf_doc.original_filename, resp_doc.title)
-
-    # 3. Extract PDF zones (layout analysis with real coordinates)
-    pdf_zones = _extract_pdf_zones(pdf_doc.file_path)
-    logger.info(
-        "fill-pdf '%s': has_form_fields=%s, detected %d zones, text_for_ai=%d chars",
-        resp_doc.title, pdf_zones["has_form_fields"],
-        len(pdf_zones["zones"]), len(pdf_zones["text_for_ai"]),
-    )
-
-    # 4. Get project for workspace_id
     proj_result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
     project = proj_result.scalar_one_or_none()
     if not project:
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
-    # 5. Load context: new RFP + old response
-    anon_new_rfp, anon_old_response = await asyncio.gather(
-        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
-        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+    task_key = str(doc_id)
+    existing = get_or_idle(_NS_FILL_PDF, task_key)
+    if existing.get("status") == "running":
+        raise HTTPException(status_code=409, detail="Remplissage deja en cours pour ce document")
+
+    set_progress(_NS_FILL_PDF, task_key, {
+        "status": "running", "step": "queued", "progress": 0,
+        "message": f"En file d'attente: {resp_doc.title}",
+        "doc_title": resp_doc.title,
+    })
+
+    from ..tasks.project_tasks import fill_pdf_task
+    fill_pdf_task.apply_async(
+        args=(str(project_id), str(doc_id), str(project.workspace_id)),
+        priority=1,
+    )
+    return {"success": True, "message": "Remplissage PDF lance en arriere-plan"}
+
+
+@router.get("/{project_id}/fill-pdf-status/{doc_id}")
+async def get_fill_pdf_status(
+    project_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll progress of PDF fill task."""
+    return get_or_idle(_NS_FILL_PDF, str(doc_id))
+
+
+@router.get("/{project_id}/fill-pdf-download/{doc_id}")
+async def download_filled_pdf(
+    project_id: uuid.UUID,
+    doc_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+):
+    """Download the filled PDF file once the task is complete."""
+    status = get_or_idle(_NS_FILL_PDF, str(doc_id))
+    if status.get("status") != "completed":
+        raise HTTPException(status_code=404, detail="Fichier pas encore pret")
+
+    file_path = status.get("file_path", "")
+    filename = status.get("filename", "document_rempli.pdf")
+    if not file_path or not os.path.isfile(file_path):
+        raise HTTPException(status_code=404, detail="Fichier genere introuvable")
+
+    from fastapi.responses import FileResponse
+    return FileResponse(
+        file_path,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
-    # Targeted vector search for relevant content
-    search_query = f"{resp_doc.title} formulaire informations candidat société entreprise"
-    relevant_chunks = VectorService.search(
-        str(project_id),
-        search_query,
-        top_k=15,
-        category_filter="old_response",
-    )
-    relevant_context = "\n\n".join([
-        f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
-        for c in relevant_chunks
-    ])
 
-    old_response_with_context = anon_old_response
-    if relevant_context:
-        old_response_with_context = (
-            f"=== EXTRAITS PERTINENTS DE L'ANCIENNE RÉPONSE ===\n{relevant_context}\n\n"
-            f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
+async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: uuid.UUID):
+    """Background task: generate a filled PDF file for a completion-type document."""
+    from ..database import task_session
+    task_key = str(doc_id)
+
+    def _update(step: str, progress: int, message: str):
+        set_progress(_NS_FILL_PDF, task_key, {
+            "status": "running", "step": step,
+            "progress": progress, "message": message,
+        })
+
+    try:
+        # ── Phase 1: Load data (short DB session) ──
+        async with task_session() as db:
+            result = await db.execute(
+                select(ResponseDocument)
+                .where(ResponseDocument.id == doc_id, ResponseDocument.project_id == project_id)
+            )
+            resp_doc = result.scalar_one_or_none()
+            if not resp_doc:
+                set_progress(_NS_FILL_PDF, task_key, {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "Document livrable non trouve",
+                })
+                return
+
+            doc_title = resp_doc.title or ""
+            _update("loading", 5, f"Chargement: {doc_title}")
+
+            docs_result = await db.execute(
+                select(Document)
+                .where(Document.project_id == project_id)
+                .where(Document.category == DocumentCategory.NEW_RFP)
+            )
+            all_dce_docs = docs_result.scalars().all()
+
+            all_pdfs = [doc for doc in all_dce_docs if doc.file_type.value == "pdf"]
+            pdf_doc = _match_source_document(resp_doc, all_pdfs)
+            if not pdf_doc and all_pdfs:
+                pdf_doc = all_pdfs[0]
+
+            if not pdf_doc or not os.path.isfile(pdf_doc.file_path):
+                set_progress(_NS_FILL_PDF, task_key, {
+                    "status": "error", "step": "error", "progress": 0,
+                    "message": "Aucun fichier PDF source trouve dans le DCE.",
+                })
+                return
+
+            pdf_file_path = pdf_doc.file_path
+            pdf_original_filename = pdf_doc.original_filename
+
+        # ── Phase 2: Extract PDF structure ──
+        _update("reading", 10, "Analyse de la structure du PDF...")
+        pdf_zones = _extract_pdf_zones(pdf_file_path)
+        logger.info(
+            "fill-pdf '%s': has_form_fields=%s, detected %d zones",
+            doc_title, pdf_zones["has_form_fields"], len(pdf_zones["zones"]),
         )
 
-    # 6. Call AI to generate structured fill data
-    logger.info(
-        "fill-pdf %s: old_response=%d chars, relevant_chunks=%d, new_rfp=%d chars",
-        resp_doc.title, len(old_response_with_context),
-        len(relevant_chunks), len(anon_new_rfp),
-    )
-    ai_service = await _get_ai_service(project.workspace_id, db)
-    fill_data = await ai_service.generate_pdf_fill_data(
-        document_title=resp_doc.title,
-        pdf_structure=pdf_zones["text_for_ai"],
-        new_rfp_content=anon_new_rfp,
-        old_response_content=old_response_with_context,
-        has_form_fields=pdf_zones["has_form_fields"],
-    )
-    logger.info("fill-pdf %s: AI returned %d fill entries", resp_doc.title, len(fill_data))
+        # ── Phase 3: Load context (short DB session) ──
+        _update("loading_context", 15, "Chargement du contexte AO + ancienne reponse...")
+        async with task_session() as db:
+            ai_service = await _get_ai_service(workspace_id, db)
 
-    # Log AI usage for PDF fill
-    await log_ai_usage_from_service(db, project_id, "fill_pdf", ai_service)
+            anon_new_rfp, anon_old_response = await asyncio.gather(
+                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+            )
 
-    # 7. Fill the PDF and return as download
-    zone_map = {z["id"]: z for z in pdf_zones["zones"]}
-    filled_bytes = _fill_pdf_with_zones(pdf_doc.file_path, fill_data, zone_map)
+        # Vector search (no DB needed)
+        _update("searching", 25, "Recherche de contenu pertinent...")
+        search_query = f"{doc_title} formulaire informations candidat société entreprise"
+        from ..tasks.chapter_tasks import _vector_search
+        relevant_chunks = _vector_search(str(project_id), search_query, top_k=15, category_filter="old_response")
+        relevant_context = "\n\n".join([
+            f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
+            for c in relevant_chunks
+        ])
 
-    base_name = os.path.splitext(pdf_doc.original_filename)[0]
-    output_filename = f"{base_name}_rempli.pdf"
+        old_response_with_context = anon_old_response
+        if relevant_context:
+            old_response_with_context = (
+                f"=== EXTRAITS PERTINENTS DE L'ANCIENNE RÉPONSE ===\n{relevant_context}\n\n"
+                f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
+            )
 
-    return StreamingResponse(
-        io.BytesIO(filled_bytes),
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{output_filename}"'},
-    )
+        # ── Phase 4: AI generation (NO DB held) ──
+        _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")
+        fill_data = await ai_service.generate_pdf_fill_data(
+            document_title=doc_title,
+            pdf_structure=pdf_zones["text_for_ai"],
+            new_rfp_content=anon_new_rfp,
+            old_response_content=old_response_with_context,
+            has_form_fields=pdf_zones["has_form_fields"],
+        )
+        logger.info("fill-pdf %s: AI returned %d fill entries", doc_title, len(fill_data))
+
+        # Log AI usage
+        async with task_session() as usage_db:
+            await log_ai_usage_from_service(usage_db, project_id, "fill_pdf", ai_service)
+
+        # ── Phase 5: Fill PDF and save to disk ──
+        _update("filling", 85, "Remplissage du fichier PDF...")
+        zone_map = {z["id"]: z for z in pdf_zones["zones"]}
+        filled_bytes = _fill_pdf_with_zones(pdf_file_path, fill_data, zone_map)
+
+        base_name = os.path.splitext(pdf_original_filename)[0]
+        output_filename = f"{base_name}_rempli.pdf"
+        from ..config import settings
+        output_path = os.path.join(settings.export_dir, f"{doc_id}_{output_filename}")
+        os.makedirs(os.path.dirname(output_path), exist_ok=True)
+        with open(output_path, "wb") as f:
+            f.write(filled_bytes)
+
+        set_progress(_NS_FILL_PDF, task_key, {
+            "status": "completed", "step": "done", "progress": 100,
+            "message": f"PDF rempli: {output_filename} ({len(fill_data)} champs)",
+            "file_path": output_path,
+            "filename": output_filename,
+            "field_count": len(fill_data),
+        })
+
+    except Exception as e:
+        logger.exception("Fill PDF failed for doc %s", doc_id)
+        set_progress(_NS_FILL_PDF, task_key, {
+            "status": "error", "step": "error", "progress": 0,
+            "message": f"Erreur: {str(e)[:200]}",
+        })

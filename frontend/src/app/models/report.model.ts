@@ -239,6 +239,8 @@ export interface ResponseDocument {
   chapter_count: number;
   _fillingExcel?: boolean;
   _fillingPdf?: boolean;
+  _fillProgress?: { status: string; step: string; progress: number; message: string };
+  _fillPollSub?: any;
 }
 
 export interface DetectDeliverablesStatus {
