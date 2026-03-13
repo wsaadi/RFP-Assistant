@@ -1402,16 +1402,15 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
 
         raw = await self.generate(system_prompt, user_prompt, temperature=0.1, max_tokens=32000)
 
-        # Parse the JSON response
-        cleaned = _clean_json_response(raw)
-        try:
-            data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            repaired = _repair_truncated_json(cleaned, target="array")
-            data = json.loads(repaired)
-
-        if not isinstance(data, list):
-            raise ValueError("AI response is not a JSON array")
+        # Parse the JSON response using the robust helper (handles truncated/malformed JSON)
+        data = _parse_json_array(raw)
+        if data is None:
+            logger.warning("Excel fill JSON parse failed for '%s'. First 500 chars: %s",
+                           document_title, raw[:500])
+            raise ValueError(
+                f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
+                "Veuillez réessayer."
+            )
 
         return data
 
@@ -1498,15 +1497,15 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
 
         raw = await self.generate(system_prompt, user_prompt, temperature=0.1, max_tokens=32000)
 
-        cleaned = _clean_json_response(raw)
-        try:
-            data = json.loads(cleaned)
-        except json.JSONDecodeError:
-            repaired = _repair_truncated_json(cleaned, target="array")
-            data = json.loads(repaired)
-
-        if not isinstance(data, list):
-            raise ValueError("AI response is not a JSON array")
+        # Parse the JSON response using the robust helper (handles truncated/malformed JSON)
+        data = _parse_json_array(raw)
+        if data is None:
+            logger.warning("PDF fill JSON parse failed for '%s'. First 500 chars: %s",
+                           document_title, raw[:500])
+            raise ValueError(
+                f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
+                "Veuillez réessayer."
+            )
 
         return data
 
