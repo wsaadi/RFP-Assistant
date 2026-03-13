@@ -506,6 +506,10 @@ export class ApiService {
     return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/ai-pricing/load-public`, { models });
   }
 
+  getAICarbonTracking(projectId: string): Observable<any> {
+    return this.http.get<any>(`${this.baseUrl}/projects/${projectId}/ai-carbon-tracking`);
+  }
+
   // ── Export/Import ──
   exportWord(projectId: string): Observable<any> {
     return this.http.post(`${this.baseUrl}/export/${projectId}/word`, {});
