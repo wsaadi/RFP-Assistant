@@ -4777,6 +4777,60 @@ async def remove_project_member(
     await db.commit()
 
 
+# ── Source document matching (shared by fill-excel and fill-pdf) ────
+
+def _match_source_document(resp_doc, candidates: list):
+    """Find the best matching uploaded source document for a ResponseDocument.
+
+    Scores every candidate and returns the best match (or None).
+    This replaces the old "first keyword wins" approach that would pick
+    the wrong file when multiple documents shared a generic keyword
+    like "bordereau".
+    """
+    if not candidates:
+        return None
+
+    doc_title_lower = (resp_doc.title or "").lower()
+    rfp_source_lower = (resp_doc.rfp_source or "").lower()
+
+    # Extract meaningful words from the deliverable title (length > 2)
+    title_words = [w for w in re.split(r'[\s\-_/(),.]+', doc_title_lower) if len(w) > 2]
+
+    best_doc = None
+    best_score = 0
+
+    for doc in candidates:
+        fname_lower = (doc.original_filename or "").lower()
+        # Strip extension for matching
+        fname_stem = re.sub(r'\.\w{2,4}$', '', fname_lower)
+        score = 0
+
+        # Strong signal: rfp_source substring match (bidirectional)
+        if rfp_source_lower and (rfp_source_lower in fname_lower or fname_lower in rfp_source_lower):
+            score += 100
+
+        # Count how many title words appear in the filename
+        word_matches = sum(1 for w in title_words if w in fname_stem)
+        score += word_matches * 10
+
+        # Bonus for discriminating words (lot numbers, specific terms)
+        for w in title_words:
+            if w in fname_stem and re.match(r'^(lot\d*|\d+|tjm|bpu|dqe|dpgf|qds|dc\d|attri\d?)$', w):
+                score += 15  # discriminating identifiers get extra weight
+
+        if score > best_score:
+            best_score = score
+            best_doc = doc
+
+    if best_doc:
+        logger.info(
+            "Source match: '%s' -> '%s' (score=%d)",
+            resp_doc.title, best_doc.original_filename, best_score,
+        )
+
+    return best_doc if best_score > 0 else None
+
+
 # ── Fill Excel endpoint ─────────────────────────────────────────────
 
 def _ensure_xlsx_path(file_path: str) -> str:
@@ -4932,11 +4986,9 @@ async def fill_excel_document(
         raise HTTPException(status_code=404, detail="Document livrable non trouvé")
 
     # 2. Find the source Excel file in uploaded DCE documents
-    # Try matching by rfp_source (filename reference) or by title keywords
     doc_title_lower = (resp_doc.title or "").lower()
     rfp_source_lower = (resp_doc.rfp_source or "").lower()
 
-    # Search for Excel files in the project's new_rfp documents
     docs_result = await db.execute(
         select(Document)
         .where(Document.project_id == project_id)
@@ -4944,55 +4996,20 @@ async def fill_excel_document(
     )
     all_dce_docs = docs_result.scalars().all()
 
-    # Find the best matching Excel file
-    excel_doc = None
-    for doc in all_dce_docs:
-        if doc.file_type.value not in ("xlsx", "xls"):
-            continue
-        fname_lower = (doc.original_filename or "").lower()
-        # Match by rfp_source reference or title similarity
-        if rfp_source_lower and rfp_source_lower in fname_lower:
-            excel_doc = doc
-            break
-        if fname_lower and fname_lower in rfp_source_lower:
-            excel_doc = doc
-            break
-        # Fuzzy: check for keywords in both title and filename
-        match_keywords = [
-            "bpu", "bordereau", "dqe", "dpgf", "prix",
-            "rgpd", "conformit", "gdpr", "grille", "questionnaire",
-            "annexe", "engagement", "qualit", "sécurit", "securit",
-            "environnement", "rse", "social", "audit",
-        ]
-        for kw in match_keywords:
-            if kw in doc_title_lower and kw in fname_lower:
-                excel_doc = doc
-                break
-        if excel_doc:
-            break
+    excel_candidates = [
+        doc for doc in all_dce_docs
+        if doc.file_type.value in ("xlsx", "xls")
+    ]
 
-    # Fallback 1: match by title words (at least 2 words matching)
-    if not excel_doc:
-        title_words = [w for w in doc_title_lower.split() if len(w) > 3]
-        best_match = None
-        best_score = 0
-        for doc in all_dce_docs:
-            if doc.file_type.value not in ("xlsx", "xls"):
-                continue
-            fname_lower = (doc.original_filename or "").lower()
-            score = sum(1 for w in title_words if w in fname_lower)
-            if score >= 2 and score > best_score:
-                best_match = doc
-                best_score = score
-        if best_match:
-            excel_doc = best_match
+    excel_doc = _match_source_document(resp_doc, excel_candidates)
 
-    # Fallback 2: just pick the first Excel file
-    if not excel_doc:
-        for doc in all_dce_docs:
-            if doc.file_type.value in ("xlsx", "xls"):
-                excel_doc = doc
-                break
+    # Last fallback: pick the first Excel file
+    if not excel_doc and excel_candidates:
+        excel_doc = excel_candidates[0]
+        logger.warning(
+            "fill-excel: no good match for '%s', falling back to first Excel: %s",
+            resp_doc.title, excel_doc.original_filename,
+        )
 
     if not excel_doc or not os.path.isfile(excel_doc.file_path):
         raise HTTPException(
@@ -5456,9 +5473,6 @@ async def fill_pdf_document(
         raise HTTPException(status_code=404, detail="Document livrable non trouvé")
 
     # 2. Find the source PDF file in uploaded DCE documents
-    doc_title_lower = (resp_doc.title or "").lower()
-    rfp_source_lower = (resp_doc.rfp_source or "").lower()
-
     docs_result = await db.execute(
         select(Document)
         .where(Document.project_id == project_id)
@@ -5466,7 +5480,6 @@ async def fill_pdf_document(
     )
     all_dce_docs = docs_result.scalars().all()
 
-    # Find the best matching PDF file
     all_pdfs = [doc for doc in all_dce_docs if doc.file_type.value == "pdf"]
     logger.info(
         "fill-pdf: looking for PDF source for '%s' (rfp_source='%s'), %d PDFs in DCE: %s",
@@ -5474,57 +5487,13 @@ async def fill_pdf_document(
         [d.original_filename for d in all_pdfs],
     )
 
-    pdf_doc = None
-    # Strategy 1: Match by rfp_source reference
-    for doc in all_pdfs:
-        fname_lower = (doc.original_filename or "").lower()
-        if rfp_source_lower and rfp_source_lower in fname_lower:
-            pdf_doc = doc
-            break
-        if fname_lower and fname_lower in rfp_source_lower:
-            pdf_doc = doc
-            break
-
-    # Strategy 2: Match by title keywords (at least 2 matching words)
-    if not pdf_doc:
-        title_words = [w for w in doc_title_lower.split() if len(w) > 3]
-        best_score, best_doc = 0, None
-        for doc in all_pdfs:
-            fname_lower = (doc.original_filename or "").lower()
-            matches = sum(1 for w in title_words if w in fname_lower)
-            if matches > best_score:
-                best_score = matches
-                best_doc = doc
-        if best_score >= 2:
-            pdf_doc = best_doc
-
-    # Strategy 3: Match by common admin/form keywords
-    if not pdf_doc:
-        for doc in all_pdfs:
-            fname_lower = (doc.original_filename or "").lower()
-            for kw in ["formulaire", "acte", "dc1", "dc2", "dc3", "dc4", "attrib", "engagement",
-                        "candidature", "marche", "contrat", "annexe"]:
-                if kw in doc_title_lower and kw in fname_lower:
-                    pdf_doc = doc
-                    break
-            if pdf_doc:
-                break
-
-    # Strategy 4: Match any word from title in filename
-    if not pdf_doc:
-        for doc in all_pdfs:
-            fname_lower = (doc.original_filename or "").lower()
-            for w in doc_title_lower.split():
-                if len(w) > 4 and w in fname_lower:
-                    pdf_doc = doc
-                    break
-            if pdf_doc:
-                break
+    pdf_doc = _match_source_document(resp_doc, all_pdfs)
 
     # Last fallback: pick the first available PDF
     if not pdf_doc and all_pdfs:
         pdf_doc = all_pdfs[0]
-        logger.info("fill-pdf: no keyword match, falling back to first PDF: %s", pdf_doc.original_filename)
+        logger.warning("fill-pdf: no good match for '%s', falling back to first PDF: %s",
+                        resp_doc.title, pdf_doc.original_filename)
 
     if not pdf_doc or not os.path.isfile(pdf_doc.file_path):
         raise HTTPException(
