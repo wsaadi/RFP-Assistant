@@ -4720,6 +4720,164 @@ async def load_public_pricing(
     return {"status": "ok", "added": added, "total_catalog": len(entries_to_load)}
 
 
+# ── Carbon estimation (ADEME methodology) ──────────────────────────
+
+# Energy consumption per 1K tokens (Wh) — estimated by model class
+# Based on GPU inference benchmarks (A100/H100) and published energy studies
+_ENERGY_WH_PER_1K_TOKENS = {
+    "small": 0.4,    # ≤13B params (Mistral Small, Haiku, GPT-3.5, Gemma, etc.)
+    "medium": 1.0,   # 14–34B params (Codestral, Qwen 32B, Command R, etc.)
+    "large": 2.5,    # 35–80B params (Llama 70B, Mistral Large, GPT-4o, etc.)
+    "xlarge": 6.0,   # >80B params (GPT-4, Claude Opus, Mistral 675B, etc.)
+}
+
+# Carbon intensity of electricity grid by provider location (gCO2eq/kWh)
+# Source: ADEME Base Carbone 2024, IEA 2023
+_CARBON_INTENSITY = {
+    "mistral": 56,      # France (nuclear-dominated grid)
+    "scaleway": 56,     # France
+    "ollama": 56,       # Local — default France
+    "openai": 380,      # US average (Azure data centers)
+    "anthropic": 380,   # US (AWS/GCP)
+    "google": 120,      # Mixed global, ~80% renewable pledge
+    "deepseek": 580,    # China average
+    "cohere": 150,      # Canada/US mix
+}
+
+# PUE (Power Usage Effectiveness) — ADEME recommends 1.2 for modern DC
+_PUE = 1.2
+
+# Water usage per kWh of cooling (L/kWh) — ADEME/WRI estimates
+_WATER_L_PER_KWH = 1.8
+
+
+def _model_size_class(provider: str, model_name: str) -> str:
+    """Classify a model into a size class for energy estimation."""
+    name = model_name.lower()
+    # Extra-large models (>80B)
+    if any(k in name for k in ["gpt-4-turbo", "gpt-4", "opus", "675b", "mixtral"]):
+        if "mini" in name or "small" in name:
+            return "small"
+        return "xlarge"
+    # Large models (35-80B)
+    if any(k in name for k in ["large", "70b", "gpt-4o", "o1", "pro", "command-r-plus"]):
+        if "mini" in name:
+            return "medium"
+        return "large"
+    # Medium models (14-34B)
+    if any(k in name for k in ["medium", "codestral", "32b", "24b", "14b", "13b", "reasoner"]):
+        return "medium"
+    # Default: small
+    return "small"
+
+
+@router.get("/{project_id}/ai-carbon-tracking")
+async def get_ai_carbon_tracking(
+    project_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Estimate carbon footprint of AI usage based on ADEME methodology (admin only)."""
+    from ..models.user import UserRole
+    if current_user.role != UserRole.ADMIN:
+        raise HTTPException(status_code=403, detail="Accès réservé aux administrateurs")
+
+    from ..models.project import AIUsageLog
+    result = await db.execute(
+        select(AIUsageLog)
+        .where(AIUsageLog.project_id == project_id)
+        .order_by(AIUsageLog.created_at.desc())
+    )
+    logs = result.scalars().all()
+
+    total_energy_wh = 0.0
+    total_co2_g = 0.0
+    total_water_l = 0.0
+    by_provider: dict = {}
+    by_model: dict = {}
+    daily: dict = {}
+
+    for log in logs:
+        size_class = _model_size_class(log.provider, log.model_name)
+        total_tokens_k = (log.input_tokens + log.output_tokens) / 1000.0
+        energy_wh = total_tokens_k * _ENERGY_WH_PER_1K_TOKENS.get(size_class, 0.4) * _PUE
+        carbon_intensity = _CARBON_INTENSITY.get(log.provider, 300)
+        co2_g = energy_wh / 1000.0 * carbon_intensity  # convert Wh→kWh then multiply
+        water_l = energy_wh / 1000.0 * _WATER_L_PER_KWH
+
+        total_energy_wh += energy_wh
+        total_co2_g += co2_g
+        total_water_l += water_l
+
+        # By provider
+        if log.provider not in by_provider:
+            by_provider[log.provider] = {"provider": log.provider, "energy_wh": 0, "co2_g": 0, "water_l": 0, "tokens": 0, "requests": 0}
+        by_provider[log.provider]["energy_wh"] += energy_wh
+        by_provider[log.provider]["co2_g"] += co2_g
+        by_provider[log.provider]["water_l"] += water_l
+        by_provider[log.provider]["tokens"] += log.input_tokens + log.output_tokens
+        by_provider[log.provider]["requests"] += 1
+
+        # By model
+        model_key = f"{log.provider}/{log.model_name}"
+        if model_key not in by_model:
+            by_model[model_key] = {
+                "provider": log.provider, "model": log.model_name, "size_class": size_class,
+                "energy_wh": 0, "co2_g": 0, "water_l": 0, "tokens": 0, "requests": 0,
+            }
+        by_model[model_key]["energy_wh"] += energy_wh
+        by_model[model_key]["co2_g"] += co2_g
+        by_model[model_key]["water_l"] += water_l
+        by_model[model_key]["tokens"] += log.input_tokens + log.output_tokens
+        by_model[model_key]["requests"] += 1
+
+        # Daily
+        day = log.created_at.strftime("%Y-%m-%d")
+        if day not in daily:
+            daily[day] = {"date": day, "energy_wh": 0, "co2_g": 0, "water_l": 0, "tokens": 0, "requests": 0}
+        daily[day]["energy_wh"] += energy_wh
+        daily[day]["co2_g"] += co2_g
+        daily[day]["water_l"] += water_l
+        daily[day]["tokens"] += log.input_tokens + log.output_tokens
+        daily[day]["requests"] += 1
+
+    # Round values
+    def _round_entry(e: dict) -> dict:
+        e["energy_wh"] = round(e["energy_wh"], 2)
+        e["co2_g"] = round(e["co2_g"], 2)
+        e["water_l"] = round(e["water_l"], 3)
+        return e
+
+    # Equivalences ADEME pour vulgarisation
+    co2_kg = total_co2_g / 1000.0
+    equivalences = {
+        "km_voiture": round(co2_kg / 0.218, 1),        # ADEME: 218 gCO2/km voiture moyenne
+        "heures_streaming": round(co2_kg / 0.036, 1),   # ~36 gCO2/h streaming vidéo
+        "emails": round(co2_kg / 0.004, 0),              # ~4 gCO2/email (ADEME)
+        "charges_smartphone": round(co2_kg / 0.008, 0),  # ~8 gCO2/charge
+        "litres_eau": round(total_water_l, 1),
+    }
+
+    return {
+        "total_energy_wh": round(total_energy_wh, 2),
+        "total_co2_g": round(total_co2_g, 2),
+        "total_water_l": round(total_water_l, 3),
+        "total_requests": len(logs),
+        "total_tokens": sum(log.input_tokens + log.output_tokens for log in logs),
+        "equivalences": equivalences,
+        "by_provider": [_round_entry(v) for v in by_provider.values()],
+        "by_model": sorted([_round_entry(v) for v in by_model.values()], key=lambda x: x["co2_g"], reverse=True),
+        "daily": sorted([_round_entry(v) for v in daily.values()], key=lambda x: x["date"]),
+        "methodology": {
+            "source": "ADEME Base Carbone 2024 / IEA 2023",
+            "pue": _PUE,
+            "water_l_per_kwh": _WATER_L_PER_KWH,
+            "carbon_intensities": _CARBON_INTENSITY,
+            "energy_per_1k_tokens_wh": _ENERGY_WH_PER_1K_TOKENS,
+        },
+    }
+
+
 # ── Project Members ─────────────────────────────────────────────────
 
 @router.get("/{project_id}/members")
