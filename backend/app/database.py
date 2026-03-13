@@ -319,23 +319,36 @@ async def init_db():
         except Exception:
             logger.debug("ai_model_pricing table already exists")
 
-        # Seed default pricing for common models
+        # Seed default pricing for common models (EUR per 1K tokens, public prices)
+        default_pricing = [
+            # Mistral AI
+            ("mistral", "mistral-large-latest", 0.0018, 0.0055),
+            ("mistral", "mistral-small-latest", 0.0002, 0.0006),
+            ("mistral", "open-mistral-nemo", 0.00015, 0.00015),
+            ("mistral", "codestral-latest", 0.0003, 0.0009),
+            ("mistral", "pixtral-large-latest", 0.0018, 0.0055),
+            # Scaleway
+            ("scaleway", "mistral-large-3-675b-instruct-2512", 0.002, 0.006),
+            ("scaleway", "mistral-small-3.1-24b-instruct-2503", 0.0002, 0.0006),
+            ("scaleway", "llama-3.3-70b-instruct", 0.00035, 0.0008),
+            # OpenAI
+            ("openai", "gpt-4o", 0.0023, 0.0092),
+            ("openai", "gpt-4o-mini", 0.000138, 0.00055),
+            ("openai", "o3-mini", 0.001, 0.004),
+            # Anthropic
+            ("anthropic", "claude-sonnet-4", 0.00276, 0.0138),
+            ("anthropic", "claude-3.5-haiku", 0.00074, 0.0037),
+            # Google
+            ("google", "gemini-2.0-flash", 0.000069, 0.000368),
+            ("google", "gemini-1.5-pro", 0.00115, 0.0046),
+        ]
         try:
-            await conn.execute(text("""
-                INSERT INTO ai_model_pricing (id, provider, model_name, price_per_1k_input, price_per_1k_output, currency)
-                SELECT gen_random_uuid(), 'mistral', 'mistral-large-latest', 0.002, 0.006, 'EUR'
-                WHERE NOT EXISTS (SELECT 1 FROM ai_model_pricing WHERE provider = 'mistral' AND model_name = 'mistral-large-latest')
-            """))
-            await conn.execute(text("""
-                INSERT INTO ai_model_pricing (id, provider, model_name, price_per_1k_input, price_per_1k_output, currency)
-                SELECT gen_random_uuid(), 'mistral', 'mistral-small-latest', 0.0002, 0.0006, 'EUR'
-                WHERE NOT EXISTS (SELECT 1 FROM ai_model_pricing WHERE provider = 'mistral' AND model_name = 'mistral-small-latest')
-            """))
-            await conn.execute(text("""
-                INSERT INTO ai_model_pricing (id, provider, model_name, price_per_1k_input, price_per_1k_output, currency)
-                SELECT gen_random_uuid(), 'scaleway', 'pixtral-large-latest', 0.002, 0.006, 'EUR'
-                WHERE NOT EXISTS (SELECT 1 FROM ai_model_pricing WHERE provider = 'scaleway' AND model_name = 'pixtral-large-latest')
-            """))
+            for provider, model, price_in, price_out in default_pricing:
+                await conn.execute(text("""
+                    INSERT INTO ai_model_pricing (id, provider, model_name, price_per_1k_input, price_per_1k_output, currency)
+                    SELECT gen_random_uuid(), :provider, :model, :price_in, :price_out, 'EUR'
+                    WHERE NOT EXISTS (SELECT 1 FROM ai_model_pricing WHERE provider = :provider AND model_name = :model)
+                """), {"provider": provider, "model": model, "price_in": price_in, "price_out": price_out})
         except Exception:
             logger.debug("Default pricing seed skipped")
 

@@ -498,6 +498,14 @@ export class ApiService {
     return this.http.delete<any>(`${this.baseUrl}/projects/${projectId}/ai-pricing/${pricingId}`);
   }
 
+  getAIPricingCatalog(projectId: string): Observable<{ catalog: any[] }> {
+    return this.http.get<{ catalog: any[] }>(`${this.baseUrl}/projects/${projectId}/ai-pricing/catalog`);
+  }
+
+  loadPublicPricing(projectId: string, models: any[] = []): Observable<{ status: string; added: number; total_catalog: number }> {
+    return this.http.post<any>(`${this.baseUrl}/projects/${projectId}/ai-pricing/load-public`, { models });
+  }
+
   // ── Export/Import ──
   exportWord(projectId: string): Observable<any> {
     return this.http.post(`${this.baseUrl}/export/${projectId}/word`, {});

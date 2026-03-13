@@ -77,6 +77,22 @@ interface ProviderModels {
           </ng-template>
 
           <div class="tab-content">
+            <!-- Load public pricing button -->
+            <mat-card class="section-card catalog-card">
+              <div class="section-header">
+                <h3><mat-icon>cloud_download</mat-icon> Catalogue de prix publics</h3>
+                <button mat-raised-button color="accent" (click)="loadAllPublicPricing()" [disabled]="loadingCatalog">
+                  <mat-spinner *ngIf="loadingCatalog" diameter="18"></mat-spinner>
+                  <mat-icon *ngIf="!loadingCatalog">auto_fix_high</mat-icon>
+                  Charger tous les prix publics
+                </button>
+              </div>
+              <p class="section-hint">
+                Charge automatiquement les prix publics de tous les fournisseurs connus (Mistral, OpenAI, Anthropic, Google, DeepSeek, Cohere, Scaleway...).
+                Seuls les modèles non encore configurés seront ajoutés. Vous pourrez ensuite éditer chaque prix individuellement.
+              </p>
+            </mat-card>
+
             <mat-card class="section-card">
               <div class="section-header">
                 <h3><mat-icon>add_circle</mat-icon> Ajouter un tarif</h3>
@@ -408,7 +424,15 @@ interface ProviderModels {
     .provider-mistral { background: #e3f2fd; color: #1565c0; }
     .provider-ollama { background: #e8f5e9; color: #2e7d32; }
     .provider-scaleway { background: #f3e5f5; color: #7b1fa2; }
+    .provider-openai { background: #e8f5e9; color: #1b5e20; }
+    .provider-anthropic { background: #fff3e0; color: #e65100; }
+    .provider-google { background: #e8eaf6; color: #283593; }
+    .provider-deepseek { background: #e0f7fa; color: #00695c; }
+    .provider-cohere { background: #fce4ec; color: #880e4f; }
     .provider-other { background: #f5f5f5; color: #666; }
+
+    /* ── Catalog card ── */
+    .catalog-card { border-left: 4px solid #ff9800; }
 
     .operation-badge {
       display: inline-block; padding: 2px 8px; border-radius: 8px;
@@ -506,13 +530,77 @@ export class CostTrackingComponent implements OnInit {
         { value: 'pixtral-12b-2409', label: 'Pixtral 12B' },
       ],
     },
+    openai: {
+      label: 'OpenAI',
+      tag: 'API Cloud',
+      tagClass: 'provider-openai',
+      models: [
+        { value: 'gpt-4o', label: 'GPT-4o' },
+        { value: 'gpt-4o-mini', label: 'GPT-4o Mini' },
+        { value: 'gpt-4-turbo', label: 'GPT-4 Turbo' },
+        { value: 'gpt-4', label: 'GPT-4' },
+        { value: 'gpt-3.5-turbo', label: 'GPT-3.5 Turbo' },
+        { value: 'o1', label: 'o1' },
+        { value: 'o1-mini', label: 'o1 Mini' },
+        { value: 'o3-mini', label: 'o3 Mini' },
+      ],
+    },
+    anthropic: {
+      label: 'Anthropic',
+      tag: 'API Cloud',
+      tagClass: 'provider-anthropic',
+      models: [
+        { value: 'claude-opus-4', label: 'Claude Opus 4' },
+        { value: 'claude-sonnet-4', label: 'Claude Sonnet 4' },
+        { value: 'claude-3.5-sonnet', label: 'Claude 3.5 Sonnet' },
+        { value: 'claude-3.5-haiku', label: 'Claude 3.5 Haiku' },
+        { value: 'claude-3-opus', label: 'Claude 3 Opus' },
+        { value: 'claude-3-haiku', label: 'Claude 3 Haiku' },
+      ],
+    },
+    google: {
+      label: 'Google',
+      tag: 'API Cloud',
+      tagClass: 'provider-google',
+      models: [
+        { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash' },
+        { value: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash Lite' },
+        { value: 'gemini-1.5-pro', label: 'Gemini 1.5 Pro' },
+        { value: 'gemini-1.5-flash', label: 'Gemini 1.5 Flash' },
+      ],
+    },
+    deepseek: {
+      label: 'DeepSeek',
+      tag: 'API Cloud',
+      tagClass: 'provider-deepseek',
+      models: [
+        { value: 'deepseek-chat', label: 'DeepSeek Chat (V3)' },
+        { value: 'deepseek-reasoner', label: 'DeepSeek Reasoner (R1)' },
+      ],
+    },
+    cohere: {
+      label: 'Cohere',
+      tag: 'API Cloud',
+      tagClass: 'provider-cohere',
+      models: [
+        { value: 'command-r-plus', label: 'Command R+' },
+        { value: 'command-r', label: 'Command R' },
+      ],
+    },
   };
 
   providerList = [
     { value: 'mistral', label: 'Mistral AI (Cloud)' },
     { value: 'ollama', label: 'Ollama (Local)' },
     { value: 'scaleway', label: 'Scaleway (EU)' },
+    { value: 'openai', label: 'OpenAI' },
+    { value: 'anthropic', label: 'Anthropic' },
+    { value: 'google', label: 'Google' },
+    { value: 'deepseek', label: 'DeepSeek' },
+    { value: 'cohere', label: 'Cohere' },
   ];
+
+  loadingCatalog = false;
 
   availableModels: { value: string; label: string }[] = [];
 
@@ -610,9 +698,25 @@ export class CostTrackingComponent implements OnInit {
   }
 
   getProviderClass(provider: string): string {
-    if (provider === 'mistral') return 'provider-mistral';
-    if (provider === 'ollama') return 'provider-ollama';
-    if (provider === 'scaleway') return 'provider-scaleway';
-    return 'provider-other';
+    const known = ['mistral', 'ollama', 'scaleway', 'openai', 'anthropic', 'google', 'deepseek', 'cohere'];
+    return known.includes(provider) ? `provider-${provider}` : 'provider-other';
+  }
+
+  loadAllPublicPricing(): void {
+    this.loadingCatalog = true;
+    this.api.loadPublicPricing(this.projectId, []).subscribe({
+      next: (res) => {
+        this.loadingCatalog = false;
+        const msg = res.added > 0
+          ? `${res.added} tarif(s) ajouté(s) depuis le catalogue public`
+          : 'Tous les tarifs du catalogue sont déjà configurés';
+        this.snackBar.open(msg, 'OK', { duration: 4000 });
+        this.loadCostTracking();
+      },
+      error: (err) => {
+        this.loadingCatalog = false;
+        this.snackBar.open(err.error?.detail || 'Erreur de chargement du catalogue', 'OK', { duration: 4000 });
+      },
+    });
   }
 }
