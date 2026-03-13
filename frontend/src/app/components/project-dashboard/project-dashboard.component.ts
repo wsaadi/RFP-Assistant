@@ -430,24 +430,42 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                         matTooltip="Supprimer le contenu genere pour pouvoir le regenerer">
                         <mat-icon>delete_outline</mat-icon> Supprimer le contenu
                       </button>
-                      <button mat-raised-button class="fill-excel-btn"
-                        *ngIf="rd.expected_format === 'xlsx' || rd.expected_format === 'xls'"
-                        [disabled]="rd._fillingExcel"
-                        (click)="fillAndDownloadExcel(rd)"
-                        matTooltip="Remplir l'Excel avec les informations de l'ancienne reponse et telecharger">
-                        <mat-spinner *ngIf="rd._fillingExcel" diameter="16"></mat-spinner>
-                        <mat-icon *ngIf="!rd._fillingExcel">download</mat-icon>
-                        {{ rd._fillingExcel ? 'Generation en cours...' : 'Telecharger Excel rempli' }}
-                      </button>
-                      <button mat-raised-button class="fill-pdf-btn"
-                        *ngIf="rd.expected_format === 'pdf'"
-                        [disabled]="rd._fillingPdf"
-                        (click)="fillAndDownloadPdf(rd)"
-                        matTooltip="Remplir le PDF avec les informations de l'ancienne reponse et telecharger">
-                        <mat-spinner *ngIf="rd._fillingPdf" diameter="16"></mat-spinner>
-                        <mat-icon *ngIf="!rd._fillingPdf">picture_as_pdf</mat-icon>
-                        {{ rd._fillingPdf ? 'Generation en cours...' : 'Telecharger PDF rempli' }}
-                      </button>
+                      <!-- Excel fill button + progress -->
+                      <ng-container *ngIf="rd.expected_format === 'xlsx' || rd.expected_format === 'xls'">
+                        <button mat-raised-button class="fill-excel-btn"
+                          [disabled]="rd._fillProgress?.status === 'running'"
+                          (click)="fillAndDownloadExcel(rd)"
+                          matTooltip="Remplir l'Excel avec les informations de l'ancienne reponse et telecharger">
+                          <mat-spinner *ngIf="rd._fillProgress?.status === 'running'" diameter="16"></mat-spinner>
+                          <mat-icon *ngIf="rd._fillProgress?.status !== 'running'">download</mat-icon>
+                          {{ rd._fillProgress?.status === 'running' ? 'Generation en cours...' : 'Telecharger Excel rempli' }}
+                        </button>
+                        <div *ngIf="rd._fillProgress?.status === 'running'" class="fill-progress-inline">
+                          <mat-progress-bar mode="determinate" [value]="rd._fillProgress!.progress"></mat-progress-bar>
+                          <span class="fill-progress-label">{{ rd._fillProgress!.message }} ({{ rd._fillProgress!.progress | number:'1.0-0' }}%)</span>
+                        </div>
+                        <div *ngIf="rd._fillProgress?.status === 'error'" class="fill-progress-error">
+                          <mat-icon>error_outline</mat-icon> {{ rd._fillProgress!.message }}
+                        </div>
+                      </ng-container>
+                      <!-- PDF fill button + progress -->
+                      <ng-container *ngIf="rd.expected_format === 'pdf'">
+                        <button mat-raised-button class="fill-pdf-btn"
+                          [disabled]="rd._fillProgress?.status === 'running'"
+                          (click)="fillAndDownloadPdf(rd)"
+                          matTooltip="Remplir le PDF avec les informations de l'ancienne reponse et telecharger">
+                          <mat-spinner *ngIf="rd._fillProgress?.status === 'running'" diameter="16"></mat-spinner>
+                          <mat-icon *ngIf="rd._fillProgress?.status !== 'running'">picture_as_pdf</mat-icon>
+                          {{ rd._fillProgress?.status === 'running' ? 'Generation en cours...' : 'Telecharger PDF rempli' }}
+                        </button>
+                        <div *ngIf="rd._fillProgress?.status === 'running'" class="fill-progress-inline">
+                          <mat-progress-bar mode="determinate" [value]="rd._fillProgress!.progress"></mat-progress-bar>
+                          <span class="fill-progress-label">{{ rd._fillProgress!.message }} ({{ rd._fillProgress!.progress | number:'1.0-0' }}%)</span>
+                        </div>
+                        <div *ngIf="rd._fillProgress?.status === 'error'" class="fill-progress-error">
+                          <mat-icon>error_outline</mat-icon> {{ rd._fillProgress!.message }}
+                        </div>
+                      </ng-container>
                       <span class="deliverable-source" *ngIf="rd.rfp_source">
                         <mat-icon class="meta-icon">source</mat-icon> {{ rd.rfp_source }}
                       </span>
@@ -1415,6 +1433,11 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .reset-fill-btn mat-icon { font-size: 16px; width: 16px; height: 16px; margin-right: 4px; }
     .fill-excel-btn:disabled { opacity: 0.7; }
     .fill-excel-btn mat-icon { font-size: 16px; width: 16px; height: 16px; margin-right: 4px; }
+    .fill-progress-inline { width: 100%; margin-top: 4px; }
+    .fill-progress-inline mat-progress-bar { height: 6px; border-radius: 3px; }
+    .fill-progress-label { font-size: 11px; color: #666; margin-top: 2px; display: block; }
+    .fill-progress-error { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #c62828; margin-top: 4px; }
+    .fill-progress-error mat-icon { font-size: 16px; width: 16px; height: 16px; }
     .fill-content-panel { margin-top: 10px; box-shadow: none !important; border: 1px solid #e0e0e0; }
     .fill-content-preview { font-size: 13px; line-height: 1.7; color: #333; max-height: 500px; overflow-y: auto; padding: 8px 0; }
     ::ng-deep .fill-content-preview h2, ::ng-deep .fill-content-preview h3 { font-size: 15px; font-weight: 700; color: #1B3A5C; margin: 16px 0 8px 0; }
@@ -1792,6 +1815,10 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.stopBackupPolling();
     this.stopWordPolling();
     this.stopSoutenancePolling();
+    // Stop all per-document fill polls
+    for (const rd of this.completionDocs) {
+      this._stopFillDocPolling(rd);
+    }
     // Stop all per-chapter AI polls
     for (const sub of Object.values(this.aiPollSubs)) {
       sub.unsubscribe();
@@ -2553,9 +2580,31 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.redactionDocs = docs.filter(d => d.content_type === 'redaction');
         this.completionDocs = docs.filter(d => d.content_type === 'completion');
         this._refreshGroupedChapters();
+        // Resume fill-excel/fill-pdf polling for any running tasks
+        this._resumeFillDocPolling();
       },
       error: () => {},
     });
+  }
+
+  private _resumeFillDocPolling(): void {
+    for (const rd of this.completionDocs) {
+      if (rd._fillPollSub) continue; // already polling
+      const fmt = rd.expected_format;
+      const type: 'excel' | 'pdf' | null = (fmt === 'xlsx' || fmt === 'xls') ? 'excel' : fmt === 'pdf' ? 'pdf' : null;
+      if (!type) continue;
+      const statusFn = type === 'excel'
+        ? () => this.api.getFillExcelStatus(this.projectId, rd.id)
+        : () => this.api.getFillPdfStatus(this.projectId, rd.id);
+      statusFn().subscribe({
+        next: (status: any) => {
+          if (status.status === 'running') {
+            rd._fillProgress = status;
+            this._startFillDocPolling(rd, type);
+          }
+        },
+      });
+    }
   }
 
   detectDeliverables(): void {
@@ -2689,55 +2738,76 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
-  fillAndDownloadExcel(rd: any): void {
-    rd._fillingExcel = true;
-    this.snackBar.open('Generation de l\'Excel en cours (informations de l\'ancienne reponse)...', '', { duration: 60000 });
+  fillAndDownloadExcel(rd: ResponseDocument): void {
+    rd._fillProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement...' };
     this.api.fillExcelDocument(this.projectId, rd.id).subscribe({
-      next: (blob: Blob) => {
-        rd._fillingExcel = false;
-        this.snackBar.dismiss();
-        // Trigger browser download
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${rd.title.replace(/[^a-zA-Z0-9_-]/g, '_')}_rempli.xlsx`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-        this.snackBar.open('Excel rempli telecharge avec succes !', 'OK', { duration: 5000 });
-      },
+      next: () => this._startFillDocPolling(rd, 'excel'),
       error: (err) => {
-        rd._fillingExcel = false;
-        this.snackBar.dismiss();
-        this._showBlobError(err, 'Erreur lors de la generation de l\'Excel');
+        rd._fillProgress = { status: 'error', step: '', progress: 0, message: err.error?.detail || 'Erreur lancement Excel' };
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
       },
     });
   }
 
-  fillAndDownloadPdf(rd: any): void {
-    rd._fillingPdf = true;
-    this.snackBar.open('Generation du PDF en cours (informations de l\'ancienne reponse)...', '', { duration: 60000 });
+  fillAndDownloadPdf(rd: ResponseDocument): void {
+    rd._fillProgress = { status: 'running', step: 'starting', progress: 0, message: 'Lancement...' };
     this.api.fillPdfDocument(this.projectId, rd.id).subscribe({
-      next: (blob: Blob) => {
-        rd._fillingPdf = false;
-        this.snackBar.dismiss();
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = `${rd.title.replace(/[^a-zA-Z0-9_-]/g, '_')}_rempli.pdf`;
-        document.body.appendChild(a);
-        a.click();
-        document.body.removeChild(a);
-        window.URL.revokeObjectURL(url);
-        this.snackBar.open('PDF rempli telecharge avec succes !', 'OK', { duration: 5000 });
-      },
+      next: () => this._startFillDocPolling(rd, 'pdf'),
       error: (err) => {
-        rd._fillingPdf = false;
-        this.snackBar.dismiss();
-        this._showBlobError(err, 'Erreur lors de la generation du PDF');
+        rd._fillProgress = { status: 'error', step: '', progress: 0, message: err.error?.detail || 'Erreur lancement PDF' };
+        this.snackBar.open(err.error?.detail || 'Erreur', 'OK', { duration: 5000 });
       },
     });
+  }
+
+  private _startFillDocPolling(rd: ResponseDocument, type: 'excel' | 'pdf'): void {
+    this._stopFillDocPolling(rd);
+    const statusFn = type === 'excel'
+      ? () => this.api.getFillExcelStatus(this.projectId, rd.id)
+      : () => this.api.getFillPdfStatus(this.projectId, rd.id);
+    const downloadFn = type === 'excel'
+      ? () => this.api.downloadFilledExcel(this.projectId, rd.id)
+      : () => this.api.downloadFilledPdf(this.projectId, rd.id);
+    const ext = type === 'excel' ? 'xlsx' : 'pdf';
+
+    rd._fillPollSub = timer(0, 2000).pipe(
+      switchMap(() => statusFn())
+    ).subscribe({
+      next: (status: any) => {
+        rd._fillProgress = status;
+        if (status.status === 'completed') {
+          this._stopFillDocPolling(rd);
+          this.snackBar.open(status.message || 'Generation terminee, telechargement...', '', { duration: 5000 });
+          downloadFn().subscribe({
+            next: (blob: Blob) => {
+              const url = window.URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url;
+              a.download = `${rd.title.replace(/[^a-zA-Z0-9_-]/g, '_')}_rempli.${ext}`;
+              document.body.appendChild(a);
+              a.click();
+              document.body.removeChild(a);
+              window.URL.revokeObjectURL(url);
+              this.snackBar.open(`${ext.toUpperCase()} rempli telecharge !`, 'OK', { duration: 5000 });
+              this.loadResponseDocuments();
+            },
+            error: () => {
+              this.snackBar.open('Erreur telechargement du fichier', 'OK', { duration: 5000 });
+            },
+          });
+        } else if (status.status === 'error') {
+          this._stopFillDocPolling(rd);
+          this.snackBar.open(status.message || 'Erreur generation', 'OK', { duration: 8000 });
+        }
+      },
+    });
+  }
+
+  private _stopFillDocPolling(rd: ResponseDocument): void {
+    if (rd._fillPollSub) {
+      rd._fillPollSub.unsubscribe();
+      rd._fillPollSub = null;
+    }
   }
 
   /** Parse error detail from blob responses (responseType: 'blob' returns errors as Blob too). */
