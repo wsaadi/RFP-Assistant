@@ -470,6 +470,43 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       <span class="deliverable-source" *ngIf="rd.rfp_source">
                         <mat-icon class="meta-icon">source</mat-icon> {{ rd.rfp_source }}
                       </span>
+                      <button mat-button class="config-btn" (click)="rd._showConfig = !rd._showConfig"
+                        matTooltip="Configurer les documents sources et notes pour guider l'IA">
+                        <mat-icon>{{ rd._showConfig ? 'expand_less' : 'tune' }}</mat-icon>
+                        {{ rd._showConfig ? 'Masquer config' : 'Configurer sources & notes' }}
+                      </button>
+                    </div>
+                    <!-- Source documents + custom notes config -->
+                    <div *ngIf="rd._showConfig" class="completion-config-panel">
+                      <div class="config-section">
+                        <label class="config-label">
+                          <mat-icon>folder_open</mat-icon> Documents sources a exploiter
+                        </label>
+                        <p class="config-hint">Selectionnez les documents que l'IA doit utiliser pour completer ce livrable. Si aucun n'est selectionne, tous les documents seront utilises.</p>
+                        <div class="source-doc-list">
+                          <div *ngFor="let doc of documents" class="source-doc-item">
+                            <mat-checkbox
+                              [checked]="rd.source_document_ids?.includes(doc.id)"
+                              (change)="toggleSourceDocument(rd, doc.id, $event.checked)">
+                              <span class="source-doc-name">
+                                <mat-icon class="source-doc-icon">{{ fileIcon(doc.file_type) }}</mat-icon>
+                                {{ doc.original_filename }}
+                              </span>
+                              <span class="source-doc-category">({{ getCategoryLabel(doc.category) }})</span>
+                            </mat-checkbox>
+                          </div>
+                        </div>
+                      </div>
+                      <div class="config-section">
+                        <label class="config-label">
+                          <mat-icon>edit_note</mat-icon> Notes, idees et instructions pour l'IA
+                        </label>
+                        <p class="config-hint">Ajoutez des notes ou un prompt personnalise pour guider la completion par l'IA (ex: "Se referer au chapitre 3 du memoire technique", "Les renvois doivent pointer vers le memoire genere").</p>
+                        <textarea class="config-textarea" rows="4"
+                          [value]="rd.custom_notes || ''"
+                          (blur)="saveCustomNotes(rd, $event)"
+                          placeholder="Ex: Pour les renvois aux chapitres, se baser uniquement sur le memoire technique genere. Indiquer le numero de chapitre et le titre exact."></textarea>
+                      </div>
                     </div>
                     <!-- Fill content preview -->
                     <mat-expansion-panel *ngIf="rd.fill_content" class="fill-content-panel">
@@ -1439,6 +1476,30 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .fill-progress-label { font-size: 11px; color: #666; margin-top: 2px; display: block; }
     .fill-progress-error { display: flex; align-items: center; gap: 4px; font-size: 12px; color: #c62828; margin-top: 4px; }
     .fill-progress-error mat-icon { font-size: 16px; width: 16px; height: 16px; }
+    .config-btn { font-size: 11px !important; color: #5c6bc0 !important; min-width: auto !important; padding: 0 8px !important; line-height: 24px !important; height: 24px !important; }
+    .config-btn mat-icon { font-size: 14px; width: 14px; height: 14px; margin-right: 2px; }
+    .completion-config-panel {
+      background: #f5f5ff; border: 1px solid #c5cae9; border-radius: 8px;
+      padding: 16px; margin-top: 10px; margin-bottom: 8px;
+    }
+    .config-section { margin-bottom: 14px; }
+    .config-section:last-child { margin-bottom: 0; }
+    .config-label { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; color: #1B3A5C; margin-bottom: 4px; }
+    .config-label mat-icon { font-size: 18px; width: 18px; height: 18px; color: #5c6bc0; }
+    .config-hint { font-size: 11px; color: #777; margin: 0 0 8px 0; line-height: 1.4; }
+    .source-doc-list { max-height: 200px; overflow-y: auto; padding: 4px 0; }
+    .source-doc-item { padding: 2px 0; }
+    .source-doc-item mat-checkbox { font-size: 12px; }
+    .source-doc-name { display: inline-flex; align-items: center; gap: 4px; }
+    .source-doc-icon { font-size: 16px !important; width: 16px !important; height: 16px !important; color: #666; }
+    .source-doc-category { font-size: 11px; color: #999; margin-left: 4px; }
+    .config-textarea {
+      width: 100%; border: 1px solid #c5cae9; border-radius: 6px;
+      padding: 10px; font-size: 13px; font-family: inherit; resize: vertical;
+      background: #fff; color: #333; outline: none; transition: border-color 0.2s;
+    }
+    .config-textarea:focus { border-color: #5c6bc0; }
+    .config-textarea::placeholder { color: #aaa; font-style: italic; }
     .fill-content-panel { margin-top: 10px; box-shadow: none !important; border: 1px solid #e0e0e0; }
     .fill-content-preview { font-size: 13px; line-height: 1.7; color: #333; max-height: 500px; overflow-y: auto; padding: 8px 0; }
     ::ng-deep .fill-content-preview h2, ::ng-deep .fill-content-preview h3 { font-size: 15px; font-weight: 700; color: #1B3A5C; margin: 16px 0 8px 0; }
@@ -2743,6 +2804,40 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.snackBar.open('Erreur mise a jour', 'OK', { duration: 3000 });
       },
     });
+  }
+
+  toggleSourceDocument(rd: ResponseDocument, docId: string, checked: boolean): void {
+    if (!rd.source_document_ids) rd.source_document_ids = [];
+    if (checked) {
+      if (!rd.source_document_ids.includes(docId)) {
+        rd.source_document_ids = [...rd.source_document_ids, docId];
+      }
+    } else {
+      rd.source_document_ids = rd.source_document_ids.filter(id => id !== docId);
+    }
+    this.api.updateResponseDocument(this.projectId, rd.id, {
+      source_document_ids: rd.source_document_ids,
+    }).subscribe({
+      next: () => this.snackBar.open('Documents sources mis a jour', 'OK', { duration: 2000 }),
+      error: () => this.snackBar.open('Erreur mise a jour', 'OK', { duration: 3000 }),
+    });
+  }
+
+  saveCustomNotes(rd: ResponseDocument, event: Event): void {
+    const value = (event.target as HTMLTextAreaElement).value;
+    if (value === (rd.custom_notes || '')) return;
+    rd.custom_notes = value;
+    this.api.updateResponseDocument(this.projectId, rd.id, {
+      custom_notes: value,
+    }).subscribe({
+      next: () => this.snackBar.open('Notes sauvegardees', 'OK', { duration: 2000 }),
+      error: () => this.snackBar.open('Erreur sauvegarde notes', 'OK', { duration: 3000 }),
+    });
+  }
+
+  getCategoryLabel(category: string): string {
+    const cat = this.allCategories.find(c => c.value === category);
+    return cat ? cat.label : category;
   }
 
   fillAndDownloadExcel(rd: ResponseDocument): void {

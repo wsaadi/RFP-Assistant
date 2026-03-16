@@ -56,6 +56,14 @@ class ResponseDocument(Base):
         String(50), default="pending",
         comment="pending | generating | completed | error",
     )
+    source_document_ids: Mapped[list] = mapped_column(
+        JSON, default=list,
+        comment="List of Document UUIDs to use as context for AI completion (empty = all)",
+    )
+    custom_notes: Mapped[str] = mapped_column(
+        Text, default="",
+        comment="User notes, ideas and custom prompt to guide AI completion",
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
