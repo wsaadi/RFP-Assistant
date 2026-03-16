@@ -602,7 +602,48 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                 <mat-icon>delete_sweep</mat-icon>
                 Tout supprimer
               </button>
+              <button mat-raised-button (click)="showAddChapterForm = !showAddChapterForm"
+                *ngIf="chapters.length > 0 || responseDocuments.length > 0">
+                <mat-icon>add</mat-icon>
+                Ajouter un chapitre
+              </button>
             </div>
+
+            <!-- Add chapter form -->
+            <mat-card *ngIf="showAddChapterForm" class="add-chapter-card">
+              <h3><mat-icon>add_circle</mat-icon> Nouveau chapitre</h3>
+              <mat-form-field appearance="outline" class="full-width">
+                <mat-label>Titre du chapitre</mat-label>
+                <input matInput [(ngModel)]="newChapterTitle" placeholder="Ex: Methodologie de deploiement">
+              </mat-form-field>
+              <mat-form-field appearance="outline" class="full-width">
+                <mat-label>Description (optionnel)</mat-label>
+                <textarea matInput [(ngModel)]="newChapterDescription" rows="2"
+                  placeholder="Ex: Decrire la methodologie et les etapes de deploiement de la solution"></textarea>
+              </mat-form-field>
+              <mat-form-field appearance="outline" *ngIf="redactionDocs.length > 1">
+                <mat-label>Document associe</mat-label>
+                <mat-select [(ngModel)]="newChapterDocId">
+                  <mat-option [value]="null">Aucun (projet general)</mat-option>
+                  <mat-option *ngFor="let rd of redactionDocs" [value]="rd.id">{{ rd.title }}</mat-option>
+                </mat-select>
+              </mat-form-field>
+              <div class="add-chapter-actions">
+                <button mat-raised-button color="primary" (click)="addNewChapter()"
+                  [disabled]="!newChapterTitle?.trim() || addingChapter">
+                  <mat-spinner *ngIf="addingChapter" diameter="16"></mat-spinner>
+                  <mat-icon *ngIf="!addingChapter">check</mat-icon>
+                  Creer le chapitre
+                </button>
+                <button mat-raised-button color="primary" (click)="addNewChapter(true)"
+                  [disabled]="!newChapterTitle?.trim() || addingChapter"
+                  matTooltip="Creer et generer le contenu avec l'IA">
+                  <mat-icon>auto_awesome</mat-icon>
+                  Creer et generer
+                </button>
+                <button mat-button (click)="showAddChapterForm = false">Annuler</button>
+              </div>
+            </mat-card>
 
             <!-- Document selector for structure generation -->
             <mat-card *ngIf="redactionDocs.length > 0" class="doc-selector-card">
@@ -896,6 +937,36 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                       </div>
                       <!-- Sub-chapter content preview (truncated for performance) -->
                       <div *ngIf="sub.content" class="ch-content-preview sub-content-preview" [innerHTML]="getCachedMarkdown(sub.id, sub.content)"></div>
+                    </div>
+                  </div>
+
+                  <div class="add-sub-actions">
+                    <button mat-button (click)="showAddSubChapter[ch.id] = !showAddSubChapter[ch.id]">
+                      <mat-icon>playlist_add</mat-icon> Ajouter un sous-chapitre
+                    </button>
+                  </div>
+                  <!-- Add sub-chapter form -->
+                  <div *ngIf="showAddSubChapter[ch.id]" class="add-sub-form">
+                    <mat-form-field appearance="outline" class="full-width">
+                      <mat-label>Titre du sous-chapitre</mat-label>
+                      <input matInput [(ngModel)]="newSubChapterTitle[ch.id]" placeholder="Ex: Planning de mise en oeuvre">
+                    </mat-form-field>
+                    <mat-form-field appearance="outline" class="full-width">
+                      <mat-label>Description (optionnel)</mat-label>
+                      <textarea matInput [(ngModel)]="newSubChapterDescription[ch.id]" rows="2"
+                        placeholder="Decrire le contenu attendu..."></textarea>
+                    </mat-form-field>
+                    <div class="add-chapter-actions">
+                      <button mat-raised-button color="primary" (click)="addNewSubChapter(ch)"
+                        [disabled]="!newSubChapterTitle[ch.id]?.trim() || addingChapter">
+                        <mat-icon>check</mat-icon> Creer
+                      </button>
+                      <button mat-raised-button color="primary" (click)="addNewSubChapter(ch, true)"
+                        [disabled]="!newSubChapterTitle[ch.id]?.trim() || addingChapter"
+                        matTooltip="Creer et generer le contenu avec l'IA">
+                        <mat-icon>auto_awesome</mat-icon> Creer et generer
+                      </button>
+                      <button mat-button (click)="showAddSubChapter[ch.id] = false">Annuler</button>
                     </div>
                   </div>
                 </mat-expansion-panel>
@@ -1781,6 +1852,33 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .cost-link-icon { font-size: 36px; width: 36px; height: 36px; color: #1976d2; }
     .cost-link-content h3 { margin: 0; color: #1B3A5C; font-size: 16px; }
     .cost-link-content p { margin: 4px 0 0; color: #888; font-size: 13px; }
+    .add-chapter-card {
+      margin: 12px 0;
+      padding: 16px;
+      border-left: 4px solid #1976d2;
+    }
+    .add-chapter-card h3 {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin: 0 0 12px 0;
+      color: #1976d2;
+    }
+    .add-chapter-actions {
+      display: flex;
+      gap: 8px;
+      margin-top: 8px;
+    }
+    .add-sub-actions {
+      margin: 8px 0;
+    }
+    .add-sub-form {
+      margin: 8px 0 16px 24px;
+      padding: 12px;
+      border-left: 3px solid #ff6f00;
+      background: #fff8e1;
+      border-radius: 4px;
+    }
   `],
 })
 export class ProjectDashboardComponent implements OnInit, OnDestroy {
@@ -1863,6 +1961,16 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   isAdmin = false;
   isProjectOwner = false;
   canManageProject = false;  // owner or admin
+
+  // Add chapter/sub-chapter
+  showAddChapterForm = false;
+  newChapterTitle = '';
+  newChapterDescription = '';
+  newChapterDocId: string | null = null;
+  showAddSubChapter: Record<string, boolean> = {};
+  newSubChapterTitle: Record<string, string> = {};
+  newSubChapterDescription: Record<string, string> = {};
+  addingChapter = false;
 
   // Content Reuse Stats
   reuseStats: any = null;
@@ -2666,6 +2774,79 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       }
     }
     return ids;
+  }
+
+  addNewChapter(generateAfter = false): void {
+    const title = this.newChapterTitle?.trim();
+    if (!title) return;
+    this.addingChapter = true;
+
+    let maxOrder = 0;
+    for (const group of this.groupedChapters) {
+      for (const ch of group.chapters) {
+        if (ch.order > maxOrder) maxOrder = ch.order;
+      }
+    }
+
+    const data: any = {
+      title: title,
+      description: this.newChapterDescription || '',
+      order: maxOrder + 1,
+      chapter_type: 'chapter',
+    };
+
+    this.api.createChapter(this.projectId, data).subscribe({
+      next: (newChapter) => {
+        this.addingChapter = false;
+        this.showAddChapterForm = false;
+        this.newChapterTitle = '';
+        this.newChapterDescription = '';
+        this.newChapterDocId = null;
+        this.snackBar.open('Chapitre cree avec succes', 'OK', { duration: 3000 });
+        this.loadAll();
+        if (generateAfter) {
+          setTimeout(() => this.aiGenerate(newChapter.id), 1500);
+        }
+      },
+      error: (err) => {
+        this.addingChapter = false;
+        this.snackBar.open(err.error?.detail || 'Erreur creation chapitre', 'OK', { duration: 5000 });
+      }
+    });
+  }
+
+  addNewSubChapter(parentChapter: Chapter, generateAfter = false): void {
+    const title = this.newSubChapterTitle[parentChapter.id]?.trim();
+    if (!title) return;
+    this.addingChapter = true;
+
+    const maxOrder = parentChapter.children?.length ? Math.max(...parentChapter.children.map(c => c.order)) + 1 : 0;
+
+    const data: any = {
+      title: title,
+      description: this.newSubChapterDescription[parentChapter.id] || '',
+      parent_id: parentChapter.id,
+      order: maxOrder,
+      chapter_type: 'sub_chapter',
+    };
+
+    this.api.createChapter(this.projectId, data).subscribe({
+      next: (newChapter) => {
+        this.addingChapter = false;
+        this.showAddSubChapter[parentChapter.id] = false;
+        this.newSubChapterTitle[parentChapter.id] = '';
+        this.newSubChapterDescription[parentChapter.id] = '';
+        this.snackBar.open('Sous-chapitre cree avec succes', 'OK', { duration: 3000 });
+        this.loadAll();
+        if (generateAfter) {
+          setTimeout(() => this.aiGenerate(newChapter.id), 1500);
+        }
+      },
+      error: (err) => {
+        this.addingChapter = false;
+        this.snackBar.open(err.error?.detail || 'Erreur creation sous-chapitre', 'OK', { duration: 5000 });
+      }
+    });
   }
 
   deleteSingleChapter(chapterId: string): void {

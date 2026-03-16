@@ -11,6 +11,7 @@ class ChapterCreate(BaseModel):
     order: int = 0
     chapter_type: str = "chapter"
     rfp_requirement: str = ""
+    word_limit: int = 0
 
 
 class ChapterUpdate(BaseModel):
@@ -22,6 +23,7 @@ class ChapterUpdate(BaseModel):
     notes: Optional[List[dict]] = None
     improvement_axes: Optional[List[dict]] = None
     rfp_requirement: Optional[str] = None
+    word_limit: Optional[int] = None
 
 
 class ChapterOut(BaseModel):
@@ -42,6 +44,7 @@ class ChapterOut(BaseModel):
     rfp_requirement: str
     is_prefilled: bool
     numbering: str
+    word_limit: int = 0
     created_at: datetime
     updated_at: datetime
     children: List["ChapterOut"] = []

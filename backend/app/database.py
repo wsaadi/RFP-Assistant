@@ -391,3 +391,13 @@ async def init_db():
                 ))
             except Exception:
                 logger.debug("response_documents.%s column already exists", col_name)
+
+    # Add word_limit column on chapters
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text(
+                "ALTER TABLE chapters ADD COLUMN IF NOT EXISTS "
+                "word_limit INTEGER DEFAULT 0"
+            ))
+        except Exception:
+            logger.debug("chapters.word_limit column already exists")
