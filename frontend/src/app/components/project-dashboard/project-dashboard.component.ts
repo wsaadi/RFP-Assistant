@@ -185,7 +185,35 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
         <mat-tab label="Documents">
           <div class="tab-content">
             <div class="upload-section">
-              <h3>Charger des documents</h3>
+              <div class="upload-header">
+                <h3>Charger des documents</h3>
+                <button mat-button (click)="showCategoryManager = !showCategoryManager" class="manage-cats-btn">
+                  <mat-icon>tune</mat-icon>
+                  {{ showCategoryManager ? 'Masquer' : 'Gerer les categories' }}
+                </button>
+              </div>
+              <!-- Category manager -->
+              <div *ngIf="showCategoryManager" class="category-manager">
+                <p class="cat-manager-hint">Activez ou desactivez les categories de documents pour ce projet :</p>
+                <div class="cat-manager-list">
+                  <div *ngFor="let cat of allCategories" class="cat-manager-item"
+                    [class.cat-enabled]="isCategoryEnabled(cat.value)"
+                    [class.cat-disabled]="!isCategoryEnabled(cat.value)">
+                    <mat-checkbox [checked]="isCategoryEnabled(cat.value)"
+                      (change)="toggleProjectCategory(cat.value, $event.checked)"
+                      [color]="'primary'">
+                    </mat-checkbox>
+                    <mat-icon [style.color]="cat.color">{{ cat.icon }}</mat-icon>
+                    <div class="cat-manager-info">
+                      <strong>{{ cat.label }}</strong>
+                      <span>{{ cat.desc }}</span>
+                    </div>
+                    <mat-chip *ngIf="docsByCategory[cat.value]?.length" size="small">
+                      {{ docsByCategory[cat.value].length }} doc(s)
+                    </mat-chip>
+                  </div>
+                </div>
+              </div>
               <div class="upload-categories">
                 <mat-card class="upload-card" *ngFor="let cat of categories"
                   (dragover)="onDragOver($event)" (drop)="onDrop($event, cat.value)"
@@ -1864,6 +1892,31 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .cost-link-icon { font-size: 36px; width: 36px; height: 36px; color: #1976d2; }
     .cost-link-content h3 { margin: 0; color: #1B3A5C; font-size: 16px; }
     .cost-link-content p { margin: 4px 0 0; color: #888; font-size: 13px; }
+    .upload-header { display: flex; align-items: center; justify-content: space-between; }
+    .upload-header h3 { margin: 0; }
+    .manage-cats-btn { font-size: 13px; color: #666; }
+    .category-manager {
+      margin: 8px 0 16px;
+      padding: 12px 16px;
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      background: #fafafa;
+    }
+    .cat-manager-hint { margin: 0 0 10px; font-size: 13px; color: #666; }
+    .cat-manager-list { display: flex; flex-direction: column; gap: 6px; }
+    .cat-manager-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 10px;
+      border-radius: 6px;
+      transition: background 0.2s;
+    }
+    .cat-manager-item.cat-enabled { background: #fff; }
+    .cat-manager-item.cat-disabled { background: #f5f5f5; opacity: 0.7; }
+    .cat-manager-info { flex: 1; display: flex; flex-direction: column; }
+    .cat-manager-info strong { font-size: 13px; }
+    .cat-manager-info span { font-size: 11px; color: #888; }
     .add-chapter-card {
       margin: 12px 0;
       padding: 16px;
@@ -1990,6 +2043,9 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   isAdmin = false;
   isProjectOwner = false;
   canManageProject = false;  // owner or admin
+
+  // Category management
+  showCategoryManager = false;
 
   // Add chapter/sub-chapter
   showAddChapterForm = false;
@@ -2125,6 +2181,35 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       sub.unsubscribe();
     }
     this.aiPollSubs = {};
+  }
+
+  isCategoryEnabled(value: string): boolean {
+    return this.project?.enabled_categories?.includes(value) ?? false;
+  }
+
+  toggleProjectCategory(value: string, checked: boolean): void {
+    if (!this.project) return;
+    let cats = [...(this.project.enabled_categories || [])];
+    if (checked) {
+      if (!cats.includes(value)) cats.push(value);
+    } else {
+      // Don't allow removing a category that has documents
+      if (this.docsByCategory[value]?.length) {
+        this.snackBar.open('Impossible : cette categorie contient des documents. Supprimez-les d\'abord.', 'OK', { duration: 4000 });
+        return;
+      }
+      cats = cats.filter(c => c !== value);
+    }
+    this.api.updateProject(this.projectId, { enabled_categories: cats }).subscribe({
+      next: (p) => {
+        this.project = p;
+        this.categories = this.allCategories.filter(c => p.enabled_categories.includes(c.value));
+        this.snackBar.open(checked ? 'Categorie activee' : 'Categorie desactivee', 'OK', { duration: 2000 });
+      },
+      error: (err) => {
+        this.snackBar.open(err.error?.detail || 'Erreur mise a jour categories', 'OK', { duration: 4000 });
+      }
+    });
   }
 
   loadAll(): void {
