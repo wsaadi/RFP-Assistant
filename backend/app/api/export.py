@@ -44,6 +44,8 @@ class PreviewChatRequest(BaseModel):
 class DocumentQARequest(BaseModel):
     question: str = Field(..., min_length=1, max_length=2000)
     document_ids: Optional[List[str]] = Field(None, description="Optional list of document UUIDs to restrict search scope")
+    categories: Optional[List[str]] = Field(None, description="Optional list of document categories to restrict search scope")
+    include_generated_content: bool = Field(False, description="Whether to include generated chapters as context")
 
 
 @router.post("/{project_id}/word")
@@ -1027,21 +1029,55 @@ async def document_qa(
 
     ai_service = create_ai_service(config)
 
-    # Semantic search — optionally restricted to selected documents
-    search_results = VectorService.search(
-        str(project_id),
-        request.question,
-        top_k=25,
-        document_ids=request.document_ids,
-    )
+    # Semantic search — optionally restricted to selected documents/categories
+    # If categories are selected, search within each category and merge results
+    if request.categories and not request.document_ids:
+        all_search_results = []
+        for cat in request.categories:
+            cat_results = VectorService.search(
+                str(project_id),
+                request.question,
+                top_k=15,
+                category_filter=cat,
+            )
+            all_search_results.extend(cat_results)
+        # Sort by score descending and take top 25
+        all_search_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+        search_results = all_search_results[:25]
+    else:
+        search_results = VectorService.search(
+            str(project_id),
+            request.question,
+            top_k=25,
+            document_ids=request.document_ids,
+        )
 
     # Filter out low-relevance results (cosine similarity < 0.3)
     search_results = [r for r in search_results if r.get("score", 0) >= 0.3]
 
-    if not search_results:
-        if request.document_ids:
+    # Load generated content if requested
+    generated_context = ""
+    if request.include_generated_content:
+        from ..models.chapter import Chapter
+        from ..services.anonymization_service import AnonymizationService
+        ch_result = await db.execute(
+            select(Chapter)
+            .where(Chapter.project_id == project_id)
+            .where(Chapter.content != "")
+            .order_by(Chapter.order)
+        )
+        chapters = ch_result.scalars().all()
+        if chapters:
+            ch_parts = []
+            for ch in chapters:
+                ch_parts.append(f"## {ch.title}\n{ch.content[:3000]}")
+            generated_context = "\n\n".join(ch_parts)
+
+    if not search_results and not generated_context:
+        has_filters = request.document_ids or request.categories
+        if has_filters:
             return {
-                "answer": "Je n'ai trouve aucune information pertinente dans les documents selectionnes pour repondre a cette question. Essayez de reformuler votre question ou de selectionner d'autres documents.",
+                "answer": "Je n'ai trouve aucune information pertinente dans les sources selectionnees pour repondre a cette question. Essayez de reformuler votre question ou de selectionner d'autres sources.",
                 "sources": [],
             }
         return {
@@ -1098,13 +1134,36 @@ async def document_qa(
                     "excerpt": content[:200],
                 })
 
+    # Append generated content if requested
+    if generated_context:
+        context_parts.append(
+            f"[Source: Contenu genere | Chapitres rediges | Reponse en cours]\n{generated_context}"
+        )
+        sources.append({
+            "document_name": "Contenu genere (chapitres)",
+            "category": "generated",
+            "category_label": "Contenu genere",
+            "page_number": 0,
+            "score": 1.0,
+            "excerpt": generated_context[:200],
+        })
+
     context_text = "\n\n---\n\n".join(context_parts)
 
     # Build document scope description for the prompt
     doc_scope = ""
-    if request.document_ids:
-        doc_names_in_scope = list(doc_groups.keys())
-        doc_scope = f"\n\nIMPORTANT: L'utilisateur a restreint la recherche aux documents suivants : {', '.join(doc_names_in_scope)}. Concentre ta reponse sur ces documents uniquement."
+    if request.document_ids or request.categories:
+        scope_parts = []
+        if request.categories:
+            scope_parts.append(f"categories: {', '.join(request.categories)}")
+        if request.document_ids:
+            doc_names_in_scope = list(doc_groups.keys())
+            scope_parts.append(f"documents: {', '.join(doc_names_in_scope)}")
+        if request.include_generated_content:
+            scope_parts.append("contenu genere (chapitres rediges)")
+        doc_scope = f"\n\nIMPORTANT: L'utilisateur a restreint la recherche aux sources suivantes : {'; '.join(scope_parts)}. Concentre ta reponse sur ces sources uniquement."
+    elif request.include_generated_content:
+        doc_scope = "\n\nIMPORTANT: L'utilisateur a demande d'inclure le contenu genere (chapitres rediges) dans la recherche. Utilise aussi ces informations pour repondre."
 
     system_prompt = f"""Tu es un assistant expert en analyse de documents pour les appels d'offres.
 L'utilisateur te pose des questions sur les documents charges dans le projet.
@@ -1125,6 +1184,7 @@ Vocabulaire de categorie:
 - "Nouvel AO" / "cahier des charges" = documents de categorie "Nouvel AO"
 - "Notre Reponse" = documents de categorie "Notre Reponse"
 - "Inspiration" = documents d'inspiration / references
+- "Contenu genere" = chapitres rediges par l'IA dans le cadre de la reponse en cours
 
 Mise en forme:
 - Utilise le markdown : titres (##), listes, **gras** pour les points cles.

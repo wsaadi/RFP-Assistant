@@ -376,10 +376,12 @@ async def init_db():
         except Exception:
             logger.debug("content_reuse_results index already exists")
 
-    # ── source_document_ids + custom_notes on response_documents ──
+    # ── source_document_ids, source_categories, include_generated_content, custom_notes on response_documents ──
     async with engine.begin() as conn:
         for col_name, col_type in {
             "source_document_ids": "JSON DEFAULT '[]'",
+            "source_categories": "JSON DEFAULT '[]'",
+            "include_generated_content": "BOOLEAN DEFAULT false",
             "custom_notes": "TEXT DEFAULT ''",
         }.items():
             try:

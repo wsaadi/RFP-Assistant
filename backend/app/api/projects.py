@@ -806,14 +806,7 @@ async def _get_all_chunks_anonymized_by_category(
 async def _get_chunks_anonymized_by_document_ids(
     db: AsyncSession, project_id: uuid.UUID, document_ids: list[str]
 ) -> str:
-    """Get pre-anonymized chunks for a specific set of document IDs.
-
-    Used when the user has selected specific source documents for a completion-type
-    deliverable, instead of loading all documents from a category.
-    """
-    from sqlalchemy import cast
-    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-
+    """Get pre-anonymized chunks for a specific set of document IDs."""
     doc_uuids = [uuid.UUID(did) for did in document_ids]
     result = await db.execute(
         select(DocumentChunk, Document.original_filename)
@@ -840,6 +833,66 @@ async def _get_chunks_anonymized_by_document_ids(
             parts.append(f"\n--- {section} ---\n")
         parts.append(text)
     return "\n\n".join(parts)
+
+
+async def _get_chunks_anonymized_by_categories(
+    db: AsyncSession, project_id: uuid.UUID, categories: list[str]
+) -> str:
+    """Get pre-anonymized chunks for multiple document categories."""
+    from ..models.document import DocumentCategory
+    cat_enums = []
+    for c in categories:
+        try:
+            cat_enums.append(DocumentCategory(c))
+        except ValueError:
+            continue
+    if not cat_enums:
+        return ""
+    result = await db.execute(
+        select(DocumentChunk, Document.original_filename)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.project_id == project_id)
+        .where(Document.category.in_(cat_enums))
+        .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
+    )
+    rows = result.all()
+    parts = []
+    current_doc = None
+    current_section = None
+    for chunk, doc_name in rows:
+        text = (chunk.anonymized_content or chunk.content or "").strip()
+        if not text:
+            continue
+        if doc_name != current_doc:
+            current_doc = doc_name
+            current_section = None
+            parts.append(f"\n\n=== DOCUMENT: {doc_name} ===\n")
+        section = chunk.section_title or ""
+        if section and section != current_section:
+            current_section = section
+            parts.append(f"\n--- {section} ---\n")
+        parts.append(text)
+    return "\n\n".join(parts)
+
+
+async def _get_generated_chapters_context(
+    db: AsyncSession, project_id: uuid.UUID
+) -> str:
+    """Get anonymized generated chapter content for use as context."""
+    _anon = AnonymizationService.apply_existing_mappings
+    result = await db.execute(
+        select(Chapter)
+        .where(Chapter.project_id == project_id)
+        .where(Chapter.content != "")
+        .order_by(Chapter.order)
+    )
+    chapters = result.scalars().all()
+    parts = ["\n\n=== CONTENU GÉNÉRÉ (CHAPITRES RÉDIGÉS) ===\n"]
+    for ch in chapters:
+        anon_title = await _anon(ch.title, project_id, db)
+        anon_content = await _anon(ch.content, project_id, db)
+        parts.append(f"## {anon_title}\n{anon_content}")
+    return "\n\n".join(parts) if len(parts) > 1 else ""
 
 
 async def _get_image_analyses_by_category(
@@ -1922,7 +1975,7 @@ async def update_response_document(
         raise HTTPException(status_code=404, detail="Document non trouvé")
 
     for field in ["title", "description", "expected_format", "content_type", "is_selected", "order",
-                   "source_document_ids", "custom_notes"]:
+                   "source_document_ids", "source_categories", "include_generated_content", "custom_notes"]:
         value = getattr(request, field, None)
         if value is not None:
             # Convert string values to proper enums for SQLAlchemy
@@ -2141,6 +2194,8 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                     "description": await _anon(doc.description or "", project_id, db),
                     "expected_format": doc.expected_format.value,
                     "source_document_ids": doc.source_document_ids or [],
+                    "source_categories": doc.source_categories or [],
+                    "include_generated_content": doc.include_generated_content or False,
                     "custom_notes": doc.custom_notes or "",
                 })
 
@@ -2167,14 +2222,29 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 chapter_parts_list.append(f"## {anon_ch_t}\n{anon_ch_c}")
             chapter_context = "\n\n".join(chapter_parts_list)
 
-            # Pre-load custom context for docs that have specific source_document_ids
+            # Pre-load generated chapters context if any doc needs it
+            generated_context = ""
+            needs_generated = any(d["include_generated_content"] for d in docs_data)
+            if needs_generated:
+                generated_context = await _get_generated_chapters_context(db, project_id)
+
+            # Pre-load custom context for docs that have specific source selections
             per_doc_context = {}
             for doc_data in docs_data:
                 src_ids = doc_data["source_document_ids"]
-                if src_ids:
-                    per_doc_context[doc_data["id"]] = await _get_chunks_anonymized_by_document_ids(
-                        db, project_id, src_ids
-                    )
+                src_cats = doc_data["source_categories"]
+                has_custom_sources = bool(src_ids or src_cats)
+                if has_custom_sources:
+                    parts = []
+                    if src_cats:
+                        parts.append(await _get_chunks_anonymized_by_categories(
+                            db, project_id, src_cats
+                        ))
+                    if src_ids:
+                        parts.append(await _get_chunks_anonymized_by_document_ids(
+                            db, project_id, src_ids
+                        ))
+                    per_doc_context[doc_data["id"]] = "\n\n".join(p for p in parts if p)
         # DB released
 
         import time
@@ -2203,15 +2273,16 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 })
 
             async with sem:
-                # Use per-doc source context if user selected specific documents,
+                # Use per-doc source context if user selected specific documents/categories,
                 # otherwise fall back to the default (all OLD_RESPONSE + chapters)
                 doc_id = doc_data["id"]
                 if doc_id in per_doc_context:
                     doc_context = per_doc_context[doc_id]
-                    if chapter_context:
-                        doc_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
                 else:
                     doc_context = default_combined_context
+                # Append generated chapters if requested for this doc
+                if doc_data.get("include_generated_content") and generated_context:
+                    doc_context += "\n\n" + generated_context
 
                 fill_content = await ai_service.generate_fill_content(
                     document_title=doc_data["title"],
@@ -5428,7 +5499,10 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
 
             doc_title = resp_doc.title or ""
             doc_source_ids = resp_doc.source_document_ids or []
+            doc_source_cats = resp_doc.source_categories or []
+            doc_include_generated = resp_doc.include_generated_content or False
             doc_custom_notes = resp_doc.custom_notes or ""
+            has_custom_sources = bool(doc_source_ids or doc_source_cats)
             _update("loading", 5, f"Chargement: {doc_title}")
 
             docs_result = await db.execute(
@@ -5464,11 +5538,20 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
         async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # If user selected specific source documents, load only those
-            if doc_source_ids:
-                anon_context = await _get_chunks_anonymized_by_document_ids(
-                    db, project_id, doc_source_ids
-                )
+            # If user selected specific source categories/documents, load only those
+            if has_custom_sources:
+                parts = []
+                if doc_source_cats:
+                    parts.append(await _get_chunks_anonymized_by_categories(
+                        db, project_id, doc_source_cats
+                    ))
+                if doc_source_ids:
+                    parts.append(await _get_chunks_anonymized_by_document_ids(
+                        db, project_id, doc_source_ids
+                    ))
+                if doc_include_generated:
+                    parts.append(await _get_generated_chapters_context(db, project_id))
+                anon_context = "\n\n".join(p for p in parts if p)
                 anon_new_rfp = await _get_all_chunks_anonymized_by_category(
                     db, project_id, DocumentCategory.NEW_RFP
                 )
@@ -5519,6 +5602,13 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                     f"=== {label} ===\n{relevant_context}\n\n"
                     f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
                 )
+
+        # Append generated chapters if requested (and not already included via custom sources)
+        if doc_include_generated and not has_custom_sources:
+            async with task_session() as db:
+                gen_ctx = await _get_generated_chapters_context(db, project_id)
+            if gen_ctx:
+                old_response_with_context += "\n\n" + gen_ctx
 
         # ── Phase 3: AI generation (NO DB held) ──
         _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")
@@ -6017,7 +6107,10 @@ async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: 
 
             doc_title = resp_doc.title or ""
             doc_source_ids = resp_doc.source_document_ids or []
+            doc_source_cats = resp_doc.source_categories or []
+            doc_include_generated = resp_doc.include_generated_content or False
             doc_custom_notes = resp_doc.custom_notes or ""
+            has_custom_sources = bool(doc_source_ids or doc_source_cats)
             _update("loading", 5, f"Chargement: {doc_title}")
 
             docs_result = await db.execute(
@@ -6055,11 +6148,20 @@ async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: 
         async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # If user selected specific source documents, load only those
-            if doc_source_ids:
-                anon_context = await _get_chunks_anonymized_by_document_ids(
-                    db, project_id, doc_source_ids
-                )
+            # If user selected specific source categories/documents, load only those
+            if has_custom_sources:
+                parts = []
+                if doc_source_cats:
+                    parts.append(await _get_chunks_anonymized_by_categories(
+                        db, project_id, doc_source_cats
+                    ))
+                if doc_source_ids:
+                    parts.append(await _get_chunks_anonymized_by_document_ids(
+                        db, project_id, doc_source_ids
+                    ))
+                if doc_include_generated:
+                    parts.append(await _get_generated_chapters_context(db, project_id))
+                anon_context = "\n\n".join(p for p in parts if p)
                 anon_new_rfp = await _get_all_chunks_anonymized_by_category(
                     db, project_id, DocumentCategory.NEW_RFP
                 )
@@ -6071,7 +6173,6 @@ async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: 
                 anon_context = None
 
         if anon_context is not None:
-            # User selected specific source documents — use that content directly
             old_response_with_context = anon_context
         else:
             # Vector search (no DB needed)
@@ -6090,6 +6191,13 @@ async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: 
                     f"=== EXTRAITS PERTINENTS DE L'ANCIENNE RÉPONSE ===\n{relevant_context}\n\n"
                     f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
                 )
+
+        # Append generated chapters if requested (and not already included via custom sources)
+        if doc_include_generated and not has_custom_sources:
+            async with task_session() as db:
+                gen_ctx = await _get_generated_chapters_context(db, project_id)
+            if gen_ctx:
+                old_response_with_context += "\n\n" + gen_ctx
 
         # ── Phase 4: AI generation (NO DB held) ──
         _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")

@@ -570,10 +570,16 @@ export class ApiService {
     return this.http.post(`${this.baseUrl}/export/${projectId}/preview-chat-cancel`, {});
   }
 
-  documentQA(projectId: string, question: string, documentIds?: string[]): Observable<{ answer: string; sources: { document_name: string; category: string; category_label: string; page_number: number; score: number; excerpt: string }[] }> {
+  documentQA(projectId: string, question: string, documentIds?: string[], categories?: string[], includeGenerated?: boolean): Observable<{ answer: string; sources: { document_name: string; category: string; category_label: string; page_number: number; score: number; excerpt: string }[] }> {
     const body: any = { question };
     if (documentIds && documentIds.length > 0) {
       body.document_ids = documentIds;
+    }
+    if (categories && categories.length > 0) {
+      body.categories = categories;
+    }
+    if (includeGenerated) {
+      body.include_generated_content = true;
     }
     return this.http.post<any>(`${this.baseUrl}/export/${projectId}/document-qa`, body);
   }

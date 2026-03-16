@@ -480,22 +480,59 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <div *ngIf="rd._showConfig" class="completion-config-panel">
                       <div class="config-section">
                         <label class="config-label">
-                          <mat-icon>folder_open</mat-icon> Documents sources a exploiter
+                          <mat-icon>folder_open</mat-icon> Sources a exploiter
                         </label>
-                        <p class="config-hint">Selectionnez les documents que l'IA doit utiliser pour completer ce livrable. Si aucun n'est selectionne, tous les documents seront utilises.</p>
-                        <div class="source-doc-list">
-                          <div *ngFor="let doc of documents" class="source-doc-item">
+                        <p class="config-hint">Selectionnez les sources que l'IA doit utiliser. Si rien n'est selectionne, tous les documents seront utilises par defaut.</p>
+
+                        <!-- Category-level selection -->
+                        <div class="source-categories">
+                          <div *ngFor="let cat of categories" class="source-cat-item">
                             <mat-checkbox
-                              [checked]="rd.source_document_ids?.includes(doc.id)"
-                              (change)="toggleSourceDocument(rd, doc.id, $event.checked)">
-                              <span class="source-doc-name">
-                                <mat-icon class="source-doc-icon">{{ fileIcon(doc.file_type) }}</mat-icon>
-                                {{ doc.original_filename }}
+                              [checked]="rd.source_categories?.includes(cat.value)"
+                              (change)="toggleSourceCategory(rd, cat.value, $event.checked)">
+                              <span class="source-cat-label">
+                                <mat-icon [style.color]="cat.color">{{ cat.icon }}</mat-icon>
+                                {{ cat.label }}
+                                <span class="source-cat-count">({{ getDocCountByCategory(cat.value) }} doc{{ getDocCountByCategory(cat.value) > 1 ? 's' : '' }})</span>
                               </span>
-                              <span class="source-doc-category">({{ getCategoryLabel(doc.category) }})</span>
+                            </mat-checkbox>
+                          </div>
+                          <!-- Generated content option -->
+                          <div class="source-cat-item source-cat-generated">
+                            <mat-checkbox
+                              [checked]="rd.include_generated_content"
+                              (change)="toggleGeneratedContent(rd, $event.checked)">
+                              <span class="source-cat-label">
+                                <mat-icon style="color: #00897b">auto_awesome</mat-icon>
+                                Contenu genere (chapitres rediges)
+                                <span class="source-cat-count">({{ chapters.length }} chapitre{{ chapters.length > 1 ? 's' : '' }})</span>
+                              </span>
                             </mat-checkbox>
                           </div>
                         </div>
+
+                        <!-- Individual document selection (collapsible) -->
+                        <details class="source-doc-details">
+                          <summary class="source-doc-summary">
+                            <mat-icon>description</mat-icon> Selection document par document
+                            <span *ngIf="rd.source_document_ids?.length" class="source-doc-badge">{{ rd.source_document_ids.length }} selectionne(s)</span>
+                          </summary>
+                          <div class="source-doc-list">
+                            <div *ngFor="let cat of categories" class="source-doc-group">
+                              <div class="source-doc-group-header">{{ cat.label }}</div>
+                              <div *ngFor="let doc of getDocsByCategory(cat.value)" class="source-doc-item">
+                                <mat-checkbox
+                                  [checked]="rd.source_document_ids?.includes(doc.id)"
+                                  (change)="toggleSourceDocument(rd, doc.id, $event.checked)">
+                                  <span class="source-doc-name">
+                                    <mat-icon class="source-doc-icon">{{ fileIcon(doc.file_type) }}</mat-icon>
+                                    {{ doc.original_filename }}
+                                  </span>
+                                </mat-checkbox>
+                              </div>
+                            </div>
+                          </div>
+                        </details>
                       </div>
                       <div class="config-section">
                         <label class="config-label">
@@ -1113,25 +1150,58 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
               <div class="qa-doc-filter">
                 <button mat-stroked-button (click)="toggleQaDocFilter()" class="qa-filter-btn">
                   <mat-icon>filter_list</mat-icon>
-                  {{ qaSelectedDocIds.length > 0 ? qaSelectedDocIds.length + ' document(s) selectionne(s)' : 'Tous les documents' }}
+                  {{ getQaFilterLabel() }}
                   <mat-icon>{{ qaDocFilterOpen ? 'expand_less' : 'expand_more' }}</mat-icon>
                 </button>
-                <button *ngIf="qaSelectedDocIds.length > 0" mat-icon-button matTooltip="Reinitialiser le filtre" (click)="clearQaDocSelection()">
+                <button *ngIf="qaSelectedDocIds.length > 0 || qaSelectedCategories.length > 0 || qaIncludeGenerated" mat-icon-button matTooltip="Reinitialiser le filtre" (click)="clearQaDocSelection()">
                   <mat-icon>clear</mat-icon>
                 </button>
               </div>
 
               <div *ngIf="qaDocFilterOpen" class="qa-doc-list">
-                <div *ngFor="let doc of getCompletedDocuments()" class="qa-doc-item"
-                  [class.qa-doc-selected]="isQaDocSelected(doc.id)"
-                  (click)="toggleQaDocSelection(doc.id)">
-                  <mat-checkbox [checked]="isQaDocSelected(doc.id)" (click)="$event.stopPropagation()" (change)="toggleQaDocSelection(doc.id)"></mat-checkbox>
-                  <mat-icon class="qa-doc-type-icon">description</mat-icon>
-                  <div class="qa-doc-item-info">
-                    <span class="qa-doc-item-name">{{ doc.original_filename }}</span>
-                    <mat-chip class="qa-doc-cat-chip">{{ doc.category }}</mat-chip>
+                <!-- Category-level selection -->
+                <div class="qa-cat-section">
+                  <div class="qa-cat-header">Par categorie</div>
+                  <div class="qa-cat-items">
+                    <div *ngFor="let cat of categories" class="qa-cat-item">
+                      <mat-checkbox
+                        [checked]="qaSelectedCategories.includes(cat.value)"
+                        (change)="toggleQaCategorySelection(cat.value)">
+                        <span class="qa-cat-label">
+                          <mat-icon [style.color]="cat.color" class="qa-cat-icon">{{ cat.icon }}</mat-icon>
+                          {{ cat.label }}
+                          <span class="qa-cat-count">({{ getDocCountByCategory(cat.value) }})</span>
+                        </span>
+                      </mat-checkbox>
+                    </div>
+                    <div class="qa-cat-item qa-cat-generated">
+                      <mat-checkbox [checked]="qaIncludeGenerated" (change)="qaIncludeGenerated = !qaIncludeGenerated">
+                        <span class="qa-cat-label">
+                          <mat-icon style="color: #00897b" class="qa-cat-icon">auto_awesome</mat-icon>
+                          Contenu genere (chapitres rediges)
+                          <span class="qa-cat-count">({{ chapters.length }})</span>
+                        </span>
+                      </mat-checkbox>
+                    </div>
                   </div>
                 </div>
+                <!-- Individual documents -->
+                <details class="qa-doc-details">
+                  <summary class="qa-doc-summary">
+                    <mat-icon>description</mat-icon> Selection document par document
+                    <span *ngIf="qaSelectedDocIds.length" class="qa-doc-badge">{{ qaSelectedDocIds.length }}</span>
+                  </summary>
+                  <div *ngFor="let doc of getCompletedDocuments()" class="qa-doc-item"
+                    [class.qa-doc-selected]="isQaDocSelected(doc.id)"
+                    (click)="toggleQaDocSelection(doc.id)">
+                    <mat-checkbox [checked]="isQaDocSelected(doc.id)" (click)="$event.stopPropagation()" (change)="toggleQaDocSelection(doc.id)"></mat-checkbox>
+                    <mat-icon class="qa-doc-type-icon">description</mat-icon>
+                    <div class="qa-doc-item-info">
+                      <span class="qa-doc-item-name">{{ doc.original_filename }}</span>
+                      <mat-chip class="qa-doc-cat-chip">{{ getCategoryLabel(doc.category) }}</mat-chip>
+                    </div>
+                  </div>
+                </details>
                 <div *ngIf="getCompletedDocuments().length === 0" class="qa-doc-empty">
                   Aucun document traite disponible.
                 </div>
@@ -1487,12 +1557,23 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .config-label { display: flex; align-items: center; gap: 6px; font-weight: 600; font-size: 13px; color: #1B3A5C; margin-bottom: 4px; }
     .config-label mat-icon { font-size: 18px; width: 18px; height: 18px; color: #5c6bc0; }
     .config-hint { font-size: 11px; color: #777; margin: 0 0 8px 0; line-height: 1.4; }
-    .source-doc-list { max-height: 200px; overflow-y: auto; padding: 4px 0; }
-    .source-doc-item { padding: 2px 0; }
+    .source-categories { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 10px; }
+    .source-cat-item { padding: 2px 0; }
+    .source-cat-item mat-checkbox { font-size: 13px; }
+    .source-cat-label { display: inline-flex; align-items: center; gap: 4px; }
+    .source-cat-label mat-icon { font-size: 18px; width: 18px; height: 18px; }
+    .source-cat-count { font-size: 11px; color: #999; }
+    .source-cat-generated { border-top: 1px dashed #c5cae9; padding-top: 6px; margin-top: 2px; width: 100%; }
+    .source-doc-details { margin-top: 8px; }
+    .source-doc-summary { font-size: 12px; color: #5c6bc0; cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 4px 0; }
+    .source-doc-summary mat-icon { font-size: 16px; width: 16px; height: 16px; }
+    .source-doc-badge { background: #5c6bc0; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 10px; margin-left: 4px; }
+    .source-doc-group-header { font-size: 11px; font-weight: 600; color: #1B3A5C; margin: 8px 0 4px 0; text-transform: uppercase; letter-spacing: 0.5px; }
+    .source-doc-list { max-height: 250px; overflow-y: auto; padding: 4px 0; }
+    .source-doc-item { padding: 2px 0 2px 8px; }
     .source-doc-item mat-checkbox { font-size: 12px; }
     .source-doc-name { display: inline-flex; align-items: center; gap: 4px; }
     .source-doc-icon { font-size: 16px !important; width: 16px !important; height: 16px !important; color: #666; }
-    .source-doc-category { font-size: 11px; color: #999; margin-left: 4px; }
     .config-textarea {
       width: 100%; border: 1px solid #c5cae9; border-radius: 6px;
       padding: 10px; font-size: 13px; font-family: inherit; resize: vertical;
@@ -1624,8 +1705,21 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .qa-doc-filter { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
     .qa-filter-btn { font-size: 13px; color: #1B3A5C; border-color: #c5cae9; display: flex; align-items: center; gap: 6px; }
     .qa-filter-btn mat-icon { font-size: 18px; width: 18px; height: 18px; }
-    .qa-doc-list { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 8px; margin-bottom: 16px; max-height: 250px; overflow-y: auto; }
-    .qa-doc-item { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
+    .qa-doc-list { background: #fafafa; border: 1px solid #e0e0e0; border-radius: 8px; padding: 12px; margin-bottom: 16px; max-height: 350px; overflow-y: auto; }
+    .qa-cat-section { margin-bottom: 10px; }
+    .qa-cat-header { font-size: 11px; font-weight: 600; color: #1B3A5C; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 6px; }
+    .qa-cat-items { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+    .qa-cat-item { padding: 2px 0; }
+    .qa-cat-item mat-checkbox { font-size: 13px; }
+    .qa-cat-label { display: inline-flex; align-items: center; gap: 4px; }
+    .qa-cat-icon { font-size: 18px !important; width: 18px !important; height: 18px !important; }
+    .qa-cat-count { font-size: 11px; color: #999; }
+    .qa-cat-generated { border-top: 1px dashed #e0e0e0; padding-top: 6px; margin-top: 2px; width: 100%; }
+    .qa-doc-details { margin-top: 8px; }
+    .qa-doc-summary { font-size: 12px; color: #5c6bc0; cursor: pointer; display: flex; align-items: center; gap: 4px; padding: 4px 0; }
+    .qa-doc-summary mat-icon { font-size: 16px; width: 16px; height: 16px; }
+    .qa-doc-badge { background: #5c6bc0; color: #fff; font-size: 10px; padding: 1px 6px; border-radius: 10px; margin-left: 4px; }
+    .qa-doc-item { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; cursor: pointer; transition: background 0.15s; }
     .qa-doc-item:hover { background: #e8eaf6; }
     .qa-doc-selected { background: #e3f2fd; }
     .qa-doc-type-icon { font-size: 18px; width: 18px; height: 18px; color: #1976d2; }
@@ -1760,6 +1854,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   qaInput = '';
   qaLoading = false;
   qaSelectedDocIds: string[] = [];
+  qaSelectedCategories: string[] = [];
+  qaIncludeGenerated = false;
   qaDocFilterOpen = false;
 
   // Project members & access control
@@ -2806,6 +2902,33 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     });
   }
 
+  toggleSourceCategory(rd: ResponseDocument, category: string, checked: boolean): void {
+    if (!rd.source_categories) rd.source_categories = [];
+    if (checked) {
+      if (!rd.source_categories.includes(category)) {
+        rd.source_categories = [...rd.source_categories, category];
+      }
+    } else {
+      rd.source_categories = rd.source_categories.filter(c => c !== category);
+    }
+    this.api.updateResponseDocument(this.projectId, rd.id, {
+      source_categories: rd.source_categories,
+    }).subscribe({
+      next: () => this.snackBar.open('Categories sources mises a jour', 'OK', { duration: 2000 }),
+      error: () => this.snackBar.open('Erreur mise a jour', 'OK', { duration: 3000 }),
+    });
+  }
+
+  toggleGeneratedContent(rd: ResponseDocument, checked: boolean): void {
+    rd.include_generated_content = checked;
+    this.api.updateResponseDocument(this.projectId, rd.id, {
+      include_generated_content: checked,
+    }).subscribe({
+      next: () => this.snackBar.open('Contenu genere ' + (checked ? 'inclus' : 'exclus'), 'OK', { duration: 2000 }),
+      error: () => this.snackBar.open('Erreur mise a jour', 'OK', { duration: 3000 }),
+    });
+  }
+
   toggleSourceDocument(rd: ResponseDocument, docId: string, checked: boolean): void {
     if (!rd.source_document_ids) rd.source_document_ids = [];
     if (checked) {
@@ -2821,6 +2944,10 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       next: () => this.snackBar.open('Documents sources mis a jour', 'OK', { duration: 2000 }),
       error: () => this.snackBar.open('Erreur mise a jour', 'OK', { duration: 3000 }),
     });
+  }
+
+  getDocCountByCategory(category: string): number {
+    return this.documents.filter(d => d.category === category).length;
   }
 
   saveCustomNotes(rd: ResponseDocument, event: Event): void {
@@ -3399,7 +3526,12 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.qaInput = '';
     this.qaLoading = true;
 
-    this.api.documentQA(this.projectId, question, this.qaSelectedDocIds.length > 0 ? this.qaSelectedDocIds : undefined).subscribe({
+    this.api.documentQA(
+      this.projectId, question,
+      this.qaSelectedDocIds.length > 0 ? this.qaSelectedDocIds : undefined,
+      this.qaSelectedCategories.length > 0 ? this.qaSelectedCategories : undefined,
+      this.qaIncludeGenerated || undefined,
+    ).subscribe({
       next: (res) => {
         this.qaLoading = false;
         this.qaMessages.push({
@@ -3442,12 +3574,33 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     }
   }
 
+  toggleQaCategorySelection(category: string): void {
+    const idx = this.qaSelectedCategories.indexOf(category);
+    if (idx >= 0) {
+      this.qaSelectedCategories.splice(idx, 1);
+    } else {
+      this.qaSelectedCategories.push(category);
+    }
+  }
+
   isQaDocSelected(docId: string): boolean {
     return this.qaSelectedDocIds.includes(docId);
   }
 
   clearQaDocSelection(): void {
     this.qaSelectedDocIds = [];
+    this.qaSelectedCategories = [];
+    this.qaIncludeGenerated = false;
+  }
+
+  getQaFilterLabel(): string {
+    const parts: string[] = [];
+    if (this.qaSelectedCategories.length > 0) {
+      parts.push(this.qaSelectedCategories.map(c => this.getCategoryLabel(c)).join(', '));
+    }
+    if (this.qaIncludeGenerated) parts.push('Contenu genere');
+    if (this.qaSelectedDocIds.length > 0) parts.push(this.qaSelectedDocIds.length + ' doc(s)');
+    return parts.length > 0 ? parts.join(' + ') : 'Tous les documents';
   }
 
   getCompletedDocuments(): DocumentInfo[] {
