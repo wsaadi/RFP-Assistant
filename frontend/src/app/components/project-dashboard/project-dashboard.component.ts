@@ -1892,15 +1892,20 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
       border-radius: 4px;
     }
     .word-limit-field {
-      width: 110px;
+      width: 90px;
       margin-left: 8px;
-      font-size: 12px;
+      font-size: 11px;
     }
-    .word-limit-field ::ng-deep .mat-mdc-form-field-infix { padding-top: 6px !important; padding-bottom: 6px !important; min-height: 32px !important; }
-    .word-limit-field ::ng-deep .mdc-text-field--outlined { height: 36px !important; }
+    .word-limit-field ::ng-deep .mat-mdc-form-field-infix { padding: 4px 0 !important; min-height: unset !important; }
+    .word-limit-field ::ng-deep .mdc-text-field--outlined { height: 28px !important; }
     .word-limit-field ::ng-deep .mat-mdc-form-field-subscript-wrapper { display: none; }
-    .word-limit-field input { text-align: center; }
-    .sub-word-limit { width: 90px; margin-left: 4px; }
+    .word-limit-field ::ng-deep .mdc-floating-label { font-size: 11px !important; top: 14px !important; }
+    .word-limit-field ::ng-deep .mdc-floating-label--float-above { transform: translateY(-22px) scale(0.75) !important; }
+    .word-limit-field ::ng-deep .mdc-notched-outline .mdc-notched-outline__leading,
+    .word-limit-field ::ng-deep .mdc-notched-outline .mdc-notched-outline__trailing,
+    .word-limit-field ::ng-deep .mdc-notched-outline .mdc-notched-outline__notch { border-color: #ccc !important; }
+    .word-limit-field input { text-align: center; font-size: 12px !important; }
+    .sub-word-limit { width: 80px; margin-left: 4px; }
   `],
 })
 export class ProjectDashboardComponent implements OnInit, OnDestroy {
