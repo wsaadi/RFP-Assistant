@@ -2245,7 +2245,8 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
             for doc_data in docs_data:
                 src_ids = doc_data["source_document_ids"]
                 src_cats = doc_data["source_categories"]
-                has_custom_sources = bool(src_ids or src_cats)
+                inc_gen = doc_data["include_generated_content"]
+                has_custom_sources = bool(src_ids or src_cats or inc_gen)
                 if has_custom_sources:
                     parts = []
                     if src_cats:
@@ -2256,6 +2257,8 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                         parts.append(await _get_chunks_anonymized_by_document_ids(
                             db, project_id, src_ids
                         ))
+                    if inc_gen and generated_context:
+                        parts.append(generated_context)
                     per_doc_context[doc_data["id"]] = "\n\n".join(p for p in parts if p)
         # DB released
 
@@ -2285,16 +2288,13 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 })
 
             async with sem:
-                # Use per-doc source context if user selected specific documents/categories,
+                # Use per-doc source context if user selected specific sources,
                 # otherwise fall back to the default (all OLD_RESPONSE + chapters)
                 doc_id = doc_data["id"]
                 if doc_id in per_doc_context:
                     doc_context = per_doc_context[doc_id]
                 else:
                     doc_context = default_combined_context
-                # Append generated chapters if requested for this doc
-                if doc_data.get("include_generated_content") and generated_context:
-                    doc_context += "\n\n" + generated_context
 
                 fill_content = await ai_service.generate_fill_content(
                     document_title=doc_data["title"],
@@ -5514,7 +5514,7 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
             doc_source_cats = resp_doc.source_categories or []
             doc_include_generated = resp_doc.include_generated_content or False
             doc_custom_notes = resp_doc.custom_notes or ""
-            has_custom_sources = bool(doc_source_ids or doc_source_cats)
+            has_custom_sources = bool(doc_source_ids or doc_source_cats or doc_include_generated)
             _update("loading", 5, f"Chargement: {doc_title}")
 
             docs_result = await db.execute(
@@ -5550,7 +5550,7 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
         async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            # If user selected specific source categories/documents, load only those
+            # If user selected specific sources (categories, docs, or generated content), load only those
             if has_custom_sources:
                 parts = []
                 if doc_source_cats:
@@ -5614,13 +5614,6 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                     f"=== {label} ===\n{relevant_context}\n\n"
                     f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
                 )
-
-        # Append generated chapters if requested (and not already included via custom sources)
-        if doc_include_generated and not has_custom_sources:
-            async with task_session() as db:
-                gen_ctx = await _get_generated_chapters_context(db, project_id)
-            if gen_ctx:
-                old_response_with_context += "\n\n" + gen_ctx
 
         # ── Phase 3: AI generation (NO DB held) ──
         _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")
@@ -6122,7 +6115,7 @@ async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: 
             doc_source_cats = resp_doc.source_categories or []
             doc_include_generated = resp_doc.include_generated_content or False
             doc_custom_notes = resp_doc.custom_notes or ""
-            has_custom_sources = bool(doc_source_ids or doc_source_cats)
+            has_custom_sources = bool(doc_source_ids or doc_source_cats or doc_include_generated)
             _update("loading", 5, f"Chargement: {doc_title}")
 
             docs_result = await db.execute(
@@ -6203,13 +6196,6 @@ async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: 
                     f"=== EXTRAITS PERTINENTS DE L'ANCIENNE RÉPONSE ===\n{relevant_context}\n\n"
                     f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
                 )
-
-        # Append generated chapters if requested (and not already included via custom sources)
-        if doc_include_generated and not has_custom_sources:
-            async with task_session() as db:
-                gen_ctx = await _get_generated_chapters_context(db, project_id)
-            if gen_ctx:
-                old_response_with_context += "\n\n" + gen_ctx
 
         # ── Phase 4: AI generation (NO DB held) ──
         _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")
