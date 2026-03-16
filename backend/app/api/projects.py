@@ -803,6 +803,45 @@ async def _get_all_chunks_anonymized_by_category(
     return "\n\n".join(parts)
 
 
+async def _get_chunks_anonymized_by_document_ids(
+    db: AsyncSession, project_id: uuid.UUID, document_ids: list[str]
+) -> str:
+    """Get pre-anonymized chunks for a specific set of document IDs.
+
+    Used when the user has selected specific source documents for a completion-type
+    deliverable, instead of loading all documents from a category.
+    """
+    from sqlalchemy import cast
+    from sqlalchemy.dialects.postgresql import UUID as PG_UUID
+
+    doc_uuids = [uuid.UUID(did) for did in document_ids]
+    result = await db.execute(
+        select(DocumentChunk, Document.original_filename)
+        .join(Document, Document.id == DocumentChunk.document_id)
+        .where(Document.project_id == project_id)
+        .where(Document.id.in_(doc_uuids))
+        .order_by(Document.original_filename, DocumentChunk.page_number, DocumentChunk.chunk_index)
+    )
+    rows = result.all()
+    parts = []
+    current_doc = None
+    current_section = None
+    for chunk, doc_name in rows:
+        text = (chunk.anonymized_content or chunk.content or "").strip()
+        if not text:
+            continue
+        if doc_name != current_doc:
+            current_doc = doc_name
+            current_section = None
+            parts.append(f"\n\n=== DOCUMENT: {doc_name} ===\n")
+        section = chunk.section_title or ""
+        if section and section != current_section:
+            current_section = section
+            parts.append(f"\n--- {section} ---\n")
+        parts.append(text)
+    return "\n\n".join(parts)
+
+
 async def _get_image_analyses_by_category(
     db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory
 ) -> str:
@@ -1882,7 +1921,8 @@ async def update_response_document(
     if not doc:
         raise HTTPException(status_code=404, detail="Document non trouvé")
 
-    for field in ["title", "description", "expected_format", "content_type", "is_selected", "order"]:
+    for field in ["title", "description", "expected_format", "content_type", "is_selected", "order",
+                   "source_document_ids", "custom_notes"]:
         value = getattr(request, field, None)
         if value is not None:
             # Convert string values to proper enums for SQLAlchemy
@@ -2100,10 +2140,13 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                     "title": await _anon(doc.title or "", project_id, db),
                     "description": await _anon(doc.description or "", project_id, db),
                     "expected_format": doc.expected_format.value,
+                    "source_document_ids": doc.source_document_ids or [],
+                    "custom_notes": doc.custom_notes or "",
                 })
 
             _update("loading", 10, f"{total} document(s) à compléter...")
 
+            # Default context: load all NEW_RFP + OLD_RESPONSE for docs without specific source selection
             anon_new_rfp, anon_old_response = await asyncio.gather(
                 _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
                 _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
@@ -2123,12 +2166,22 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 anon_ch_c = await _anon(ch.content[:2000], project_id, db)
                 chapter_parts_list.append(f"## {anon_ch_t}\n{anon_ch_c}")
             chapter_context = "\n\n".join(chapter_parts_list)
+
+            # Pre-load custom context for docs that have specific source_document_ids
+            per_doc_context = {}
+            for doc_data in docs_data:
+                src_ids = doc_data["source_document_ids"]
+                if src_ids:
+                    per_doc_context[doc_data["id"]] = await _get_chunks_anonymized_by_document_ids(
+                        db, project_id, src_ids
+                    )
         # DB released
 
         import time
-        combined_context = anon_old_response
+        # Build default combined context (for docs without specific source selection)
+        default_combined_context = anon_old_response
         if chapter_context:
-            combined_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
+            default_combined_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
 
         # ── Phase 2: Parallel AI generation (NO DB connection held) ──
         sem = asyncio.Semaphore(10)
@@ -2150,16 +2203,27 @@ async def _run_fill_deliverables(project_id: uuid.UUID, workspace_id: uuid.UUID)
                 })
 
             async with sem:
+                # Use per-doc source context if user selected specific documents,
+                # otherwise fall back to the default (all OLD_RESPONSE + chapters)
+                doc_id = doc_data["id"]
+                if doc_id in per_doc_context:
+                    doc_context = per_doc_context[doc_id]
+                    if chapter_context:
+                        doc_context += "\n\n--- CONTENU DÉJÀ RÉDIGÉ ---\n\n" + chapter_context
+                else:
+                    doc_context = default_combined_context
+
                 fill_content = await ai_service.generate_fill_content(
                     document_title=doc_data["title"],
                     document_description=doc_data["description"],
                     expected_format=doc_data["expected_format"],
                     new_rfp_content=anon_new_rfp,
-                    old_response_content=combined_context,
+                    old_response_content=doc_context,
                     on_progress=_on_fill_progress,
                     ai_context=proj_ai_context,
                     company_name=proj_company_name,
                     client_name=proj_client_name,
+                    custom_notes=doc_data.get("custom_notes", ""),
                 )
                 _fill_done += 1
                 return (doc_data["id"], fill_content)
@@ -5363,6 +5427,8 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                 return
 
             doc_title = resp_doc.title or ""
+            doc_source_ids = resp_doc.source_document_ids or []
+            doc_custom_notes = resp_doc.custom_notes or ""
             _update("loading", 5, f"Chargement: {doc_title}")
 
             docs_result = await db.execute(
@@ -5398,46 +5464,61 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
         async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            anon_new_rfp, anon_old_response = await asyncio.gather(
-                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
-                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
-            )
+            # If user selected specific source documents, load only those
+            if doc_source_ids:
+                anon_context = await _get_chunks_anonymized_by_document_ids(
+                    db, project_id, doc_source_ids
+                )
+                anon_new_rfp = await _get_all_chunks_anonymized_by_category(
+                    db, project_id, DocumentCategory.NEW_RFP
+                )
+                anon_old_response = ""
+            else:
+                anon_new_rfp, anon_old_response = await asyncio.gather(
+                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+                )
+                anon_context = None
 
-        # Vector search (no DB needed)
-        _update("searching", 25, "Recherche de contenu pertinent...")
-        title_lower = doc_title.lower()
-        conformity_keywords = ["rgpd", "conformit", "gdpr", "protection des données",
-                               "questionnaire", "grille", "annexe", "déclaration",
-                               "engagement", "certification", "audit", "sécurité",
-                               "environnement", "rse", "social", "qualité"]
-        is_conformity_doc = any(kw in title_lower for kw in conformity_keywords)
-
-        if is_conformity_doc:
-            search_query = (
-                f"{doc_title} conformité RGPD protection données personnelles "
-                "politique sécurité mesures techniques organisationnelles DPO registre "
-                "sous-traitant transfert consentement droits personnes concernées"
-            )
+        # Vector search (no DB needed) — skip if user selected specific source docs
+        if anon_context is not None:
+            # User selected specific source documents — use that content directly
+            old_response_with_context = anon_context
         else:
-            search_query = (
-                f"prix unitaire tarif {doc_title} BPU bordereau montant "
-                "coût forfait taux journalier"
-            )
+            _update("searching", 25, "Recherche de contenu pertinent...")
+            title_lower = doc_title.lower()
+            conformity_keywords = ["rgpd", "conformit", "gdpr", "protection des données",
+                                   "questionnaire", "grille", "annexe", "déclaration",
+                                   "engagement", "certification", "audit", "sécurité",
+                                   "environnement", "rse", "social", "qualité"]
+            is_conformity_doc = any(kw in title_lower for kw in conformity_keywords)
 
-        from ..tasks.chapter_tasks import _vector_search
-        relevant_chunks = _vector_search(str(project_id), search_query, top_k=20, category_filter="old_response")
-        relevant_context = "\n\n".join([
-            f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
-            for c in relevant_chunks
-        ])
+            if is_conformity_doc:
+                search_query = (
+                    f"{doc_title} conformité RGPD protection données personnelles "
+                    "politique sécurité mesures techniques organisationnelles DPO registre "
+                    "sous-traitant transfert consentement droits personnes concernées"
+                )
+            else:
+                search_query = (
+                    f"prix unitaire tarif {doc_title} BPU bordereau montant "
+                    "coût forfait taux journalier"
+                )
 
-        old_response_with_context = anon_old_response
-        if relevant_context:
-            label = "EXTRAITS PERTINENTS" if is_conformity_doc else "EXTRAITS PERTINENTS SUR LES PRIX"
-            old_response_with_context = (
-                f"=== {label} ===\n{relevant_context}\n\n"
-                f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
-            )
+            from ..tasks.chapter_tasks import _vector_search
+            relevant_chunks = _vector_search(str(project_id), search_query, top_k=20, category_filter="old_response")
+            relevant_context = "\n\n".join([
+                f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
+                for c in relevant_chunks
+            ])
+
+            old_response_with_context = anon_old_response
+            if relevant_context:
+                label = "EXTRAITS PERTINENTS" if is_conformity_doc else "EXTRAITS PERTINENTS SUR LES PRIX"
+                old_response_with_context = (
+                    f"=== {label} ===\n{relevant_context}\n\n"
+                    f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
+                )
 
         # ── Phase 3: AI generation (NO DB held) ──
         _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")
@@ -5450,6 +5531,7 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
             excel_structure=excel_structure,
             new_rfp_content=anon_new_rfp,
             old_response_content=old_response_with_context,
+            custom_notes=doc_custom_notes,
         )
         logger.info("fill-excel %s: AI returned %d cell entries", doc_title, len(fill_data))
 
@@ -5934,6 +6016,8 @@ async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: 
                 return
 
             doc_title = resp_doc.title or ""
+            doc_source_ids = resp_doc.source_document_ids or []
+            doc_custom_notes = resp_doc.custom_notes or ""
             _update("loading", 5, f"Chargement: {doc_title}")
 
             docs_result = await db.execute(
@@ -5971,27 +6055,41 @@ async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: 
         async with task_session() as db:
             ai_service = await _get_ai_service(workspace_id, db)
 
-            anon_new_rfp, anon_old_response = await asyncio.gather(
-                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
-                _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
-            )
+            # If user selected specific source documents, load only those
+            if doc_source_ids:
+                anon_context = await _get_chunks_anonymized_by_document_ids(
+                    db, project_id, doc_source_ids
+                )
+                anon_new_rfp = await _get_all_chunks_anonymized_by_category(
+                    db, project_id, DocumentCategory.NEW_RFP
+                )
+            else:
+                anon_new_rfp, anon_old_response = await asyncio.gather(
+                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+                )
+                anon_context = None
 
-        # Vector search (no DB needed)
-        _update("searching", 25, "Recherche de contenu pertinent...")
-        search_query = f"{doc_title} formulaire informations candidat société entreprise"
-        from ..tasks.chapter_tasks import _vector_search
-        relevant_chunks = _vector_search(str(project_id), search_query, top_k=15, category_filter="old_response")
-        relevant_context = "\n\n".join([
-            f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
-            for c in relevant_chunks
-        ])
+        if anon_context is not None:
+            # User selected specific source documents — use that content directly
+            old_response_with_context = anon_context
+        else:
+            # Vector search (no DB needed)
+            _update("searching", 25, "Recherche de contenu pertinent...")
+            search_query = f"{doc_title} formulaire informations candidat société entreprise"
+            from ..tasks.chapter_tasks import _vector_search
+            relevant_chunks = _vector_search(str(project_id), search_query, top_k=15, category_filter="old_response")
+            relevant_context = "\n\n".join([
+                f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
+                for c in relevant_chunks
+            ])
 
-        old_response_with_context = anon_old_response
-        if relevant_context:
-            old_response_with_context = (
-                f"=== EXTRAITS PERTINENTS DE L'ANCIENNE RÉPONSE ===\n{relevant_context}\n\n"
-                f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
-            )
+            old_response_with_context = anon_old_response
+            if relevant_context:
+                old_response_with_context = (
+                    f"=== EXTRAITS PERTINENTS DE L'ANCIENNE RÉPONSE ===\n{relevant_context}\n\n"
+                    f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
+                )
 
         # ── Phase 4: AI generation (NO DB held) ──
         _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")
@@ -6001,6 +6099,7 @@ async def _run_fill_pdf(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id: 
             new_rfp_content=anon_new_rfp,
             old_response_content=old_response_with_context,
             has_form_fields=pdf_zones["has_form_fields"],
+            custom_notes=doc_custom_notes,
         )
         logger.info("fill-pdf %s: AI returned %d fill entries", doc_title, len(fill_data))
 

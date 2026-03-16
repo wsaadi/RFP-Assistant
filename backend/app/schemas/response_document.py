@@ -16,6 +16,8 @@ class ResponseDocumentOut(BaseModel):
     rfp_source: str
     fill_content: str = ""
     fill_status: str = "pending"
+    source_document_ids: List[str] = []
+    custom_notes: str = ""
     created_at: datetime
     updated_at: datetime
     chapter_count: int = 0
@@ -30,6 +32,8 @@ class ResponseDocumentUpdate(BaseModel):
     content_type: Optional[str] = None
     is_selected: Optional[bool] = None
     order: Optional[int] = None
+    source_document_ids: Optional[List[str]] = None
+    custom_notes: Optional[str] = None
 
 
 class BulkUpdateSelectionRequest(BaseModel):

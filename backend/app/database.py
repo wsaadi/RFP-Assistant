@@ -375,3 +375,17 @@ async def init_db():
             ))
         except Exception:
             logger.debug("content_reuse_results index already exists")
+
+    # ── source_document_ids + custom_notes on response_documents ──
+    async with engine.begin() as conn:
+        for col_name, col_type in {
+            "source_document_ids": "JSON DEFAULT '[]'",
+            "custom_notes": "TEXT DEFAULT ''",
+        }.items():
+            try:
+                await conn.execute(text(
+                    f"ALTER TABLE response_documents ADD COLUMN IF NOT EXISTS "
+                    f"{col_name} {col_type}"
+                ))
+            except Exception:
+                logger.debug("response_documents.%s column already exists", col_name)

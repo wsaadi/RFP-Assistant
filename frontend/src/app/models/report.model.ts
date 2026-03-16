@@ -234,6 +234,8 @@ export interface ResponseDocument {
   rfp_source: string;
   fill_content: string;
   fill_status: 'pending' | 'generating' | 'completed' | 'error';
+  source_document_ids: string[];
+  custom_notes: string;
   created_at: string;
   updated_at: string;
   chapter_count: number;
@@ -241,6 +243,7 @@ export interface ResponseDocument {
   _fillingPdf?: boolean;
   _fillProgress?: { status: string; step: string; progress: number; message: string };
   _fillPollSub?: any;
+  _showConfig?: boolean;
 }
 
 export interface DetectDeliverablesStatus {

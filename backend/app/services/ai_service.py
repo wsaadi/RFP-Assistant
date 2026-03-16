@@ -1238,6 +1238,7 @@ Décris cette image et suggère des tags et chapitres pertinents."""
         ai_context: str = "",
         company_name: str = "",
         client_name: str = "",
+        custom_notes: str = "",
     ) -> str:
         """Generate fill-in content/instructions for a completion-type document (BPU, DQE, forms, etc.).
 
@@ -1292,9 +1293,13 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
 
         parts = [f"CONTENU DE L'APPEL D'OFFRES:\n{new_rfp_content[:60000]}"]
         if old_response_content:
-            parts.append(f"ANCIENNE RÉPONSE (pour référence):\n{old_response_content[:30000]}")
+            parts.append(f"DOCUMENTS DE RÉFÉRENCE (pour compléter le document):\n{old_response_content[:30000]}")
         if ai_context:
             parts.append(f"CONTEXTE DE RÉDACTION (fourni par l'utilisateur pour orienter la réponse):\n{ai_context}")
+        if custom_notes:
+            parts.append(
+                f"⚠️ NOTES ET INSTRUCTIONS SPÉCIFIQUES DE L'UTILISATEUR (À PRENDRE EN COMPTE EN PRIORITÉ):\n{custom_notes}"
+            )
 
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += (
@@ -1313,6 +1318,7 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
         excel_structure: str,
         new_rfp_content: str,
         old_response_content: str = "",
+        custom_notes: str = "",
     ) -> List[Dict]:
         """Generate structured JSON data to fill an Excel document from old response data.
 
@@ -1378,10 +1384,14 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
         parts = []
         if old_response_content:
             parts.append(
-                f"⚠️ ANCIENNE RÉPONSE (CONTIENT LES INFORMATIONS À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
+                f"⚠️ DOCUMENTS DE RÉFÉRENCE (CONTIENT LES INFORMATIONS À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
             )
         parts.append(f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure[:40000]}")
         parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:20000]}")
+        if custom_notes:
+            parts.append(
+                f"⚠️ NOTES ET INSTRUCTIONS SPÉCIFIQUES DE L'UTILISATEUR (À PRENDRE EN COMPTE EN PRIORITÉ):\n{custom_notes}"
+            )
 
         user_prompt = "\n\n---\n\n".join(parts)
         if is_conformity and not is_pricing:
@@ -1421,6 +1431,7 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
         new_rfp_content: str,
         old_response_content: str = "",
         has_form_fields: bool = False,
+        custom_notes: str = "",
     ) -> List[Dict]:
         """Generate structured JSON data to fill a PDF form/document.
 
@@ -1483,10 +1494,14 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
         parts = []
         if old_response_content:
             parts.append(
-                f"⚠️ ANCIENNE RÉPONSE (CONTIENT LES INFORMATIONS ENTREPRISE À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
+                f"⚠️ DOCUMENTS DE RÉFÉRENCE (CONTIENT LES INFORMATIONS ENTREPRISE À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
             )
         parts.append(f"STRUCTURE DU PDF ET ZONES REMPLISSABLES:\n{pdf_structure[:40000]}")
         parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:20000]}")
+        if custom_notes:
+            parts.append(
+                f"⚠️ NOTES ET INSTRUCTIONS SPÉCIFIQUES DE L'UTILISATEUR (À PRENDRE EN COMPTE EN PRIORITÉ):\n{custom_notes}"
+            )
 
         user_prompt = "\n\n---\n\n".join(parts)
         user_prompt += (
