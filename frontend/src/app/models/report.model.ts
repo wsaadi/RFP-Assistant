@@ -235,6 +235,8 @@ export interface ResponseDocument {
   fill_content: string;
   fill_status: 'pending' | 'generating' | 'completed' | 'error';
   source_document_ids: string[];
+  source_categories: string[];
+  include_generated_content: boolean;
   custom_notes: string;
   created_at: string;
   updated_at: string;

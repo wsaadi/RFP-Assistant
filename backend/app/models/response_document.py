@@ -60,6 +60,14 @@ class ResponseDocument(Base):
         JSON, default=list,
         comment="List of Document UUIDs to use as context for AI completion (empty = all)",
     )
+    source_categories: Mapped[list] = mapped_column(
+        JSON, default=list,
+        comment="List of document categories to use as context (e.g. ['new_rfp','old_response']). Empty = all.",
+    )
+    include_generated_content: Mapped[bool] = mapped_column(
+        Boolean, default=False,
+        comment="Whether to include generated chapters/content as context for AI completion",
+    )
     custom_notes: Mapped[str] = mapped_column(
         Text, default="",
         comment="User notes, ideas and custom prompt to guide AI completion",

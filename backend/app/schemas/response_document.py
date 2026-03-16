@@ -17,6 +17,8 @@ class ResponseDocumentOut(BaseModel):
     fill_content: str = ""
     fill_status: str = "pending"
     source_document_ids: List[str] = []
+    source_categories: List[str] = []
+    include_generated_content: bool = False
     custom_notes: str = ""
     created_at: datetime
     updated_at: datetime
@@ -33,6 +35,8 @@ class ResponseDocumentUpdate(BaseModel):
     is_selected: Optional[bool] = None
     order: Optional[int] = None
     source_document_ids: Optional[List[str]] = None
+    source_categories: Optional[List[str]] = None
+    include_generated_content: Optional[bool] = None
     custom_notes: Optional[str] = None
 
 
