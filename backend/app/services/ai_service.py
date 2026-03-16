@@ -1049,6 +1049,7 @@ Tu dois enrichir et améliorer significativement le contenu existant d'un chapit
 - Si une image est pertinente pour illustrer un point, insère [INSERT_IMAGE:identifiant] sur sa propre ligne.
 - N'insère que les images qui apportent une vraie valeur ajoutée au contenu.
 - Conserve les marqueurs [INSERT_IMAGE:...] déjà présents dans le contenu existant.
+- IMPORTANT : Chaque image ne doit être utilisée qu'UNE SEULE FOIS dans l'ensemble du document. Les images déjà utilisées dans d'autres chapitres ont été retirées de la liste.
 
 ## Formatage :
 - Utilise **##** pour les titres de sections et **###** pour les sous-sections
