@@ -1904,7 +1904,9 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
     .word-limit-field ::ng-deep .mdc-notched-outline .mdc-notched-outline__leading,
     .word-limit-field ::ng-deep .mdc-notched-outline .mdc-notched-outline__trailing,
     .word-limit-field ::ng-deep .mdc-notched-outline .mdc-notched-outline__notch { border-color: #ccc !important; }
-    .word-limit-field input { text-align: center; font-size: 12px !important; }
+    .word-limit-field input { text-align: center; font-size: 12px !important; -moz-appearance: textfield; }
+    .word-limit-field input::-webkit-outer-spin-button,
+    .word-limit-field input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
     .sub-word-limit { width: 80px; margin-left: 4px; }
   `],
 })
