@@ -895,6 +895,7 @@ Réponds UNIQUEMENT au format JSON suivant (sans markdown):
         company_name: str = "",
         client_name: str = "",
         available_images: Optional[List[Dict]] = None,
+        word_limit: int = 0,
     ) -> str:
         """Generate or enrich content for a chapter."""
         system_prompt = """Tu es un rédacteur senior expert en réponses aux appels d'offres, avec 15 ans d'expérience dans la rédaction de mémoires techniques gagnants.
@@ -937,6 +938,7 @@ Tu dois rédiger un contenu de HAUTE QUALITÉ RÉDACTIONNELLE pour un chapitre d
 - N'insère une image que si elle apporte une vraie valeur (schéma d'architecture, organigramme, graphique de performance, etc.).
 - N'insère PAS d'images décoratives, de logos ou d'images sans rapport direct avec le contenu du chapitre.
 - Tu peux insérer 0, 1 ou plusieurs images selon leur pertinence. Ne force pas l'insertion.
+- IMPORTANT : Chaque image ne doit être utilisée qu'UNE SEULE FOIS dans l'ensemble du document. Les images déjà utilisées dans d'autres chapitres ont été retirées de la liste.
 
 ## Formatage :
 - Utilise **##** pour les titres de sections et **###** pour les sous-sections
@@ -948,6 +950,14 @@ Tu dois rédiger un contenu de HAUTE QUALITÉ RÉDACTIONNELLE pour un chapitre d
 
         # Add identity and anti-hallucination guardrails
         system_prompt += _build_identity_block(company_name, client_name)
+
+        if word_limit and word_limit > 0:
+            system_prompt += f"""
+
+## LIMITE DE MOTS STRICTE :
+- Ce chapitre doit contenir EXACTEMENT entre {int(word_limit * 0.85)} et {word_limit} mots.
+- Ne depasse JAMAIS {word_limit} mots.
+- Adapte le niveau de detail pour respecter cette limite."""
 
         if ai_context:
             system_prompt += f"""
@@ -986,9 +996,15 @@ Contexte de rédaction fourni par l'utilisateur (utilise-le pour orienter le ton
                 img_desc = img.get("anonymized_description", img.get("description", ""))
                 img_type = img.get("image_type", img.get("type", ""))
                 img_usage = img.get("suggested_usage", "")
+                key_info = img.get("key_information", [])
+                ocr_text = img.get("anonymized_ocr_text", img.get("ocr_text", ""))
                 line = f"- `{img_id}` [{img_type}] : {img_desc}"
+                if key_info:
+                    line += f" | Informations cles: {', '.join(str(k) for k in key_info[:5])}"
+                if ocr_text:
+                    line += f" | Texte OCR: {ocr_text[:200]}"
                 if img_usage:
-                    line += f" (usage suggéré: {img_usage})"
+                    line += f" (usage suggere: {img_usage})"
                 img_lines.append(line)
             parts.append("\n".join(img_lines))
 
@@ -1069,7 +1085,16 @@ Contenu actuel à enrichir:
                 img_id = img.get("id", "")
                 img_desc = img.get("anonymized_description", img.get("description", ""))
                 img_type = img.get("image_type", img.get("type", ""))
+                img_usage = img.get("suggested_usage", "")
+                key_info = img.get("key_information", [])
+                ocr_text = img.get("anonymized_ocr_text", img.get("ocr_text", ""))
                 line = f"- `{img_id}` [{img_type}] : {img_desc}"
+                if key_info:
+                    line += f" | Informations cles: {', '.join(str(k) for k in key_info[:5])}"
+                if ocr_text:
+                    line += f" | Texte OCR: {ocr_text[:200]}"
+                if img_usage:
+                    line += f" (usage suggere: {img_usage})"
                 img_lines.append(line)
             user_prompt += "\n".join(img_lines)
 

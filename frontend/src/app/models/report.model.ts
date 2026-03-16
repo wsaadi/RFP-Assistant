@@ -176,6 +176,7 @@ export interface Chapter {
   rfp_requirement: string;
   is_prefilled: boolean;
   numbering: string;
+  word_limit: number;
   created_at: string;
   updated_at: string;
   children: Chapter[];

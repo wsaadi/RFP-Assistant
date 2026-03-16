@@ -132,6 +132,7 @@ async def _run_chapter_generation(
             ch_rfp_requirement = chapter.rfp_requirement
             ch_content = chapter.content or ""
             ch_notes = chapter.notes or []
+            ch_word_limit = chapter.word_limit or 0
             proj_improvement = project.improvement_axes if include_improvement_axes else ""
             proj_ai_context = project.ai_context or ""
             proj_context_mode = project.context_mode or "rag"
@@ -221,8 +222,24 @@ async def _run_chapter_generation(
             # Only include informative images that were successfully analyzed.
             # Mistral receives anonymized metadata only — never the actual images.
             _update("loading_images", 28, "Chargement des images analysees...")
+
+            # Find images already used in OTHER chapters to avoid duplicates
+            from sqlalchemy import func
+            used_images_result = await db.execute(
+                select(Chapter.image_references)
+                .where(Chapter.project_id == project_id)
+                .where(Chapter.id != chapter_id)
+                .where(Chapter.image_references != None)
+            )
+            used_image_ids = set()
+            for (refs,) in used_images_result.all():
+                if refs:
+                    for ref in refs:
+                        if isinstance(ref, dict) and ref.get("image_id"):
+                            used_image_ids.add(ref["image_id"])
+
             available_images = await _load_project_images(
-                db, project_id, ch_title, ch_description,
+                db, project_id, ch_title, ch_description, used_image_ids=used_image_ids,
             )
 
         # ── Phase 2: AI generation (NO DB connection held) ──
@@ -259,6 +276,7 @@ async def _run_chapter_generation(
                 company_name=proj_company_name,
                 client_name=proj_client_name,
                 available_images=available_images,
+                word_limit=ch_word_limit,
             )
 
         # ── Log AI usage ──
@@ -316,7 +334,7 @@ async def _run_chapter_generation(
         await task_engine.dispose()
 
 
-async def _load_project_images(db, project_id, chapter_title: str, chapter_description: str):
+async def _load_project_images(db, project_id, chapter_title: str, chapter_description: str, used_image_ids: set = None):
     """Load analyzed images from the project's documents for AI context.
 
     Returns a list of image metadata dicts containing ONLY anonymized information
@@ -363,9 +381,15 @@ async def _load_project_images(db, project_id, chapter_title: str, chapter_descr
             "suggested_usage": db_image.suggested_usage or "",
             "page_number": db_image.page_number,
             "document_name": doc_name,
+            "ocr_text": db_image.ocr_text or "",
+            "anonymized_ocr_text": db_image.anonymized_ocr_text or "",
             "width": db_image.width,
             "height": db_image.height,
         })
+
+    # Filter out images already used in other chapters (unique usage)
+    if used_image_ids:
+        images = [img for img in images if img["id"] not in used_image_ids]
 
     # Limit to most relevant images (avoid flooding the prompt)
     # Prioritize images whose suggested_usage matches the chapter context

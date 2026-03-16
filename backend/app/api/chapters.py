@@ -46,6 +46,7 @@ def _chapter_to_out(chapter: Chapter, children: list = None) -> ChapterOut:
         rfp_requirement=chapter.rfp_requirement,
         is_prefilled=chapter.is_prefilled,
         numbering=chapter.numbering,
+        word_limit=chapter.word_limit or 0,
         created_at=chapter.created_at,
         updated_at=chapter.updated_at,
         children=children or [],
@@ -102,6 +103,7 @@ async def create_chapter(
         order=request.order,
         chapter_type=ch_type,
         rfp_requirement=request.rfp_requirement,
+        word_limit=request.word_limit,
     )
     db.add(chapter)
     await db.commit()
@@ -162,6 +164,8 @@ async def update_chapter(
         chapter.improvement_axes = request.improvement_axes
     if request.rfp_requirement is not None:
         chapter.rfp_requirement = request.rfp_requirement
+    if request.word_limit is not None:
+        chapter.word_limit = request.word_limit
 
     await db.commit()
     await db.refresh(chapter)

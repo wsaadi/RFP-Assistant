@@ -58,6 +58,7 @@ class Chapter(Base):
     rfp_requirement: Mapped[str] = mapped_column(Text, default="")
     is_prefilled: Mapped[bool] = mapped_column(Boolean, default=False)
     numbering: Mapped[str] = mapped_column(String(50), default="")
+    word_limit: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(timezone.utc)
     )
