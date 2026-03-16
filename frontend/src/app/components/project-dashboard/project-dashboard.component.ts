@@ -844,15 +844,12 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <button mat-icon-button color="warn" (click)="deleteSingleChapter(ch.id)" matTooltip="Supprimer ce chapitre">
                       <mat-icon>delete</mat-icon>
                     </button>
-                    <div class="word-limit-inline">
-                      <mat-icon class="word-limit-icon" matTooltip="Limite de mots pour la generation IA">format_size</mat-icon>
-                      <input type="number" class="word-limit-input" [value]="ch.word_limit || ''"
-                        placeholder="Max mots"
+                    <mat-form-field appearance="outline" class="word-limit-field" (click)="$event.stopPropagation()">
+                      <mat-label>Max mots</mat-label>
+                      <input matInput type="number" [value]="ch.word_limit || ''"
                         (change)="saveWordLimit(ch, $event)"
-                        min="0" step="50">
-                      <span class="word-limit-label" *ngIf="ch.word_limit">mots max</span>
-                      <span class="word-limit-label hint" *ngIf="!ch.word_limit">illimite</span>
-                    </div>
+                        min="0" step="50" placeholder="0 = illimite">
+                    </mat-form-field>
                   </div>
 
                   <!-- AI progress bar -->
@@ -916,14 +913,12 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                         <button mat-icon-button color="warn" (click)="deleteSingleChapter(sub.id)" matTooltip="Supprimer">
                           <mat-icon>delete_outline</mat-icon>
                         </button>
-                        <div class="word-limit-inline sub-word-limit">
-                          <mat-icon class="word-limit-icon" matTooltip="Limite de mots">format_size</mat-icon>
-                          <input type="number" class="word-limit-input" [value]="sub.word_limit || ''"
-                            placeholder="Max"
+                        <mat-form-field appearance="outline" class="word-limit-field sub-word-limit" (click)="$event.stopPropagation()">
+                          <mat-label>Max mots</mat-label>
+                          <input matInput type="number" [value]="sub.word_limit || ''"
                             (change)="saveWordLimit(sub, $event)"
-                            min="0" step="50">
-                          <span class="word-limit-label" *ngIf="sub.word_limit">max</span>
-                        </div>
+                            min="0" step="50" placeholder="0">
+                        </mat-form-field>
                       </div>
                       <!-- AI progress bar for sub-chapter -->
                       <div *ngIf="aiProcessing[sub.id]" class="ai-progress-section">
@@ -1896,32 +1891,16 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
       background: #fff8e1;
       border-radius: 4px;
     }
-    .word-limit-inline {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      margin-left: 12px;
-      padding: 2px 8px;
-      border: 1px solid #e0e0e0;
-      border-radius: 16px;
-      background: #fafafa;
+    .word-limit-field {
+      width: 110px;
+      margin-left: 8px;
+      font-size: 12px;
     }
-    .word-limit-icon { font-size: 16px; width: 16px; height: 16px; color: #888; }
-    .word-limit-input {
-      width: 70px;
-      border: none;
-      background: transparent;
-      font-size: 13px;
-      text-align: center;
-      outline: none;
-      padding: 2px 0;
-    }
-    .word-limit-input::-webkit-inner-spin-button { opacity: 0.5; }
-    .word-limit-input::placeholder { color: #bbb; font-size: 12px; }
-    .word-limit-label { font-size: 11px; color: #888; white-space: nowrap; }
-    .word-limit-label.hint { color: #bbb; font-style: italic; }
-    .sub-word-limit { margin-left: 4px; }
-    .sub-word-limit .word-limit-input { width: 55px; }
+    .word-limit-field ::ng-deep .mat-mdc-form-field-infix { padding-top: 6px !important; padding-bottom: 6px !important; min-height: 32px !important; }
+    .word-limit-field ::ng-deep .mdc-text-field--outlined { height: 36px !important; }
+    .word-limit-field ::ng-deep .mat-mdc-form-field-subscript-wrapper { display: none; }
+    .word-limit-field input { text-align: center; }
+    .sub-word-limit { width: 90px; margin-left: 4px; }
   `],
 })
 export class ProjectDashboardComponent implements OnInit, OnDestroy {
