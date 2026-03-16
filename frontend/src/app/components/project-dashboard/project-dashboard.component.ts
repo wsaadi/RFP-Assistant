@@ -844,6 +844,15 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                     <button mat-icon-button color="warn" (click)="deleteSingleChapter(ch.id)" matTooltip="Supprimer ce chapitre">
                       <mat-icon>delete</mat-icon>
                     </button>
+                    <div class="word-limit-inline">
+                      <mat-icon class="word-limit-icon" matTooltip="Limite de mots pour la generation IA">format_size</mat-icon>
+                      <input type="number" class="word-limit-input" [value]="ch.word_limit || ''"
+                        placeholder="Max mots"
+                        (change)="saveWordLimit(ch, $event)"
+                        min="0" step="50">
+                      <span class="word-limit-label" *ngIf="ch.word_limit">mots max</span>
+                      <span class="word-limit-label hint" *ngIf="!ch.word_limit">illimite</span>
+                    </div>
                   </div>
 
                   <!-- AI progress bar -->
@@ -907,6 +916,14 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
                         <button mat-icon-button color="warn" (click)="deleteSingleChapter(sub.id)" matTooltip="Supprimer">
                           <mat-icon>delete_outline</mat-icon>
                         </button>
+                        <div class="word-limit-inline sub-word-limit">
+                          <mat-icon class="word-limit-icon" matTooltip="Limite de mots">format_size</mat-icon>
+                          <input type="number" class="word-limit-input" [value]="sub.word_limit || ''"
+                            placeholder="Max"
+                            (change)="saveWordLimit(sub, $event)"
+                            min="0" step="50">
+                          <span class="word-limit-label" *ngIf="sub.word_limit">max</span>
+                        </div>
                       </div>
                       <!-- AI progress bar for sub-chapter -->
                       <div *ngIf="aiProcessing[sub.id]" class="ai-progress-section">
@@ -1879,6 +1896,32 @@ import { RFPProject, Chapter, DocumentInfo, DocumentProgress, ProjectStatistics,
       background: #fff8e1;
       border-radius: 4px;
     }
+    .word-limit-inline {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: 12px;
+      padding: 2px 8px;
+      border: 1px solid #e0e0e0;
+      border-radius: 16px;
+      background: #fafafa;
+    }
+    .word-limit-icon { font-size: 16px; width: 16px; height: 16px; color: #888; }
+    .word-limit-input {
+      width: 70px;
+      border: none;
+      background: transparent;
+      font-size: 13px;
+      text-align: center;
+      outline: none;
+      padding: 2px 0;
+    }
+    .word-limit-input::-webkit-inner-spin-button { opacity: 0.5; }
+    .word-limit-input::placeholder { color: #bbb; font-size: 12px; }
+    .word-limit-label { font-size: 11px; color: #888; white-space: nowrap; }
+    .word-limit-label.hint { color: #bbb; font-style: italic; }
+    .sub-word-limit { margin-left: 4px; }
+    .sub-word-limit .word-limit-input { width: 55px; }
   `],
 })
 export class ProjectDashboardComponent implements OnInit, OnDestroy {
@@ -2846,6 +2889,19 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
         this.addingChapter = false;
         this.snackBar.open(err.error?.detail || 'Erreur creation sous-chapitre', 'OK', { duration: 5000 });
       }
+    });
+  }
+
+  saveWordLimit(chapter: Chapter, event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const value = parseInt(input.value, 10) || 0;
+    chapter.word_limit = value;
+    this.api.updateChapter(chapter.id, { word_limit: value }).subscribe({
+      next: () => this.snackBar.open(
+        value > 0 ? `Limite fixee a ${value} mots` : 'Limite de mots supprimee',
+        'OK', { duration: 2000 }
+      ),
+      error: () => this.snackBar.open('Erreur sauvegarde limite', 'OK', { duration: 3000 }),
     });
   }
 
