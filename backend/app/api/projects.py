@@ -5400,6 +5400,9 @@ def _extract_excel_search_queries(excel_structure: str, doc_title: str) -> list[
         if any(kw in struct_lower for kw in keywords):
             queries.append(query)
 
+    # Always add a [TABLEAU] search to find structured table data with KPIs
+    queries.append("[TABLEAU] turn over handicap formation effectif")
+
     # Deduplicate while preserving order
     seen: set[str] = set()
     unique: list[str] = []
@@ -5674,7 +5677,7 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
         if is_conformity_doc:
             search_queries = _extract_excel_search_queries(excel_structure, doc_title)
             # Limit to 6 most relevant queries to keep search fast
-            search_queries = search_queries[:6]
+            search_queries = search_queries[:8]
             seen_chunk_ids: set[str] = set()
             all_chunks: list[dict] = []
             for sq in search_queries:
@@ -5697,6 +5700,18 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
             f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
             for c in relevant_chunks
         ])
+
+        # Log what vector search found for debugging KPI retrieval
+        logger.info(
+            "Excel fill: vector search returned %d unique chunks, relevant_context=%d chars",
+            len(relevant_chunks), len(relevant_context),
+        )
+        for i, c in enumerate(relevant_chunks[:5]):
+            preview = c['content'][:150].replace('\n', ' ')
+            logger.info(
+                "  chunk[%d] score=%.3f doc=%s p.%s: %s...",
+                i, c.get('score', 0), c['document_name'], c['page_number'], preview,
+            )
 
         # Build context: vector search results (most relevant) FIRST,
         # then full document content (may be truncated but that's OK —
