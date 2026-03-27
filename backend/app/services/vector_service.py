@@ -267,149 +267,80 @@ class VectorService:
 
         This complements vector search by finding chunks that contain exact
         keywords, numbers, or percentages that vector similarity might miss.
-        Uses french dictionary for stemming + unaccented search.
         """
-        # Build tsquery: split query into terms, join with &
-        # Also search for raw numbers/percentages as literal strings
         terms = query.split()
         if not terms:
             return []
 
-        # Build conditions
-        conditions = ["project_id = %s"]
-        params: list = [project_id]
+        # Extract numbers/percentages for literal ILIKE matching
+        number_patterns = re.findall(r'\d+[.,]?\d*\s*%?', query)
+
+        # ── Build WHERE clause ──
+        where_parts = ["project_id = %s"]
+        where_params: list = [project_id]
 
         if category_filter:
-            conditions.append("category = %s")
-            params.append(category_filter)
+            where_parts.append("category = %s")
+            where_params.append(category_filter)
 
         if document_ids:
             if len(document_ids) == 1:
-                conditions.append("document_id = %s")
-                params.append(document_ids[0])
+                where_parts.append("document_id = %s")
+                where_params.append(document_ids[0])
             else:
                 placeholders = ",".join(["%s"] * len(document_ids))
-                conditions.append(f"document_id IN ({placeholders})")
-                params.extend(document_ids)
+                where_parts.append(f"document_id IN ({placeholders})")
+                where_params.extend(document_ids)
 
-        where_clause = " AND ".join(conditions)
+        # ── Build search filter (ILIKE for numbers OR full-text match) ──
+        filter_parts = []
+        filter_params: list = []
 
-        # Use plainto_tsquery for natural language, plus ILIKE for numbers
-        # Extract numbers/percentages for literal matching
-        number_patterns = re.findall(r'\d+[.,]?\d*\s*%?', query)
-
-        # Build a combined search: ts_rank for text + ILIKE boost for numbers
-        ilike_conditions = []
         for num in number_patterns:
-            ilike_conditions.append("content ILIKE %s")
-            params.append(f"%{num}%")
+            filter_parts.append("content ILIKE %s")
+            filter_params.append(f"%{num}%")
 
-        # Full-text search with french config
-        params.append(query)  # for plainto_tsquery
-
-        ts_rank_expr = "ts_rank_cd(to_tsvector('french', content), plainto_tsquery('french', %s))"
-
-        # If we have number patterns, boost chunks that contain them literally
-        if ilike_conditions:
-            ilike_boost = " + ".join(
-                f"(CASE WHEN {cond} THEN 0.5 ELSE 0.0 END)"
-                for cond in ilike_conditions
-            )
-            score_expr = f"({ts_rank_expr} + {ilike_boost})"
-        else:
-            score_expr = ts_rank_expr
-
-        # Re-add params for ILIKE conditions in score expression
-        score_params = list(params[len(conditions):])  # ilike params + query
-        # We need ilike params again for the score expression
-        all_params = params[:len([p for p in params[:len(conditions) + len(number_patterns)]])]
-        all_params_for_score = []
-        for num in number_patterns:
-            all_params_for_score.append(f"%{num}%")
-        all_params_for_score.append(query)
-
-        # Simplified approach: use ILIKE OR full-text to find matching rows
-        search_conditions = []
-        search_params = []
-
-        if number_patterns:
-            for num in number_patterns:
-                search_conditions.append("content ILIKE %s")
-                search_params.append(f"%{num}%")
-
-        search_conditions.append(
+        filter_parts.append(
             "to_tsvector('french', content) @@ plainto_tsquery('french', %s)"
         )
-        search_params.append(query)
+        filter_params.append(query)
 
-        combined_search = " OR ".join(search_conditions)
+        filter_sql = " OR ".join(filter_parts)
 
-        # Final SQL
-        final_params = []
-        # WHERE clause params
-        for i, cond in enumerate(conditions):
-            final_params.append(params[i])
+        # ── Build score expression ──
+        # ts_rank for text relevance + 0.5 bonus per matched number
+        score_parts = ["ts_rank_cd(to_tsvector('french', content), plainto_tsquery('french', %s))"]
+        score_params: list = [query]
 
-        # Score expression params (ILIKE + tsquery)
         for num in number_patterns:
-            final_params.append(f"%{num}%")
-        final_params.append(query)  # for ts_rank
+            score_parts.append("(CASE WHEN content ILIKE %s THEN 0.5 ELSE 0.0 END)")
+            score_params.append(f"%{num}%")
 
-        # Search filter params
-        for num in number_patterns:
-            final_params.append(f"%{num}%")
-        final_params.append(query)  # for @@ tsquery
+        score_sql = " + ".join(score_parts)
 
-        final_params.append(top_k)
-
-        # Build ilike score cases
-        ilike_score_parts = []
-        for _ in number_patterns:
-            ilike_score_parts.append("(CASE WHEN content ILIKE %s THEN 0.5 ELSE 0.0 END)")
-
-        if ilike_score_parts:
-            score_sql = f"(ts_rank_cd(to_tsvector('french', content), plainto_tsquery('french', %s)) + {' + '.join(ilike_score_parts)})"
-            # Reorder: ts_rank query first, then ILIKE params
-            score_expr_params = [query] + [f"%{num}%" for num in number_patterns]
-        else:
-            score_sql = "ts_rank_cd(to_tsvector('french', content), plainto_tsquery('french', %s))"
-            score_expr_params = [query]
-
-        # Rebuild params cleanly
-        clean_params = []
-        # WHERE base conditions
-        clean_params.append(project_id)
-        if category_filter:
-            clean_params.append(category_filter)
-        if document_ids:
-            clean_params.extend(document_ids)
-
-        # Score expression params
-        clean_params.extend(score_expr_params)
-
-        # Search filter params
-        for num in number_patterns:
-            clean_params.append(f"%{num}%")
-        clean_params.append(query)
-
-        clean_params.append(top_k)
-
+        # ── Assemble final query with params in correct order ──
         sql = f"""
             SELECT id, chunk_id, content, document_id, document_name,
                    category, page_number, section_title, chunk_index,
-                   {score_sql} AS score
+                   ({score_sql}) AS score
             FROM document_embeddings
-            WHERE {where_clause}
-              AND ({combined_search})
+            WHERE {" AND ".join(where_parts)}
+              AND ({filter_sql})
             ORDER BY score DESC
             LIMIT %s
         """
+
+        # Parameter order must match: score_params, where_params, filter_params, limit
+        # But SQL has: WHERE (where_params) AND (filter_params), score uses score_params
+        # PostgreSQL evaluates SELECT expressions after WHERE, but psycopg binds positionally.
+        # So the order is: score_params → where_params → filter_params → limit
+        final_params = score_params + where_params + filter_params + [top_k]
 
         try:
             conn = cls._get_connection()
             try:
                 with conn.cursor() as cur:
-                    cur.execute(sql, clean_params)
+                    cur.execute(sql, final_params)
                     rows = cur.fetchall()
             finally:
                 conn.close()

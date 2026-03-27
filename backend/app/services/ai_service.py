@@ -298,37 +298,6 @@ def _parse_json_object(raw: str) -> Optional[Dict]:
     return None
 
 
-def _split_excel_structure_by_sheet(excel_structure: str) -> List[Dict[str, str]]:
-    """Split an Excel structure string into per-sheet sections.
-
-    The Excel structure format uses "=== Feuille: <name> ===" or
-    "--- Sheet: <name> ---" as delimiters between sheets.
-    Returns a list of {"name": sheet_name, "content": sheet_text}.
-    """
-    # Match common sheet delimiters
-    pattern = re.compile(
-        r'^(?:===\s*(?:Feuille|Sheet|Onglet)\s*:\s*(.+?)\s*===|'
-        r'---\s*(?:Feuille|Sheet|Onglet)\s*:\s*(.+?)\s*---)',
-        re.MULTILINE | re.IGNORECASE,
-    )
-
-    matches = list(pattern.finditer(excel_structure))
-    if not matches:
-        # No sheet delimiters found — return as single section
-        return [{"name": "Sheet1", "content": excel_structure}]
-
-    sections = []
-    for i, match in enumerate(matches):
-        name = match.group(1) or match.group(2)
-        start = match.start()
-        end = matches[i + 1].start() if i + 1 < len(matches) else len(excel_structure)
-        content = excel_structure[start:end].strip()
-        if content:
-            sections.append({"name": name.strip(), "content": content})
-
-    return sections if sections else [{"name": "Sheet1", "content": excel_structure}]
-
-
 class MistralAIService:
     """Service for AI-powered operations using Mistral API."""
 
@@ -1409,9 +1378,12 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
     ) -> List[Dict]:
         """Generate structured JSON data to fill an Excel document from old response data.
 
-        For large documents (RSE questionnaires, etc.), processes the Excel in
-        batches by sheet to avoid max_tokens truncation. Uses automatic
-        continuation when the LLM's output is truncated mid-JSON.
+        Uses a single-shot approach so the LLM sees the full document context
+        and can make intelligent decisions (e.g. which sheet/tab to fill based
+        on company size, which columns are response columns, etc.).
+
+        When the JSON output is truncated by max_tokens, automatic continuation
+        resumes from where the LLM stopped to get the complete result.
 
         Returns a list of dicts: [{"sheet": str, "cell": str, "value": str|number}, ...]
         """
@@ -1457,6 +1429,12 @@ Le document à compléter est: **{document_title}**
 Tu dois générer les VALEURS EXACTES à inscrire dans chaque cellule de l'Excel,
 en te basant sur l'ancienne réponse et le contenu de l'appel d'offres.
 
+## Intelligence de remplissage:
+- Analyse TOUTE la structure de l'Excel AVANT de commencer à remplir.
+- Si le document contient plusieurs onglets avec des variantes (par taille d'entreprise, par lot, etc.), déduis intelligemment quel(s) onglet(s) remplir en te basant sur les informations de l'ancienne réponse (effectifs, CA, secteur, etc.).
+- Ne remplis PAS un onglet qui ne correspond manifestement pas au profil de l'entreprise.
+- Chaque cellule ne doit avoir qu'UNE SEULE entrée JSON — ne génère pas de doublons pour la même cellule.
+
 {fill_rules}
 
 ## Format de sortie OBLIGATOIRE:
@@ -1471,38 +1449,7 @@ IMPORTANT: Tu DOIS générer une entrée pour CHAQUE cellule vide qui attend une
 Analyse bien la structure de l'Excel pour identifier les colonnes de réponse.
 Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie."""
 
-        # ── Try splitting structure into sheets for batch processing ──
-        # If the Excel has multiple sheets, process each independently to avoid
-        # truncation on large questionnaires (RSE, RGPD, etc.)
-        sheet_sections = _split_excel_structure_by_sheet(excel_structure)
-        use_batch = len(sheet_sections) > 1 and len(excel_structure) > 8000
-
-        if use_batch:
-            return await self._generate_excel_fill_batched(
-                system_prompt, document_title, sheet_sections,
-                new_rfp_content, old_response_content, custom_notes,
-                is_conformity, is_pricing,
-            )
-
-        # ── Single-shot approach (small documents or single sheet) ──
-        return await self._generate_excel_fill_single(
-            system_prompt, document_title, excel_structure,
-            new_rfp_content, old_response_content, custom_notes,
-            is_conformity, is_pricing,
-        )
-
-    async def _generate_excel_fill_single(
-        self,
-        system_prompt: str,
-        document_title: str,
-        excel_structure: str,
-        new_rfp_content: str,
-        old_response_content: str,
-        custom_notes: str,
-        is_conformity: bool,
-        is_pricing: bool,
-    ) -> List[Dict]:
-        """Single-shot Excel fill with continuation on truncation."""
+        # Build user prompt with full context
         parts = []
         if old_response_content:
             parts.append(
@@ -1532,14 +1479,14 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
                 "Retourne UNIQUEMENT le JSON."
             )
 
-        # First call with finish_reason detection
+        # First call with truncation detection
         raw, finish_reason = await self._generate_with_finish_reason(
             system_prompt, user_prompt, temperature=0.1, max_tokens=32000,
         )
 
-        # If truncated, try continuation to get the rest
+        # If truncated by max_tokens, continue from where it stopped
         if finish_reason == 'length':
-            logger.info("Excel fill truncated for '%s' — attempting continuation", document_title)
+            logger.info("Excel fill truncated for '%s' — continuing to get full result", document_title)
             raw = await self._continue_truncated_json(system_prompt, user_prompt, raw)
 
         data = _parse_json_array(raw)
@@ -1554,9 +1501,12 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
             "Réponds UNIQUEMENT avec le tableau JSON. Commence directement par [ et termine par ]. "
             "Tu DOIS remplir TOUTES les cellules sans exception. Ne saute aucune ligne."
         )
-        raw2, _ = await self._generate_with_finish_reason(
+        raw2, finish2 = await self._generate_with_finish_reason(
             system_prompt, retry_prompt, temperature=0.05, max_tokens=32000,
         )
+        if finish2 == 'length':
+            raw2 = await self._continue_truncated_json(system_prompt, retry_prompt, raw2)
+
         data2 = _parse_json_array(raw2)
         if data2 is not None:
             logger.info("Excel fill retry succeeded for '%s' (%d entries)", document_title, len(data2))
@@ -1567,94 +1517,6 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
             f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
             "Veuillez réessayer."
         )
-
-    async def _generate_excel_fill_batched(
-        self,
-        system_prompt: str,
-        document_title: str,
-        sheet_sections: List[Dict[str, str]],
-        new_rfp_content: str,
-        old_response_content: str,
-        custom_notes: str,
-        is_conformity: bool,
-        is_pricing: bool,
-    ) -> List[Dict]:
-        """Process each Excel sheet independently to avoid truncation.
-
-        For large questionnaires (RSE, RGPD, etc.), each sheet is sent as a
-        separate LLM call, then all results are merged.
-        """
-        logger.info(
-            "Excel fill batched mode for '%s': %d sheets to process",
-            document_title, len(sheet_sections),
-        )
-        all_data: List[Dict] = []
-
-        for i, sheet_info in enumerate(sheet_sections):
-            sheet_name = sheet_info["name"]
-            sheet_content = sheet_info["content"]
-
-            logger.info("Processing sheet %d/%d: '%s' (%d chars)",
-                        i + 1, len(sheet_sections), sheet_name, len(sheet_content))
-
-            parts = []
-            if old_response_content:
-                parts.append(
-                    f"⚠️ DOCUMENTS DE RÉFÉRENCE:\n{old_response_content[:50000]}"
-                )
-            parts.append(
-                f"STRUCTURE DE L'ONGLET '{sheet_name}' À REMPLIR:\n{sheet_content}"
-            )
-            parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:15000]}")
-            if custom_notes:
-                parts.append(f"⚠️ NOTES DE L'UTILISATEUR:\n{custom_notes}")
-
-            user_prompt = "\n\n---\n\n".join(parts)
-            user_prompt += (
-                f"\n\n⚠️ RAPPEL: Génère le JSON pour l'onglet '{sheet_name}' UNIQUEMENT. "
-                "Tu DOIS remplir TOUTES les cellules vides de cet onglet sans exception. "
-                "Retourne UNIQUEMENT le tableau JSON."
-            )
-
-            raw, finish_reason = await self._generate_with_finish_reason(
-                system_prompt, user_prompt, temperature=0.1, max_tokens=32000,
-            )
-
-            if finish_reason == 'length':
-                logger.info("Sheet '%s' truncated — continuing", sheet_name)
-                raw = await self._continue_truncated_json(system_prompt, user_prompt, raw)
-
-            sheet_data = _parse_json_array(raw)
-            if sheet_data:
-                all_data.extend(sheet_data)
-                logger.info("Sheet '%s': %d entries", sheet_name, len(sheet_data))
-            else:
-                logger.warning("Sheet '%s': JSON parse failed, retrying...", sheet_name)
-                # Retry once for this sheet
-                retry_prompt = (
-                    user_prompt
-                    + "\n\n⚠️ CRITIQUE: Ta réponse n'était pas du JSON valide. "
-                    "Commence par [ et termine par ]. Remplis TOUTES les cellules."
-                )
-                raw2, _ = await self._generate_with_finish_reason(
-                    system_prompt, retry_prompt, temperature=0.05, max_tokens=32000,
-                )
-                sheet_data2 = _parse_json_array(raw2)
-                if sheet_data2:
-                    all_data.extend(sheet_data2)
-                    logger.info("Sheet '%s' retry: %d entries", sheet_name, len(sheet_data2))
-                else:
-                    logger.error("Sheet '%s': JSON parse failed on retry too", sheet_name)
-
-        if not all_data:
-            raise ValueError(
-                f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
-                "Veuillez réessayer."
-            )
-
-        logger.info("Excel fill batched completed for '%s': %d total entries from %d sheets",
-                     document_title, len(all_data), len(sheet_sections))
-        return all_data
 
     async def _continue_truncated_json(
         self,
@@ -1815,9 +1677,12 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
             "Réponds UNIQUEMENT avec le tableau JSON. Commence par [ et termine par ]. "
             "Tu DOIS remplir TOUTES les zones/champs sans exception."
         )
-        raw2, _ = await self._generate_with_finish_reason(
+        raw2, finish2 = await self._generate_with_finish_reason(
             system_prompt, retry_prompt, temperature=0.05, max_tokens=32000,
         )
+        if finish2 == 'length':
+            raw2 = await self._continue_truncated_json(system_prompt, retry_prompt, raw2)
+
         data2 = _parse_json_array(raw2)
         if data2 is not None:
             logger.info("PDF fill retry succeeded for '%s' (%d entries)", document_title, len(data2))
