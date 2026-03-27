@@ -347,8 +347,8 @@ async def _process_document_async(document_id: str, project_id: str):
                 db.add(db_chunk)
             await db.commit()
 
-        # ── Phase 3c: Index in ChromaDB ──
-        logger.info("[doc:%s] Phase 3c: Indexing %d chunks in ChromaDB", document_id, len(chunks))
+        # ── Phase 3c: Index in pgvector ──
+        logger.info("[doc:%s] Phase 3c: Indexing %d chunks in pgvector", document_id, len(chunks))
         ProgressTracker.update(document_id, "indexing")
 
         vector_chunks = [
@@ -370,16 +370,16 @@ async def _process_document_async(document_id: str, project_id: str):
                 asyncio.to_thread(VectorService.index_chunks, project_id, vector_chunks),
                 timeout=300,  # 5 min hard timeout for indexing
             )
-            logger.info("[doc:%s] ChromaDB indexing completed (%d chunks)", document_id, len(vector_chunks))
+            logger.info("[doc:%s] pgvector indexing completed (%d chunks)", document_id, len(vector_chunks))
         except asyncio.TimeoutError:
             logger.error(
-                "[doc:%s] ChromaDB indexing timed out after 300s (%d chunks) — document saved but not searchable",
+                "[doc:%s] pgvector indexing timed out after 300s (%d chunks) — document saved but not searchable",
                 document_id, len(vector_chunks),
             )
         except Exception as vec_err:
             # Indexing failure is non-fatal: document is saved, just not searchable
             logger.error(
-                "[doc:%s] ChromaDB indexing failed (document saved but not searchable): %s",
+                "[doc:%s] pgvector indexing failed (document saved but not searchable): %s",
                 document_id, vec_err, exc_info=True,
             )
 
@@ -835,6 +835,7 @@ def vector_search_task(
     query: str,
     top_k: int = 10,
     category_filter: str | None = None,
+    document_ids: list[str] | None = None,
 ) -> list[dict]:
     """Run a vector similarity search on the documents worker.
 
@@ -847,7 +848,8 @@ def vector_search_task(
     from ..services.vector_service import VectorService
 
     return VectorService.search(
-        project_id, query, top_k=top_k, category_filter=category_filter,
+        project_id, query, top_k=top_k,
+        category_filter=category_filter, document_ids=document_ids,
     )
 
 

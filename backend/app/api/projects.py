@@ -344,6 +344,16 @@ async def delete_project(
         raise HTTPException(status_code=404, detail="Projet non trouvé")
 
     VectorService.delete_project_data(str(project_id))
+
+    # Clean up stale Redis progress keys for this project's documents
+    from ..services.progress_service import delete_many
+    doc_result = await db.execute(
+        select(Document.id).where(Document.project_id == project_id)
+    )
+    doc_ids = [str(row[0]) for row in doc_result.all()]
+    if doc_ids:
+        delete_many("document", doc_ids)
+
     await db.delete(project)
     await db.commit()
 

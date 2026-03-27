@@ -162,7 +162,7 @@ async def lifespan(app: FastAPI):
         """))
 
     # Create data directories
-    for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir, settings.chroma_persist_dir]:
+    for dir_path in [settings.upload_dir, settings.export_dir, settings.images_dir]:
         os.makedirs(dir_path, exist_ok=True)
 
     # Create default admin if not exists

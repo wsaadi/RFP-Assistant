@@ -114,6 +114,17 @@ def delete_progress(namespace: str, task_id: str) -> None:
     _safe_redis_op(_op)
 
 
+def delete_many(namespace: str, task_ids: List[str]) -> None:
+    """Remove progress data for multiple tasks at once."""
+    if not task_ids:
+        return
+    def _op():
+        r = _get_redis()
+        keys = [_key(namespace, tid) for tid in task_ids]
+        r.delete(*keys)
+    _safe_redis_op(_op)
+
+
 def get_many(namespace: str, task_ids: List[str]) -> List[dict]:
     """Read progress for multiple tasks at once (pipeline)."""
     if not task_ids:
