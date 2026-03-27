@@ -1479,26 +1479,27 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
                 "Retourne UNIQUEMENT le JSON."
             )
 
-        # ── Iterative fill: first call + fill-remaining passes ──
-        # Large questionnaires exceed max_tokens. Instead of blind continuation
-        # (which loses context), we parse partial results, identify what's missing,
-        # and explicitly ask the LLM to fill the remaining sections.
+        # ── Iterative fill-remaining ──
+        # Large questionnaires (RSE, RGPD) exceed max_tokens in a single call.
+        # Strategy: parse whatever the LLM produces (even truncated JSON is
+        # repairable), then ask again with "fill ONLY the remaining sections".
+        # No blind continuation — each pass gets full Excel context so the LLM
+        # knows exactly what's left to fill.
         all_data: List[Dict] = []
-        max_passes = 4  # Up to 4 passes to fill everything
+        max_passes = 5
 
         for pass_num in range(max_passes):
             if pass_num == 0:
-                # First pass: full context
                 call_prompt = user_prompt
             else:
-                # Subsequent passes: tell the LLM what's already done
                 filled_summary = self._summarize_filled_cells(all_data)
                 call_prompt = (
                     user_prompt
-                    + f"\n\n⚠️ ATTENTION — COMPLÉTION PARTIELLE (passe {pass_num + 1}):\n"
-                    f"Les cellules suivantes ont DÉJÀ été remplies (NE LES RÉGÉNÈRE PAS):\n{filled_summary}\n\n"
-                    "Tu DOIS maintenant remplir TOUTES les cellules restantes qui n'apparaissent PAS dans la liste ci-dessus. "
-                    "Concentre-toi sur les sections/onglets qui n'ont pas encore été traités. "
+                    + f"\n\n⚠️ COMPLÉTION PARTIELLE — PASSE {pass_num + 1}:\n"
+                    f"Les cellules suivantes ont DÉJÀ été remplies lors des passes précédentes:\n{filled_summary}\n\n"
+                    "NE RÉGÉNÈRE PAS ces cellules. Génère UNIQUEMENT les entrées JSON pour les cellules "
+                    "qui ne figurent PAS dans la liste ci-dessus. "
+                    "Il reste des sections/onglets entiers à remplir — traite-les TOUS. "
                     "Retourne UNIQUEMENT le JSON des cellules MANQUANTES."
                 )
 
@@ -1506,42 +1507,44 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
                 system_prompt, call_prompt, temperature=0.1, max_tokens=32000,
             )
 
-            # If truncated, try one continuation to salvage partial data
-            if finish_reason == 'length':
-                logger.info("Excel fill pass %d truncated — attempting continuation", pass_num + 1)
-                raw = await self._continue_truncated_json(system_prompt, call_prompt, raw, max_continuations=2)
-
+            # Parse whatever we got — _parse_json_array handles truncated JSON
+            # via _repair_truncated_json (closes unclosed brackets)
             data = _parse_json_array(raw)
             if data:
                 new_entries = self._deduplicate_fill_entries(data, all_data)
                 all_data.extend(new_entries)
                 logger.info(
-                    "Excel fill pass %d: %d new entries (total: %d)",
-                    pass_num + 1, len(new_entries), len(all_data),
+                    "Excel fill pass %d: %d new entries, %d total (finish=%s)",
+                    pass_num + 1, len(new_entries), len(all_data), finish_reason,
                 )
 
-                # If LLM finished naturally (not truncated), we're done
-                if finish_reason != 'length':
+                # If LLM finished naturally (not truncated) or returned 0 new entries, stop
+                if finish_reason != 'length' or len(new_entries) == 0:
                     break
             else:
-                logger.warning("Excel fill pass %d: JSON parse failed", pass_num + 1)
-                if pass_num == 0:
-                    # First pass failed entirely — try one retry
+                # JSON parse failed completely
+                logger.warning("Excel fill pass %d: JSON parse failed (raw length: %d)",
+                               pass_num + 1, len(raw))
+                if pass_num == 0 and not all_data:
+                    # First pass failed — retry once with stricter prompt
                     retry_prompt = (
                         user_prompt
                         + "\n\n⚠️ CRITIQUE: Ta réponse n'était pas du JSON valide. "
-                        "Commence par [ et termine par ]. Remplis TOUTES les cellules."
+                        "Commence DIRECTEMENT par [ et termine par ]. "
+                        "Aucun texte avant ni après. Remplis TOUTES les cellules."
                     )
-                    raw2, finish2 = await self._generate_with_finish_reason(
+                    raw2, _ = await self._generate_with_finish_reason(
                         system_prompt, retry_prompt, temperature=0.05, max_tokens=32000,
                     )
-                    if finish2 == 'length':
-                        raw2 = await self._continue_truncated_json(system_prompt, retry_prompt, raw2, max_continuations=2)
                     data2 = _parse_json_array(raw2)
                     if data2:
                         all_data.extend(data2)
                         logger.info("Excel fill retry: %d entries", len(data2))
-                break  # Don't continue if parse keeps failing
+                        continue  # Try another fill-remaining pass
+                # If we already have partial data, that's OK — continue to next pass
+                if all_data:
+                    continue
+                break  # No data at all and retry failed — give up
 
         if not all_data:
             raise ValueError(
@@ -1549,8 +1552,8 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
                 "Veuillez réessayer."
             )
 
-        logger.info("Excel fill completed for '%s': %d total entries in %d passes",
-                     document_title, len(all_data), min(pass_num + 1, max_passes))
+        logger.info("Excel fill completed for '%s': %d total entries across %d pass(es)",
+                     document_title, len(all_data), pass_num + 1)
         return all_data
 
     @staticmethod
