@@ -346,8 +346,8 @@ async def init_db():
             for provider, model, price_in, price_out in default_pricing:
                 await conn.execute(text("""
                     INSERT INTO ai_model_pricing (id, provider, model_name, price_per_1k_input, price_per_1k_output, currency)
-                    SELECT gen_random_uuid(), :provider, :model, :price_in, :price_out, 'EUR'
-                    WHERE NOT EXISTS (SELECT 1 FROM ai_model_pricing WHERE provider = :provider AND model_name = :model)
+                    SELECT gen_random_uuid(), :provider::VARCHAR(50), :model::VARCHAR(100), :price_in::FLOAT, :price_out::FLOAT, 'EUR'
+                    WHERE NOT EXISTS (SELECT 1 FROM ai_model_pricing WHERE provider = :provider::VARCHAR(50) AND model_name = :model::VARCHAR(100))
                 """), {"provider": provider, "model": model, "price_in": price_in, "price_out": price_out})
         except Exception:
             logger.debug("Default pricing seed skipped")
