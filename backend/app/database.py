@@ -103,6 +103,64 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
+    # ── Enable pgvector extension ──
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+
+    # ── Create document_embeddings table for pgvector ──
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS document_embeddings (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    project_id UUID NOT NULL,
+                    document_id UUID NOT NULL,
+                    chunk_id UUID NOT NULL,
+                    content TEXT NOT NULL,
+                    embedding vector(768),
+                    document_name VARCHAR(500) DEFAULT '',
+                    category VARCHAR(50) DEFAULT '',
+                    page_number INTEGER DEFAULT 0,
+                    section_title VARCHAR(500) DEFAULT '',
+                    chunk_index INTEGER DEFAULT 0,
+                    created_at TIMESTAMPTZ DEFAULT NOW()
+                )
+            """))
+        except Exception:
+            logger.debug("document_embeddings table already exists")
+
+        # Indexes for pgvector search
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_embeddings_project "
+                "ON document_embeddings (project_id)"
+            ))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_embeddings_document "
+                "ON document_embeddings (project_id, document_id)"
+            ))
+        except Exception:
+            pass
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_embeddings_category "
+                "ON document_embeddings (project_id, category)"
+            ))
+        except Exception:
+            pass
+        # HNSW vector index for fast cosine similarity search
+        try:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS ix_embeddings_vector "
+                "ON document_embeddings USING hnsw (embedding vector_cosine_ops) "
+                "WITH (m = 16, ef_construction = 64)"
+            ))
+        except Exception:
+            pass
+
     # ── Lightweight migrations for existing databases ──
     # ALTER TYPE ... ADD VALUE cannot run inside a transaction in PostgreSQL.
     # Use a separate engine with AUTOCOMMIT isolation for this single statement.
