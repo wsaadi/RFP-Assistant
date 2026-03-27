@@ -5400,14 +5400,6 @@ def _extract_excel_search_queries(excel_structure: str, doc_title: str) -> list[
         if any(kw in struct_lower for kw in keywords):
             queries.append(query)
 
-    # Extract individual question sentences from Excel cells for precise search
-    # Pattern: cell contents that end with "?" or contain KPI-like terms
-    question_pattern = _re.compile(r'=([^|]+\?)', _re.IGNORECASE)
-    for match in question_pattern.finditer(excel_structure):
-        q = match.group(1).strip()
-        if len(q) > 20 and len(q) < 200:
-            queries.append(q)
-
     # Deduplicate while preserving order
     seen: set[str] = set()
     unique: list[str] = []
@@ -5676,24 +5668,22 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
 
         from ..tasks.chapter_tasks import _hybrid_search
 
-        # Determine which categories to search
-        if has_custom_sources and doc_source_cats:
-            source_categories = list(doc_source_cats)
-        else:
-            source_categories = ["old_response", "inspiration"]
+        # No category filter — search ALL source documents (old_response + inspiration)
+        # This avoids the N queries × M categories explosion that was causing slowness.
 
         if is_conformity_doc:
             search_queries = _extract_excel_search_queries(excel_structure, doc_title)
+            # Limit to 6 most relevant queries to keep search fast
+            search_queries = search_queries[:6]
             seen_chunk_ids: set[str] = set()
             all_chunks: list[dict] = []
             for sq in search_queries:
-                for cat in source_categories:
-                    chunks = _hybrid_search(str(project_id), sq, top_k=10, category_filter=cat)
-                    for c in chunks:
-                        cid = c.get("chunk_id", c.get("content", "")[:80])
-                        if cid not in seen_chunk_ids:
-                            seen_chunk_ids.add(cid)
-                            all_chunks.append(c)
+                chunks = _hybrid_search(str(project_id), sq, top_k=10)
+                for c in chunks:
+                    cid = c.get("chunk_id", c.get("content", "")[:80])
+                    if cid not in seen_chunk_ids:
+                        seen_chunk_ids.add(cid)
+                        all_chunks.append(c)
             all_chunks.sort(key=lambda c: c.get("score", 0), reverse=True)
             relevant_chunks = all_chunks[:40]
         else:
@@ -5701,10 +5691,7 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                 f"prix unitaire tarif {doc_title} BPU bordereau montant "
                 "coût forfait taux journalier"
             )
-            all_chunks = []
-            for cat in source_categories:
-                all_chunks.extend(_hybrid_search(str(project_id), search_query, top_k=15, category_filter=cat))
-            relevant_chunks = all_chunks[:30]
+            relevant_chunks = _hybrid_search(str(project_id), search_query, top_k=25)
 
         relevant_context = "\n\n".join([
             f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
