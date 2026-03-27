@@ -6,7 +6,10 @@ import re
 from typing import Awaitable, Callable, List, Optional, Dict
 
 import httpx
-from mistralai import Mistral
+try:
+    from mistralai import Mistral  # mistralai <2.x
+except ImportError:
+    from mistralai.client.sdk import Mistral  # mistralai >=2.x
 
 from ..models.project import AIConfig, AIUsageLog
 
