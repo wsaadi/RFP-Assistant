@@ -988,6 +988,9 @@ CATEGORY_LABELS = {
 }
 
 
+_NS_QA = "document_qa"
+
+
 @router.post("/{project_id}/document-qa")
 async def document_qa(
     project_id: uuid.UUID,
@@ -995,10 +998,11 @@ async def document_qa(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
-    """Answer a question about the project documents using RAG (vector search + LLM)."""
+    """Start a document Q&A task in the background (non-blocking).
+
+    Returns a task_id that can be polled via GET /{project_id}/document-qa-status/{task_id}.
+    """
     from ..services.moderation_service import moderate_prompt_llm
-    from ..services.vector_service import VectorService
-    from ..services.ai_service import create_ai_service
     from ..security import decrypt_api_key
 
     result = await db.execute(select(RFPProject).where(RFPProject.id == project_id))
@@ -1013,7 +1017,7 @@ async def document_qa(
     if not config or not config.mistral_api_key_encrypted:
         raise HTTPException(status_code=400, detail="Configuration IA non definie")
 
-    # Moderate the user question (regex + LLM) before any heavy processing
+    # Moderate the user question (regex + LLM) before dispatching
     scw_key = decrypt_api_key(config.scaleway_api_key_encrypted or "") if config.scaleway_api_key_encrypted else ""
     moderation = await moderate_prompt_llm(
         request.question,
@@ -1027,196 +1031,39 @@ async def document_qa(
             "sources": [],
         }
 
-    ai_service = create_ai_service(config)
+    # Generate a unique task ID and dispatch to Celery
+    task_id = str(uuid.uuid4())
 
-    # Semantic search — optionally restricted to selected documents/categories
-    # If categories are selected, search within each category and merge results
-    if request.categories and not request.document_ids:
-        all_search_results = []
-        for cat in request.categories:
-            cat_results = VectorService.search(
-                str(project_id),
-                request.question,
-                top_k=15,
-                category_filter=cat,
-            )
-            all_search_results.extend(cat_results)
-        # Sort by score descending and take top 25
-        all_search_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-        search_results = all_search_results[:25]
-    else:
-        search_results = VectorService.search(
+    set_progress(_NS_QA, task_id, {
+        "status": "queued", "step": "queued", "progress": 0,
+        "message": "En file d'attente...",
+    })
+
+    from ..tasks.qa_tasks import document_qa_task
+    document_qa_task.apply_async(
+        args=(
+            task_id,
             str(project_id),
+            str(project.workspace_id),
             request.question,
-            top_k=25,
-            document_ids=request.document_ids,
-        )
+            request.document_ids,
+            request.categories,
+            request.include_generated_content,
+        ),
+        priority=5,
+    )
 
-    # Filter out low-relevance results (cosine similarity < 0.3)
-    search_results = [r for r in search_results if r.get("score", 0) >= 0.3]
+    return {"task_id": task_id, "status": "queued"}
 
-    # Load generated content if requested
-    generated_context = ""
-    if request.include_generated_content:
-        from ..models.chapter import Chapter
-        from ..services.anonymization_service import AnonymizationService
-        ch_result = await db.execute(
-            select(Chapter)
-            .where(Chapter.project_id == project_id)
-            .where(Chapter.content != "")
-            .order_by(Chapter.order)
-        )
-        chapters = ch_result.scalars().all()
-        if chapters:
-            ch_parts = []
-            for ch in chapters:
-                ch_parts.append(f"## {ch.title}\n{ch.content[:3000]}")
-            generated_context = "\n\n".join(ch_parts)
 
-    if not search_results and not generated_context:
-        has_filters = request.document_ids or request.categories
-        if has_filters:
-            return {
-                "answer": "Je n'ai trouve aucune information pertinente dans les sources selectionnees pour repondre a cette question. Essayez de reformuler votre question ou de selectionner d'autres sources.",
-                "sources": [],
-            }
-        return {
-            "answer": "Je n'ai trouve aucun document pertinent pour repondre a cette question. Verifiez que des documents ont bien ete charges et traites dans le projet.",
-            "sources": [],
-        }
-
-    # Build context from search results — group by document for coherence
-    from collections import defaultdict
-    doc_groups = defaultdict(list)
-    for r in search_results:
-        doc_key = r.get("document_name", "Document inconnu")
-        doc_groups[doc_key].append(r)
-
-    context_parts = []
-    sources = []
-    seen_sources = set()
-    chunk_count = 0
-    max_chunks = 20  # Limit context window to avoid dilution
-
-    for doc_name, doc_results in doc_groups.items():
-        # Sort by page number then chunk index for coherent reading order
-        doc_results.sort(key=lambda x: (x.get("page_number", 0), x.get("chunk_index", 0)))
-        for r in doc_results:
-            if chunk_count >= max_chunks:
-                break
-            content = r["content"]
-            # Remove the "passage: " prefix added during indexing
-            if content.startswith("passage: "):
-                content = content[9:]
-            category = r.get("category", "")
-            page = r.get("page_number", 0)
-            section = r.get("section_title", "")
-            cat_label = CATEGORY_LABELS.get(category, category)
-            score = r.get("score", 0)
-
-            header = f"[Source: {doc_name} | {cat_label} | page {page}"
-            if section:
-                header += f" | section: {section}"
-            header += f" | pertinence: {score:.0%}]"
-
-            context_parts.append(f"{header}\n{content}")
-            chunk_count += 1
-
-            source_key = f"{doc_name}|{page}"
-            if source_key not in seen_sources:
-                seen_sources.add(source_key)
-                sources.append({
-                    "document_name": doc_name,
-                    "category": category,
-                    "category_label": cat_label,
-                    "page_number": page,
-                    "score": score,
-                    "excerpt": content[:200],
-                })
-
-    # Append generated content if requested
-    if generated_context:
-        context_parts.append(
-            f"[Source: Contenu genere | Chapitres rediges | Reponse en cours]\n{generated_context}"
-        )
-        sources.append({
-            "document_name": "Contenu genere (chapitres)",
-            "category": "generated",
-            "category_label": "Contenu genere",
-            "page_number": 0,
-            "score": 1.0,
-            "excerpt": generated_context[:200],
-        })
-
-    context_text = "\n\n---\n\n".join(context_parts)
-
-    # Build document scope description for the prompt
-    doc_scope = ""
-    if request.document_ids or request.categories:
-        scope_parts = []
-        if request.categories:
-            scope_parts.append(f"categories: {', '.join(request.categories)}")
-        if request.document_ids:
-            doc_names_in_scope = list(doc_groups.keys())
-            scope_parts.append(f"documents: {', '.join(doc_names_in_scope)}")
-        if request.include_generated_content:
-            scope_parts.append("contenu genere (chapitres rediges)")
-        doc_scope = f"\n\nIMPORTANT: L'utilisateur a restreint la recherche aux sources suivantes : {'; '.join(scope_parts)}. Concentre ta reponse sur ces sources uniquement."
-    elif request.include_generated_content:
-        doc_scope = "\n\nIMPORTANT: L'utilisateur a demande d'inclure le contenu genere (chapitres rediges) dans la recherche. Utilise aussi ces informations pour repondre."
-
-    system_prompt = f"""Tu es un assistant expert en analyse de documents pour les appels d'offres.
-L'utilisateur te pose des questions sur les documents charges dans le projet.
-Tu dois repondre en te basant UNIQUEMENT sur les extraits de documents fournis ci-dessous.
-
-Regles STRICTES:
-- Base ta reponse EXCLUSIVEMENT sur les extraits fournis. Ne complete JAMAIS avec des connaissances generales.
-- Reponds de maniere precise, structuree et detaillee.
-- Cite TOUJOURS tes sources avec le format exact : **(Source: nom_du_fichier.pdf, Categorie, page X)**
-- Pour chaque affirmation factuelle, indique la source correspondante.
-- Si tu ne trouves PAS l'information dans les extraits fournis, dis-le CLAIREMENT : "Cette information n'apparait pas dans les extraits disponibles."
-- Ne fais JAMAIS de supposition ou d'extrapolation au-dela de ce qui est ecrit dans les documents.
-- Si l'information est partielle, indique-le et cite ce qui est disponible.
-
-Vocabulaire de categorie:
-- "Ancien AO" = documents de categorie "Ancien AO" (ancien appel d'offres)
-- "Ancienne Reponse" = documents de categorie "Ancienne Reponse"
-- "Nouvel AO" / "cahier des charges" = documents de categorie "Nouvel AO"
-- "Notre Reponse" = documents de categorie "Notre Reponse"
-- "Inspiration" = documents d'inspiration / references
-- "Contenu genere" = chapitres rediges par l'IA dans le cadre de la reponse en cours
-
-Mise en forme:
-- Utilise le markdown : titres (##), listes, **gras** pour les points cles.
-- Si la question porte sur une comparaison, structure ta reponse en colonnes ou sections claires.
-- Termine par une synthese courte si la reponse est longue.{doc_scope}"""
-
-    user_prompt = f"""Voici les extraits pertinents des documents du projet (classes par document et page) :
-
-{context_text}
-
----
-
-Question de l'utilisateur : {request.question}
-
-Reponds de maniere precise et structuree en citant systematiquement tes sources."""
-
-    try:
-        answer = await ai_service.generate_streaming(
-            system_prompt, user_prompt, temperature=0.2, timeout=120,
-        )
-    except Exception as e:
-        logger.error("Document QA failed for project %s: %s", project_id, e)
-        raise HTTPException(status_code=500, detail=f"Erreur IA: {str(e)[:200]}")
-
-    # Log AI usage for document QA
-    from ..services.ai_service import log_ai_usage_from_service
-    await log_ai_usage_from_service(db, project_id, "document_qa", ai_service)
-
-    return {
-        "answer": answer,
-        "sources": sources[:10],
-    }
+@router.get("/{project_id}/document-qa-status/{task_id}")
+async def document_qa_status(
+    project_id: uuid.UUID,
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Poll the progress/result of a document Q&A task."""
+    return get_or_idle(_NS_QA, task_id)
 
 
 # ── Soutenance (PowerPoint + Script) ──

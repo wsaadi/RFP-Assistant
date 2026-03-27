@@ -2037,6 +2037,7 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
   qaSelectedCategories: string[] = [];
   qaIncludeGenerated = false;
   qaDocFilterOpen = false;
+  private qaPollSub?: Subscription;
 
   // Project members & access control
   projectMembers: any[] = [];
@@ -2181,6 +2182,8 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
       sub.unsubscribe();
     }
     this.aiPollSubs = {};
+    // Stop Q&A polling
+    this.qaPollSub?.unsubscribe();
   }
 
   isCategoryEnabled(value: string): boolean {
@@ -3834,27 +3837,72 @@ export class ProjectDashboardComponent implements OnInit, OnDestroy {
     this.qaInput = '';
     this.qaLoading = true;
 
-    this.api.documentQA(
+    this.api.documentQAStart(
       this.projectId, question,
       this.qaSelectedDocIds.length > 0 ? this.qaSelectedDocIds : undefined,
       this.qaSelectedCategories.length > 0 ? this.qaSelectedCategories : undefined,
       this.qaIncludeGenerated || undefined,
     ).subscribe({
       next: (res) => {
-        this.qaLoading = false;
-        this.qaMessages.push({
-          role: 'assistant',
-          content: res.answer,
-          sources: res.sources,
-          timestamp: new Date(),
-          _sourcesOpen: false,
-        });
+        if (res.answer !== undefined) {
+          // Moderation rejection — answer returned directly (no task_id)
+          this.qaLoading = false;
+          this.qaMessages.push({
+            role: 'assistant',
+            content: res.answer,
+            sources: res.sources || [],
+            timestamp: new Date(),
+            _sourcesOpen: false,
+          });
+          return;
+        }
+        // Start polling for the background task result
+        this._startQaPolling(res.task_id);
       },
       error: (err) => {
         this.qaLoading = false;
         this.qaMessages.push({
           role: 'error',
           content: err.error?.detail || 'Erreur lors de l\'interrogation de l\'IA',
+          timestamp: new Date(),
+        });
+      },
+    });
+  }
+
+  private _startQaPolling(taskId: string): void {
+    this.qaPollSub?.unsubscribe();
+    this.qaPollSub = timer(500, 2000).pipe(
+      switchMap(() => this.api.documentQAStatus(this.projectId, taskId))
+    ).subscribe({
+      next: (status) => {
+        if (status.status === 'completed') {
+          this.qaPollSub?.unsubscribe();
+          this.qaLoading = false;
+          this.qaMessages.push({
+            role: 'assistant',
+            content: status.answer || '',
+            sources: status.sources || [],
+            timestamp: new Date(),
+            _sourcesOpen: false,
+          });
+        } else if (status.status === 'error') {
+          this.qaPollSub?.unsubscribe();
+          this.qaLoading = false;
+          this.qaMessages.push({
+            role: 'error',
+            content: status.message || 'Erreur lors de l\'interrogation de l\'IA',
+            timestamp: new Date(),
+          });
+        }
+        // Otherwise still running — keep polling
+      },
+      error: () => {
+        this.qaPollSub?.unsubscribe();
+        this.qaLoading = false;
+        this.qaMessages.push({
+          role: 'error',
+          content: 'Erreur de communication avec le serveur',
           timestamp: new Date(),
         });
       },

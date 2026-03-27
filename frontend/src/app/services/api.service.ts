@@ -570,7 +570,7 @@ export class ApiService {
     return this.http.post(`${this.baseUrl}/export/${projectId}/preview-chat-cancel`, {});
   }
 
-  documentQA(projectId: string, question: string, documentIds?: string[], categories?: string[], includeGenerated?: boolean): Observable<{ answer: string; sources: { document_name: string; category: string; category_label: string; page_number: number; score: number; excerpt: string }[] }> {
+  documentQAStart(projectId: string, question: string, documentIds?: string[], categories?: string[], includeGenerated?: boolean): Observable<{ task_id: string; status: string; answer?: string; sources?: any[] }> {
     const body: any = { question };
     if (documentIds && documentIds.length > 0) {
       body.document_ids = documentIds;
@@ -582,6 +582,10 @@ export class ApiService {
       body.include_generated_content = true;
     }
     return this.http.post<any>(`${this.baseUrl}/export/${projectId}/document-qa`, body);
+  }
+
+  documentQAStatus(projectId: string, taskId: string): Observable<{ status: string; step: string; progress: number; message: string; answer?: string; sources?: any[] }> {
+    return this.http.get<any>(`${this.baseUrl}/export/${projectId}/document-qa-status/${taskId}`);
   }
 
   // ── Soutenance ──

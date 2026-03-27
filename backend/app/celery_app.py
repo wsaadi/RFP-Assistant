@@ -137,6 +137,7 @@ celery.conf.update(
         "tasks.generate_recommendation": {"queue": "ai"},
         "tasks.export_soutenance": {"queue": "ai"},
         "tasks.preview_chat": {"queue": "ai"},
+        "tasks.document_qa": {"queue": "ai"},
         # Lightweight tasks → default queue
         "tasks.export_word": {"queue": "default"},
         "tasks.export_backup": {"queue": "default"},
@@ -162,6 +163,7 @@ celery.conf.update(
         "app.tasks.chapter_tasks",
         "app.tasks.project_tasks",
         "app.tasks.export_tasks",
+        "app.tasks.qa_tasks",
     ],
 )
 
