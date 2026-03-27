@@ -24,6 +24,181 @@ from ..config import settings
 CHUNK_SIZE = 200  # words
 CHUNK_OVERLAP = 40  # words overlap between chunks
 
+# ── Sentence-aware splitting helpers ──
+
+# Regex to split text into sentences (French + English punctuation)
+_SENTENCE_RE = re.compile(
+    r'(?<=[.!?])\s+(?=[A-ZÀ-ÖØ-Þ0-9])'  # sentence boundary
+    r'|(?<=\n)\s*(?=\n)'                    # double newline (paragraph break)
+)
+
+# Regex to detect bullet-point / list-item lines
+_BULLET_RE = re.compile(
+    r'^\s*(?:[-–—•●◦▪▸►✓✔☑☐★⬥]'     # common bullet chars
+    r'|\d{1,3}[.)]\s'                      # numbered list: "1. " or "1) "
+    r'|[a-zA-Z][.)]\s'                     # lettered list: "a. " or "a) "
+    r'|\[\s*[xX ]?\]\s'                    # checkbox: "[ ] " or "[x] "
+    r')',
+    re.MULTILINE,
+)
+
+# Regex to detect lines containing key numerical KPIs (percentages, amounts, etc.)
+_KPI_RE = re.compile(
+    r'\d+[.,]\d+\s*%'                      # 4,09% or 3.5%
+    r'|\d+\s*%'                             # 87%
+    r'|\d[\d\s]*(?:€|euros?|k€|M€|Md€)'   # monetary amounts
+    r'|\d[\d\s,.]*(?:heures?|jours?|mois|ans?)\b'  # durations
+    r'|\d[\d\s,.]*(?:ETP|salariés?|collaborateurs?)\b',  # headcounts
+    re.IGNORECASE,
+)
+
+
+def _split_into_semantic_units(text: str) -> List[str]:
+    """Split text into semantic units that should not be broken apart.
+
+    A semantic unit is:
+    - A paragraph (text between double newlines)
+    - Within a paragraph: a group of consecutive bullet points
+    - Within a paragraph: a sentence or group of short sentences
+
+    This ensures that bullet-point lists with KPIs stay together in the same
+    chunk, preventing loss of context like "4.09% de la masse salariale".
+    """
+    if not text.strip():
+        return []
+
+    units = []
+
+    # First, split into paragraphs (double newline or more)
+    paragraphs = re.split(r'\n\s*\n', text)
+
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+
+        lines = para.split('\n')
+
+        # Check if this paragraph is a bullet list
+        bullet_lines = [l for l in lines if _BULLET_RE.match(l.strip())]
+        is_bullet_list = len(bullet_lines) > len(lines) * 0.5
+
+        if is_bullet_list:
+            # Keep bullet lists as atomic units — group consecutive bullets
+            # together with any preceding header line
+            current_group = []
+            for line in lines:
+                line_stripped = line.strip()
+                if not line_stripped:
+                    if current_group:
+                        units.append('\n'.join(current_group))
+                        current_group = []
+                    continue
+                current_group.append(line_stripped)
+
+            if current_group:
+                units.append('\n'.join(current_group))
+        else:
+            # For regular text, split into sentences but keep KPI-containing
+            # sentences grouped with their surrounding context
+            sentences = _SENTENCE_RE.split(para)
+            sentences = [s.strip() for s in sentences if s.strip()]
+
+            if not sentences:
+                continue
+
+            # Group sentences: if a sentence contains a KPI, keep it with
+            # the previous sentence (which likely provides context)
+            i = 0
+            while i < len(sentences):
+                group = [sentences[i]]
+                # Look ahead: if next sentence has a KPI, attach it
+                while (i + 1 < len(sentences)
+                       and _KPI_RE.search(sentences[i + 1])
+                       and len(' '.join(group + [sentences[i + 1]]).split()) < CHUNK_SIZE):
+                    i += 1
+                    group.append(sentences[i])
+                units.append(' '.join(group))
+                i += 1
+
+    return units
+
+
+def _assemble_chunks_from_units(
+    units: List[str],
+    document_id: str,
+    document_name: str,
+    category: str,
+    page_number: int,
+    section_title: str,
+    chunk_index_start: int,
+) -> List[Dict]:
+    """Assemble semantic units into chunks respecting CHUNK_SIZE with overlap.
+
+    Units are never split — if a single unit exceeds CHUNK_SIZE, it becomes
+    its own chunk (better to have one oversized chunk than to break a bullet
+    list with KPIs).
+
+    Overlap is achieved by repeating the last unit(s) of a chunk at the start
+    of the next chunk, so numerical data near chunk boundaries appears in both.
+    """
+    chunks = []
+    current_units: List[str] = []
+    current_word_count = 0
+    idx = chunk_index_start
+
+    for unit in units:
+        unit_words = len(unit.split())
+
+        # If adding this unit would exceed the limit, finalize current chunk
+        if current_units and (current_word_count + unit_words) > CHUNK_SIZE:
+            chunk_text = '\n'.join(current_units)
+            if len(chunk_text.split()) >= 15:  # min viable chunk
+                chunks.append({
+                    "id": str(uuid.uuid4()),
+                    "content": chunk_text,
+                    "document_id": document_id,
+                    "document_name": document_name,
+                    "category": category,
+                    "page_number": page_number,
+                    "section_title": section_title,
+                    "chunk_index": idx,
+                })
+                idx += 1
+
+            # Overlap: keep the last unit(s) totaling ~CHUNK_OVERLAP words
+            overlap_units: List[str] = []
+            overlap_words = 0
+            for u in reversed(current_units):
+                u_len = len(u.split())
+                if overlap_words + u_len > CHUNK_OVERLAP:
+                    break
+                overlap_units.insert(0, u)
+                overlap_words += u_len
+
+            current_units = overlap_units
+            current_word_count = overlap_words
+
+        current_units.append(unit)
+        current_word_count += unit_words
+
+    # Flush remaining units
+    if current_units:
+        chunk_text = '\n'.join(current_units)
+        if len(chunk_text.split()) >= 15:
+            chunks.append({
+                "id": str(uuid.uuid4()),
+                "content": chunk_text,
+                "document_id": document_id,
+                "document_name": document_name,
+                "category": category,
+                "page_number": page_number,
+                "section_title": section_title,
+                "chunk_index": idx,
+            })
+
+    return chunks
+
 
 class DocumentProcessor:
     """Process documents: extract text, images, and create chunks."""
@@ -419,6 +594,10 @@ class DocumentProcessor:
     ) -> List[Dict]:
         """Split text into overlapping chunks with metadata.
 
+        Uses sentence-aware splitting to avoid breaking bullet-point lists
+        or KPI data mid-item. Ensures that numerical data like "4,09% de la
+        masse salariale" stays in the same chunk as its context.
+
         Args:
             text: Full document text
             document_id: Document UUID
@@ -432,52 +611,33 @@ class DocumentProcessor:
         chunks = []
 
         if pages_data:
-            # Page-aware chunking
+            # Page-aware chunking with semantic units
             for page in pages_data:
                 page_text = page.get("text", "")
                 if not page_text.strip():
                     continue
 
-                words = page_text.split()
                 page_num = page.get("page_number", 0)
                 sections = page.get("sections", [])
                 current_section = sections[0] if sections else ""
 
-                for i in range(0, len(words), CHUNK_SIZE - CHUNK_OVERLAP):
-                    chunk_words = words[i : i + CHUNK_SIZE]
-                    if len(chunk_words) < 20:
-                        continue
-
-                    chunk_text = " ".join(chunk_words)
-                    chunks.append({
-                        "id": str(uuid.uuid4()),
-                        "content": chunk_text,
-                        "document_id": document_id,
-                        "document_name": document_name,
-                        "category": category,
-                        "page_number": page_num,
-                        "section_title": current_section,
-                        "chunk_index": len(chunks),
-                    })
-        else:
-            # Simple word-based chunking
-            words = text.split()
-            for i in range(0, len(words), CHUNK_SIZE - CHUNK_OVERLAP):
-                chunk_words = words[i : i + CHUNK_SIZE]
-                if len(chunk_words) < 20:
+                # Split into semantic units (sentences, bullet groups, KPI groups)
+                units = _split_into_semantic_units(page_text)
+                if not units:
                     continue
 
-                chunk_text = " ".join(chunk_words)
-                chunks.append({
-                    "id": str(uuid.uuid4()),
-                    "content": chunk_text,
-                    "document_id": document_id,
-                    "document_name": document_name,
-                    "category": category,
-                    "page_number": 0,
-                    "section_title": "",
-                    "chunk_index": len(chunks),
-                })
+                chunks.extend(_assemble_chunks_from_units(
+                    units, document_id, document_name, category,
+                    page_num, current_section, len(chunks),
+                ))
+        else:
+            # Fallback: semantic chunking without page data
+            units = _split_into_semantic_units(text)
+            if units:
+                chunks.extend(_assemble_chunks_from_units(
+                    units, document_id, document_name, category,
+                    0, "", 0,
+                ))
 
         return chunks
 

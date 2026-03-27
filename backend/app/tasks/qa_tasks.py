@@ -1,7 +1,14 @@
-"""Celery tasks for document Q&A (background processing)."""
+"""Celery tasks for document Q&A (background processing).
+
+Implements a robust RAG pipeline with:
+- Hybrid search (vector + keyword) for both semantic and exact matching
+- Multi-query reformulation for better recall on factual/numerical questions
+- Strict anti-hallucination prompts that force "not found" over guessing
+"""
 import asyncio
 import json
 import logging
+import re
 import uuid
 
 from ..celery_app import celery
@@ -23,6 +30,13 @@ CATEGORY_LABELS = {
     "inspiration": "Inspiration",
 }
 
+# Regex to detect numerical/factual questions (percentages, amounts, etc.)
+_NUMERICAL_QUERY_RE = re.compile(
+    r'(?:taux|pourcentage|%|montant|chiffre|nombre|combien|quel.*est)'
+    r'|(?:\d+[.,]?\d*\s*%)',
+    re.IGNORECASE,
+)
+
 
 def _vector_search(project_id: str, query: str, top_k: int = 10,
                    category_filter: str | None = None,
@@ -40,6 +54,55 @@ def _vector_search(project_id: str, query: str, top_k: int = 10,
     result = celery.send_task("tasks.vector_search", kwargs=kwargs)
     with allow_join_result():
         return result.get(timeout=_VECTOR_SEARCH_TIMEOUT)
+
+
+def _hybrid_search(project_id: str, query: str, top_k: int = 10,
+                   category_filter: str | None = None,
+                   document_ids: list[str] | None = None) -> list[dict]:
+    """Run a hybrid search (vector + keyword) via the documents worker."""
+    from celery.result import allow_join_result
+    kwargs = {
+        "project_id": project_id,
+        "query": query,
+        "top_k": top_k,
+        "category_filter": category_filter,
+    }
+    if document_ids:
+        kwargs["document_ids"] = document_ids
+    result = celery.send_task("tasks.hybrid_search", kwargs=kwargs)
+    with allow_join_result():
+        try:
+            return result.get(timeout=_VECTOR_SEARCH_TIMEOUT)
+        except Exception:
+            # Fallback to standard vector search if hybrid not registered yet
+            logger.warning("Hybrid search failed, falling back to vector search")
+            return _vector_search(project_id, query, top_k, category_filter, document_ids)
+
+
+def _generate_search_queries(question: str) -> list[str]:
+    """Generate multiple search queries to improve recall.
+
+    For factual/numerical questions, reformulates the query in different
+    ways to maximize the chance of finding the exact data point.
+    """
+    queries = [question]
+
+    # For numerical questions, add keyword-focused variants
+    if _NUMERICAL_QUERY_RE.search(question):
+        # Extract key terms and create focused queries
+        # Remove question words to get the core topic
+        core = re.sub(
+            r'(?:quel|quelle|quels|quelles|combien|est|sont|votre|le|la|les|des|du|de|en|et)\s+',
+            ' ', question, flags=re.IGNORECASE,
+        ).strip()
+        if core and core != question:
+            queries.append(core)
+
+        # Add a percentage-focused variant
+        if '%' in question or 'pourcentage' in question.lower() or 'taux' in question.lower():
+            queries.append(f"{core} % pourcentage chiffre")
+
+    return queries[:3]  # Max 3 queries
 
 
 def _update(task_id: str, status: str, step: str, progress: int, message: str, **extra):
@@ -95,23 +158,44 @@ async def _run_document_qa(
     task_engine, TaskSession = create_task_engine()
 
     try:
-        # ── Phase 1: Vector search (runs on documents worker) ──
-        if categories and not document_ids:
-            all_search_results = []
-            for cat in categories:
-                cat_results = _vector_search(
-                    str(project_id), question, top_k=15, category_filter=cat,
-                )
-                all_search_results.extend(cat_results)
-            all_search_results.sort(key=lambda x: x.get("score", 0), reverse=True)
-            search_results = all_search_results[:25]
-        else:
-            search_results = _vector_search(
-                str(project_id), question, top_k=25, document_ids=document_ids,
-            )
+        # ── Phase 1: Hybrid search (vector + keyword) with multi-query ──
+        # Use hybrid search to find both semantically similar AND exact keyword matches.
+        # Multi-query reformulates the question for better recall on factual data.
+        is_numerical = bool(_NUMERICAL_QUERY_RE.search(question))
+        search_queries = _generate_search_queries(question)
+        base_top_k = 20 if is_numerical else 15  # More results for numerical questions
 
-        # Filter out low-relevance results
-        search_results = [r for r in search_results if r.get("score", 0) >= 0.3]
+        all_search_results = []
+        seen_chunk_ids = set()
+
+        for sq in search_queries:
+            if categories and not document_ids:
+                for cat in categories:
+                    cat_results = _hybrid_search(
+                        str(project_id), sq, top_k=base_top_k, category_filter=cat,
+                    )
+                    for r in cat_results:
+                        cid = r.get("chunk_id")
+                        if cid not in seen_chunk_ids:
+                            seen_chunk_ids.add(cid)
+                            all_search_results.append(r)
+            else:
+                results = _hybrid_search(
+                    str(project_id), sq, top_k=base_top_k * 2, document_ids=document_ids,
+                )
+                for r in results:
+                    cid = r.get("chunk_id")
+                    if cid not in seen_chunk_ids:
+                        seen_chunk_ids.add(cid)
+                        all_search_results.append(r)
+
+        all_search_results.sort(key=lambda x: x.get("score", 0), reverse=True)
+
+        # Adaptive threshold: lower for numerical queries (numbers may have low
+        # semantic similarity but high keyword match)
+        min_score = 0.15 if is_numerical else 0.3
+        search_results = [r for r in all_search_results if r.get("score", 0) >= min_score]
+        search_results = search_results[:30]  # Cap at 30 to avoid prompt bloat
 
         _update(task_id, "running", "context", 30, "Construction du contexte...")
 
@@ -287,15 +371,28 @@ async def _run_document_qa(
 L'utilisateur te pose des questions sur les documents charges dans le projet.
 Tu dois repondre en te basant UNIQUEMENT sur les extraits de documents fournis ci-dessous.
 
-Regles STRICTES:
-- Base ta reponse EXCLUSIVEMENT sur les extraits fournis. Ne complete JAMAIS avec des connaissances generales.
+## REGLE NUMERO 1 — ZERO HALLUCINATION
+- Tu ne dois JAMAIS inventer, deviner ou estimer un chiffre, un pourcentage, un montant, une date ou toute donnee factuelle.
+- Si un chiffre ou une donnee precise n'apparait PAS textuellement dans les extraits fournis, tu DOIS repondre : **"Cette information n'apparait pas dans les extraits disponibles."**
+- Tu ne dois JAMAIS utiliser tes connaissances generales ou parametriques pour completer une reponse. Tes SEULES sources sont les extraits ci-dessous.
+- Il est ABSOLUMENT INTERDIT de produire un chiffre "vraisemblable" ou "typique du secteur" quand le chiffre exact n'est pas dans les extraits.
+- En cas de doute entre deux valeurs trouvees dans les extraits, cite LES DEUX avec leurs sources respectives et laisse l'utilisateur trancher.
+
+## REGLES DE REPONSE
+- Base ta reponse EXCLUSIVEMENT sur les extraits fournis.
 - Reponds de maniere precise, structuree et detaillee.
 - Cite TOUJOURS tes sources avec le format exact : **(Source: nom_du_fichier.pdf, Categorie, page X)**
 - Pour chaque affirmation factuelle, indique la source correspondante.
-- Si tu ne trouves PAS l'information dans les extraits fournis, dis-le CLAIREMENT : "Cette information n'apparait pas dans les extraits disponibles."
 - Ne fais JAMAIS de supposition ou d'extrapolation au-dela de ce qui est ecrit dans les documents.
 - Si l'information est partielle, indique-le et cite ce qui est disponible.
 - Les extraits peuvent contenir des donnees issues de l'analyse d'images (descriptions, texte OCR, informations cles). Utilise ces informations au meme titre que le texte des documents. Cite la source image avec le format : **(Source image: nom_du_fichier.pdf, page X)**.
+
+## TRAITEMENT DES QUESTIONS NUMERIQUES
+Quand la question porte sur un chiffre, un pourcentage, un taux ou un montant :
+1. Cherche d'abord le chiffre EXACT dans les extraits textuels.
+2. Cherche ensuite dans les donnees extraites d'images (OCR, informations cles).
+3. Si tu trouves le chiffre, cite-le EXACTEMENT comme il apparait dans la source, avec la reference precise.
+4. Si tu ne trouves PAS le chiffre, reponds CLAIREMENT : "Le chiffre exact demande n'apparait pas dans les extraits fournis." Ne propose AUCUNE estimation.
 
 Vocabulaire de categorie:
 - "Ancien AO" = documents de categorie "Ancien AO" (ancien appel d'offres)

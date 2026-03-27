@@ -37,6 +37,27 @@ def _vector_search(project_id: str, query: str, top_k: int = 10,
     with allow_join_result():
         return result.get(timeout=_VECTOR_SEARCH_TIMEOUT)
 
+
+def _hybrid_search(project_id: str, query: str, top_k: int = 10,
+                   category_filter: str | None = None) -> list[dict]:
+    """Run a hybrid search (vector + keyword) via the documents worker."""
+    result = celery.send_task(
+        "tasks.hybrid_search",
+        kwargs={
+            "project_id": project_id,
+            "query": query,
+            "top_k": top_k,
+            "category_filter": category_filter,
+        },
+    )
+    with allow_join_result():
+        try:
+            return result.get(timeout=_VECTOR_SEARCH_TIMEOUT)
+        except Exception:
+            logger.warning("Hybrid search failed in chapter gen, falling back to vector search")
+            return _vector_search(project_id, query, top_k, category_filter)
+
+
 # Namespace for chapter generation progress in Redis
 NS = "chapter_gen"
 
@@ -177,18 +198,18 @@ async def _run_chapter_generation(
                     _update("searching", 10, "Recherche de contenu pertinent...")
                     search_results = []
                     if use_old_response:
-                        search_results = _vector_search(
+                        search_results = _hybrid_search(
                             str(project_id),
                             f"{ch_title} {ch_description}",
                             top_k=5, category_filter="old_response",
                         )
-                    context_results = _vector_search(
+                    context_results = _hybrid_search(
                         str(project_id),
                         f"{ch_title} {ch_rfp_requirement}",
-                        top_k=3,
+                        top_k=5,
                     )
                     # Search inspiration documents for relevant content
-                    inspiration_results = _vector_search(
+                    inspiration_results = _hybrid_search(
                         str(project_id),
                         f"{ch_title} {ch_description}",
                         top_k=3, category_filter="inspiration",

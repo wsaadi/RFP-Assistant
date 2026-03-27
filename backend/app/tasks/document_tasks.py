@@ -756,6 +756,68 @@ async def _analyze_images_async(project_id: str, image_ids: list[str]):
         except Exception as cost_err:
             logger.warning("[project:%s] Failed to log AI usage: %s", project_id, cost_err)
 
+        # ── Index OCR text from analyzed images into vector store ──
+        # This makes image-extracted data (numbers, KPIs, percentages) searchable
+        # via the same vector/keyword search used for document chunks.
+        try:
+            from ..services.vector_service import VectorService
+            from ..models.document import Document
+
+            async with TaskSession() as db:
+                # Reload images with their analysis results + parent document info
+                from sqlalchemy import select as _sel
+                ocr_query = (
+                    _sel(DocumentImage, Document.original_filename, Document.category)
+                    .join(Document, Document.id == DocumentImage.document_id)
+                    .where(DocumentImage.id.in_([uuid.UUID(iid) for iid in image_ids]))
+                    .where(DocumentImage.analysis_status == ImageAnalysisStatus.COMPLETED.value)
+                )
+                ocr_result = await db.execute(ocr_query)
+                ocr_rows = ocr_result.all()
+
+            ocr_chunks = []
+            for db_img, doc_name, doc_category in ocr_rows:
+                # Build a rich text chunk from all image analysis data
+                parts = []
+                if db_img.anonymized_description or db_img.description:
+                    parts.append(db_img.anonymized_description or db_img.description)
+                if db_img.key_information:
+                    parts.append("Informations clés: " + ", ".join(str(k) for k in db_img.key_information))
+                if db_img.anonymized_ocr_text or db_img.ocr_text:
+                    parts.append("Texte extrait: " + (db_img.anonymized_ocr_text or db_img.ocr_text))
+
+                if not parts:
+                    continue
+
+                ocr_text_combined = "\n".join(parts)
+                # Only index if there's substantial content
+                if len(ocr_text_combined.split()) < 5:
+                    continue
+
+                ocr_chunks.append({
+                    "id": str(uuid.uuid4()),
+                    "content": ocr_text_combined,
+                    "document_id": str(db_img.document_id),
+                    "document_name": doc_name,
+                    "category": doc_category.value if hasattr(doc_category, 'value') else str(doc_category),
+                    "page_number": db_img.page_number or 0,
+                    "section_title": f"[Image: {db_img.image_type or 'image'}] {db_img.section_title or ''}".strip(),
+                    "chunk_index": 90000 + len(ocr_chunks),  # High index to distinguish from text chunks
+                })
+
+            if ocr_chunks:
+                await asyncio.to_thread(VectorService.index_chunks, project_id, ocr_chunks)
+                logger.info(
+                    "[project:%s] Indexed %d OCR image chunks in pgvector",
+                    project_id, len(ocr_chunks),
+                )
+
+        except Exception as ocr_idx_err:
+            logger.warning(
+                "[project:%s] Failed to index OCR text in vector store: %s",
+                project_id, ocr_idx_err,
+            )
+
         set_progress("image_analysis", project_id, {
             "status": "completed",
             "step": "completed",
@@ -848,6 +910,28 @@ def vector_search_task(
     from ..services.vector_service import VectorService
 
     return VectorService.search(
+        project_id, query, top_k=top_k,
+        category_filter=category_filter, document_ids=document_ids,
+    )
+
+
+@celery.task(name="tasks.hybrid_search", queue="documents")
+def hybrid_search_task(
+    project_id: str,
+    query: str,
+    top_k: int = 10,
+    category_filter: str | None = None,
+    document_ids: list[str] | None = None,
+) -> list[dict]:
+    """Run a hybrid search (vector + keyword) on the documents worker.
+
+    Combines semantic vector similarity with PostgreSQL full-text search
+    to find both conceptually related AND exact keyword/number matches.
+    This is crucial for retrieving precise numerical data like "4,09%".
+    """
+    from ..services.vector_service import VectorService
+
+    return VectorService.hybrid_search(
         project_id, query, top_k=top_k,
         category_filter=category_filter, document_ids=document_ids,
     )

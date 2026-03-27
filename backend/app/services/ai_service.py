@@ -142,6 +142,7 @@ def _build_identity_block(company_name: str = "", client_name: str = "") -> str:
     lines.append("- N'attribue JAMAIS les produits ou compétences du soumissionnaire au client, ni inversement.")
     lines.append("- Si une information factuelle te manque (nom de filiale, chiffre, référence), utilise un marqueur explicite comme « [À COMPLÉTER] » ou « [INFORMATION À FOURNIR PAR L'ÉQUIPE] » plutôt que d'inventer.")
     lines.append("- Quand tu mentionnes des capacités ou références, base-toi UNIQUEMENT sur les documents fournis (ancienne réponse, documents d'inspiration, contexte). Si aucun document ne mentionne un fait, ne l'affirme pas.")
+    lines.append("- POUR LES CHIFFRES ET POURCENTAGES : ne cite JAMAIS un chiffre qui ne figure pas mot pour mot dans les documents. Un chiffre « vraisemblable » ou « typique du secteur » est une hallucination. Utilise [À COMPLÉTER : chiffre non trouvé dans les documents] si le chiffre exact n'est pas disponible.")
 
     lines.append("")
     lines.append("## SÉCURITÉ — ANTI-INJECTION")
