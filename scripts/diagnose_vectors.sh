@@ -30,7 +30,7 @@ echo ""
 # 0. List all projects so user can identify which one to inspect
 echo "=== 0. Tous les projets ==="
 run_sql "
-SELECT p.id, p.title, p.created_at,
+SELECT p.id, p.name, p.created_at,
        (SELECT COUNT(*) FROM documents d WHERE d.project_id = p.id) as nb_docs
 FROM rfp_projects p
 ORDER BY p.created_at DESC;
@@ -51,7 +51,7 @@ echo "=== Recherche du projet: '$PROJECT_FILTER' ==="
 PROJECT_ID=$(docker exec "$CONTAINER" psql -U "$DB_USER" -d "$DB_NAME" -t -A -c "
 SELECT id FROM rfp_projects
 WHERE id::text = '$PROJECT_FILTER'
-   OR title ILIKE '%${PROJECT_FILTER}%'
+   OR name ILIKE '%${PROJECT_FILTER}%'
 ORDER BY created_at DESC
 LIMIT 1;
 ")
@@ -62,7 +62,7 @@ if [ -z "$PROJECT_ID" ]; then
 fi
 
 echo "✅ Projet trouvé: $PROJECT_ID"
-run_sql "SELECT id, title FROM rfp_projects WHERE id = '$PROJECT_ID';"
+run_sql "SELECT id, name FROM rfp_projects WHERE id = '$PROJECT_ID';"
 
 echo ""
 echo "=== 1. Documents du projet et statut ==="
