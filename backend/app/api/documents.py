@@ -136,7 +136,27 @@ async def upload_document(
             await db.delete(duplicate)
             await db.commit()
         else:
-            # Return existing document instead of re-processing
+            # Same file re-uploaded → re-process to benefit from extraction
+            # improvements (table extraction, semantic chunking, etc.)
+            # Delete old chunks and embeddings, then re-dispatch processing.
+            VectorService.delete_document_chunks(str(duplicate.project_id), str(duplicate.id))
+            from sqlalchemy import delete as sa_delete
+            await db.execute(
+                sa_delete(DocumentChunk).where(DocumentChunk.document_id == duplicate.id)
+            )
+            await db.execute(
+                sa_delete(DocumentImage).where(DocumentImage.document_id == duplicate.id)
+            )
+            duplicate.processing_status = ProcessingStatus.PENDING
+            duplicate.chunk_count = 0
+            duplicate.page_count = 0
+            duplicate.full_text = ""
+            duplicate.anonymized_full_text = ""
+            await db.commit()
+
+            from ..tasks.document_tasks import process_document_task
+            process_document_task.delay(str(duplicate.id), str(duplicate.project_id))
+
             return DocumentOut(
                 id=str(duplicate.id),
                 project_id=str(duplicate.project_id),
@@ -144,9 +164,9 @@ async def upload_document(
                 original_filename=duplicate.original_filename,
                 file_type=duplicate.file_type.value,
                 file_size=duplicate.file_size,
-                processing_status=duplicate.processing_status.value,
-                page_count=duplicate.page_count,
-                chunk_count=duplicate.chunk_count,
+                processing_status="pending",
+                page_count=0,
+                chunk_count=0,
                 uploaded_by=str(duplicate.uploaded_by),
                 created_at=duplicate.created_at,
             )
