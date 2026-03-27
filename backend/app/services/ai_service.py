@@ -1479,44 +1479,115 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
                 "Retourne UNIQUEMENT le JSON."
             )
 
-        # First call with truncation detection
-        raw, finish_reason = await self._generate_with_finish_reason(
-            system_prompt, user_prompt, temperature=0.1, max_tokens=32000,
-        )
+        # ── Iterative fill: first call + fill-remaining passes ──
+        # Large questionnaires exceed max_tokens. Instead of blind continuation
+        # (which loses context), we parse partial results, identify what's missing,
+        # and explicitly ask the LLM to fill the remaining sections.
+        all_data: List[Dict] = []
+        max_passes = 4  # Up to 4 passes to fill everything
 
-        # If truncated by max_tokens, continue from where it stopped
-        if finish_reason == 'length':
-            logger.info("Excel fill truncated for '%s' — continuing to get full result", document_title)
-            raw = await self._continue_truncated_json(system_prompt, user_prompt, raw)
+        for pass_num in range(max_passes):
+            if pass_num == 0:
+                # First pass: full context
+                call_prompt = user_prompt
+            else:
+                # Subsequent passes: tell the LLM what's already done
+                filled_summary = self._summarize_filled_cells(all_data)
+                call_prompt = (
+                    user_prompt
+                    + f"\n\n⚠️ ATTENTION — COMPLÉTION PARTIELLE (passe {pass_num + 1}):\n"
+                    f"Les cellules suivantes ont DÉJÀ été remplies (NE LES RÉGÉNÈRE PAS):\n{filled_summary}\n\n"
+                    "Tu DOIS maintenant remplir TOUTES les cellules restantes qui n'apparaissent PAS dans la liste ci-dessus. "
+                    "Concentre-toi sur les sections/onglets qui n'ont pas encore été traités. "
+                    "Retourne UNIQUEMENT le JSON des cellules MANQUANTES."
+                )
 
-        data = _parse_json_array(raw)
-        if data is not None:
-            return data
+            raw, finish_reason = await self._generate_with_finish_reason(
+                system_prompt, call_prompt, temperature=0.1, max_tokens=32000,
+            )
 
-        # Parse failed — retry with explicit JSON instruction
-        logger.warning("Excel fill JSON parse failed for '%s'. Length: %d", document_title, len(raw))
-        retry_prompt = (
-            user_prompt
-            + "\n\n⚠️ CRITIQUE: Ta réponse précédente a été tronquée ou n'était pas du JSON valide. "
-            "Réponds UNIQUEMENT avec le tableau JSON. Commence directement par [ et termine par ]. "
-            "Tu DOIS remplir TOUTES les cellules sans exception. Ne saute aucune ligne."
-        )
-        raw2, finish2 = await self._generate_with_finish_reason(
-            system_prompt, retry_prompt, temperature=0.05, max_tokens=32000,
-        )
-        if finish2 == 'length':
-            raw2 = await self._continue_truncated_json(system_prompt, retry_prompt, raw2)
+            # If truncated, try one continuation to salvage partial data
+            if finish_reason == 'length':
+                logger.info("Excel fill pass %d truncated — attempting continuation", pass_num + 1)
+                raw = await self._continue_truncated_json(system_prompt, call_prompt, raw, max_continuations=2)
 
-        data2 = _parse_json_array(raw2)
-        if data2 is not None:
-            logger.info("Excel fill retry succeeded for '%s' (%d entries)", document_title, len(data2))
-            return data2
+            data = _parse_json_array(raw)
+            if data:
+                new_entries = self._deduplicate_fill_entries(data, all_data)
+                all_data.extend(new_entries)
+                logger.info(
+                    "Excel fill pass %d: %d new entries (total: %d)",
+                    pass_num + 1, len(new_entries), len(all_data),
+                )
 
-        logger.error("Excel fill JSON parse failed on retry for '%s'", document_title)
-        raise ValueError(
-            f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
-            "Veuillez réessayer."
-        )
+                # If LLM finished naturally (not truncated), we're done
+                if finish_reason != 'length':
+                    break
+            else:
+                logger.warning("Excel fill pass %d: JSON parse failed", pass_num + 1)
+                if pass_num == 0:
+                    # First pass failed entirely — try one retry
+                    retry_prompt = (
+                        user_prompt
+                        + "\n\n⚠️ CRITIQUE: Ta réponse n'était pas du JSON valide. "
+                        "Commence par [ et termine par ]. Remplis TOUTES les cellules."
+                    )
+                    raw2, finish2 = await self._generate_with_finish_reason(
+                        system_prompt, retry_prompt, temperature=0.05, max_tokens=32000,
+                    )
+                    if finish2 == 'length':
+                        raw2 = await self._continue_truncated_json(system_prompt, retry_prompt, raw2, max_continuations=2)
+                    data2 = _parse_json_array(raw2)
+                    if data2:
+                        all_data.extend(data2)
+                        logger.info("Excel fill retry: %d entries", len(data2))
+                break  # Don't continue if parse keeps failing
+
+        if not all_data:
+            raise ValueError(
+                f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
+                "Veuillez réessayer."
+            )
+
+        logger.info("Excel fill completed for '%s': %d total entries in %d passes",
+                     document_title, len(all_data), min(pass_num + 1, max_passes))
+        return all_data
+
+    @staticmethod
+    def _summarize_filled_cells(entries: List[Dict]) -> str:
+        """Summarize which cells have been filled, grouped by sheet."""
+        from collections import defaultdict
+        by_sheet: dict[str, list[str]] = defaultdict(list)
+        for e in entries:
+            sheet = e.get("sheet", "?")
+            cell = e.get("cell", "?")
+            by_sheet[sheet].append(cell)
+
+        parts = []
+        for sheet, cells in by_sheet.items():
+            cells_str = ", ".join(sorted(cells)[:50])
+            if len(cells) > 50:
+                cells_str += f" ... (+{len(cells) - 50} autres)"
+            parts.append(f"- Onglet '{sheet}': {len(cells)} cellules ({cells_str})")
+        return "\n".join(parts)
+
+    @staticmethod
+    def _deduplicate_fill_entries(
+        new_entries: List[Dict], existing_entries: List[Dict]
+    ) -> List[Dict]:
+        """Remove entries that duplicate already-filled cells."""
+        existing_keys = set()
+        for e in existing_entries:
+            key = (e.get("sheet", ""), e.get("cell", ""))
+            existing_keys.add(key)
+
+        unique = []
+        for e in new_entries:
+            key = (e.get("sheet", ""), e.get("cell", ""))
+            if key not in existing_keys:
+                existing_keys.add(key)
+                unique.append(e)
+        return unique
 
     async def _continue_truncated_json(
         self,
