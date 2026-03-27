@@ -189,8 +189,14 @@ def _repair_truncated_json(text: str, target: str = "array") -> str:
     if in_string:
         text += '"'
 
-    # Step 2: Remove trailing comma or colon (incomplete key-value pair)
-    text = re.sub(r'[,:]\s*$', '', text)
+    # Step 2: Remove trailing incomplete key-value pairs
+    # Handles: ..., "key": "val   (already closed string above)
+    #          ..., "key":        (value never started)
+    #          ..., "key"         (colon never appeared)
+    #          ...,               (next entry never started)
+    text = re.sub(r',\s*"[^"]*"\s*:\s*$', '', text)  # trailing "key":
+    text = re.sub(r',\s*"[^"]*"\s*$', '', text)       # trailing "key"
+    text = re.sub(r'[,:]\s*$', '', text)               # trailing , or :
 
     # Step 3: Track nesting with a stack to know what to close
     stack: list[str] = []
@@ -1444,15 +1450,32 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
 
         # Parse the JSON response using the robust helper (handles truncated/malformed JSON)
         data = _parse_json_array(raw)
-        if data is None:
-            logger.warning("Excel fill JSON parse failed for '%s'. First 500 chars: %s",
-                           document_title, raw[:500])
-            raise ValueError(
-                f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
-                "Veuillez réessayer."
-            )
+        if data is not None:
+            return data
 
-        return data
+        # First parse failed — log diagnostics and retry with explicit JSON instruction
+        logger.warning("Excel fill JSON parse failed for '%s'. Length: %d chars. First 500: %s",
+                       document_title, len(raw), raw[:500])
+        logger.warning("Excel fill last 300 chars: %s", raw[-300:])
+
+        retry_prompt = (
+            user_prompt
+            + "\n\n⚠️ CRITIQUE: Ta réponse précédente n'était PAS du JSON valide. "
+            "Réponds UNIQUEMENT avec le tableau JSON, sans AUCUN texte avant ni après, "
+            "sans balises markdown. Commence directement par [ et termine par ]. "
+            "Si le JSON est trop long, réduis le nombre d'entrées mais assure-toi que le JSON est COMPLET et VALIDE."
+        )
+        raw2 = await self.generate(system_prompt, retry_prompt, temperature=0.05, max_tokens=32000)
+        data2 = _parse_json_array(raw2)
+        if data2 is not None:
+            logger.info("Excel fill JSON retry succeeded for '%s' (%d entries)", document_title, len(data2))
+            return data2
+
+        logger.error("Excel fill JSON parse failed on retry for '%s'. Length: %d", document_title, len(raw2))
+        raise ValueError(
+            f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
+            "Veuillez réessayer."
+        )
 
     async def generate_pdf_fill_data(
         self,
@@ -1544,15 +1567,32 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
 
         # Parse the JSON response using the robust helper (handles truncated/malformed JSON)
         data = _parse_json_array(raw)
-        if data is None:
-            logger.warning("PDF fill JSON parse failed for '%s'. First 500 chars: %s",
-                           document_title, raw[:500])
-            raise ValueError(
-                f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
-                "Veuillez réessayer."
-            )
+        if data is not None:
+            return data
 
-        return data
+        # First parse failed — retry with explicit JSON instruction
+        logger.warning("PDF fill JSON parse failed for '%s'. Length: %d chars. First 500: %s",
+                       document_title, len(raw), raw[:500])
+        logger.warning("PDF fill last 300 chars: %s", raw[-300:])
+
+        retry_prompt = (
+            user_prompt
+            + "\n\n⚠️ CRITIQUE: Ta réponse précédente n'était PAS du JSON valide. "
+            "Réponds UNIQUEMENT avec le tableau JSON, sans AUCUN texte avant ni après, "
+            "sans balises markdown. Commence directement par [ et termine par ]. "
+            "Si le JSON est trop long, réduis le nombre d'entrées mais assure-toi que le JSON est COMPLET et VALIDE."
+        )
+        raw2 = await self.generate(system_prompt, retry_prompt, temperature=0.05, max_tokens=32000)
+        data2 = _parse_json_array(raw2)
+        if data2 is not None:
+            logger.info("PDF fill JSON retry succeeded for '%s' (%d entries)", document_title, len(data2))
+            return data2
+
+        logger.error("PDF fill JSON parse failed on retry for '%s'. Length: %d", document_title, len(raw2))
+        raise ValueError(
+            f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
+            "Veuillez réessayer."
+        )
 
     async def execute_custom_prompt(
         self, content: str, prompt: str, context: str = "", ai_context: str = "",
