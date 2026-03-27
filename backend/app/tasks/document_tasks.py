@@ -366,8 +366,16 @@ async def _process_document_async(document_id: str, project_id: str):
         ]
 
         try:
-            await asyncio.to_thread(VectorService.index_chunks, project_id, vector_chunks)
-            logger.info("[doc:%s] ChromaDB indexing completed", document_id)
+            await asyncio.wait_for(
+                asyncio.to_thread(VectorService.index_chunks, project_id, vector_chunks),
+                timeout=300,  # 5 min hard timeout for indexing
+            )
+            logger.info("[doc:%s] ChromaDB indexing completed (%d chunks)", document_id, len(vector_chunks))
+        except asyncio.TimeoutError:
+            logger.error(
+                "[doc:%s] ChromaDB indexing timed out after 300s (%d chunks) — document saved but not searchable",
+                document_id, len(vector_chunks),
+            )
         except Exception as vec_err:
             # Indexing failure is non-fatal: document is saved, just not searchable
             logger.error(

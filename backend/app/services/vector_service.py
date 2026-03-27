@@ -1,6 +1,8 @@
 """Vector database service using ChromaDB for document indexing and search."""
+import fcntl
 import logging
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import List, Optional, Dict
@@ -109,6 +111,34 @@ class VectorService:
     # Keeps peak memory bounded so large documents don't OOM the worker.
     _INDEX_BATCH_SIZE = 64
 
+    # File lock to serialize ChromaDB write operations across forked worker
+    # processes.  ChromaDB uses SQLite under the hood, and concurrent writes
+    # from multiple processes can cause indefinite hangs when the SQLite
+    # busy-timeout is not set or contention is high.
+    _WRITE_LOCK_PATH = Path(settings.chroma_persist_dir) / ".chromadb_write.lock"
+
+    @classmethod
+    def _acquire_write_lock(cls, timeout: float = 120) -> "int":
+        """Acquire a file-based exclusive lock for ChromaDB writes.
+
+        Returns the file descriptor (caller must close it to release).
+        Raises TimeoutError if the lock cannot be acquired within *timeout* seconds.
+        """
+        cls._WRITE_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+        fd = open(cls._WRITE_LOCK_PATH, "w")
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return fd
+            except (IOError, OSError):
+                if time.monotonic() >= deadline:
+                    fd.close()
+                    raise TimeoutError(
+                        f"Could not acquire ChromaDB write lock within {timeout}s"
+                    )
+                time.sleep(0.5)
+
     @classmethod
     def index_chunks(
         cls,
@@ -117,6 +147,9 @@ class VectorService:
     ) -> List[str]:
         """Index document chunks into ChromaDB.
 
+        Uses a file-based lock to prevent concurrent writes from multiple
+        worker processes (avoids SQLite lock contention / hangs).
+
         Args:
             project_id: The project UUID
             chunks: List of dicts with keys: id, content, metadata
@@ -124,8 +157,11 @@ class VectorService:
         Returns:
             List of embedding IDs
         """
-        collection = cls.get_collection(project_id)
+        if not chunks:
+            return []
 
+        # Pre-compute embeddings OUTSIDE the lock — this is the slow part
+        # (model inference) and is safe to run concurrently.
         ids = []
         documents = []
         metadatas = []
@@ -143,14 +179,25 @@ class VectorService:
                 "chunk_index": chunk.get("chunk_index", 0),
             })
 
-        # Process in batches to avoid OOM on large documents.
-        for start in range(0, len(ids), cls._INDEX_BATCH_SIZE):
-            end = start + cls._INDEX_BATCH_SIZE
-            collection.add(
-                ids=ids[start:end],
-                documents=documents[start:end],
-                metadatas=metadatas[start:end],
-            )
+        # Pre-compute all embeddings concurrently (no lock needed for read-only model inference)
+        embedding_fn = cls.get_embedding_function()
+        all_embeddings = embedding_fn(documents)
+
+        # Acquire exclusive lock for the ChromaDB write phase only
+        lock_fd = cls._acquire_write_lock(timeout=120)
+        try:
+            collection = cls.get_collection(project_id)
+            for start in range(0, len(ids), cls._INDEX_BATCH_SIZE):
+                end = start + cls._INDEX_BATCH_SIZE
+                collection.add(
+                    ids=ids[start:end],
+                    documents=documents[start:end],
+                    metadatas=metadatas[start:end],
+                    embeddings=all_embeddings[start:end],
+                )
+        finally:
+            fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            lock_fd.close()
 
         return ids
 
