@@ -245,6 +245,70 @@ async def delete_document(
     await db.commit()
 
 
+@router.post("/{document_id}/reprocess")
+async def reprocess_document(
+    document_id: uuid.UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Re-process an existing document: delete old chunks/embeddings and re-run
+    the full extraction + indexing pipeline.
+
+    Useful when the extraction logic has been improved (e.g. table extraction)
+    and existing documents need to benefit from the new processing without
+    requiring the user to delete and re-upload.
+    """
+    result = await db.execute(select(Document).where(Document.id == document_id))
+    document = result.scalar_one_or_none()
+    if not document:
+        raise HTTPException(status_code=404, detail="Document non trouvé")
+
+    if not document.file_path or not os.path.exists(document.file_path):
+        raise HTTPException(
+            status_code=400,
+            detail="Le fichier source n'est plus disponible sur le serveur. Veuillez re-uploader le document.",
+        )
+
+    # Delete old vector embeddings
+    VectorService.delete_document_chunks(str(document.project_id), str(document_id))
+
+    # Delete old chunks from DB (cascade doesn't apply here since we're not deleting the document)
+    from sqlalchemy import delete as sa_delete
+    await db.execute(
+        sa_delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
+    )
+    # Delete old images
+    await db.execute(
+        sa_delete(DocumentImage).where(DocumentImage.document_id == document_id)
+    )
+
+    # Reset document status
+    document.processing_status = ProcessingStatus.PENDING
+    document.chunk_count = 0
+    document.page_count = 0
+    document.full_text = ""
+    document.anonymized_full_text = ""
+    await db.commit()
+
+    # Re-dispatch processing
+    from ..tasks.document_tasks import process_document_task
+    process_document_task.delay(str(document.id), str(document.project_id))
+
+    return DocumentOut(
+        id=str(document.id),
+        project_id=str(document.project_id),
+        category=document.category.value,
+        original_filename=document.original_filename,
+        file_type=document.file_type.value,
+        file_size=document.file_size,
+        processing_status="pending",
+        page_count=0,
+        chunk_count=0,
+        uploaded_by=str(document.uploaded_by),
+        created_at=document.created_at,
+    )
+
+
 def _image_to_out(img: DocumentImage) -> DocumentImageOut:
     return DocumentImageOut(
         id=str(img.id),
