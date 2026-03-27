@@ -1401,12 +1401,18 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
 
         if is_conformity and not is_pricing:
             doc_type_desc = "documents de conformité, questionnaires et grilles de réponse"
-            fill_rules = """## Règles STRICTES:
+            fill_rules = """## RÈGLE ABSOLUE — ZÉRO HALLUCINATION DE CHIFFRES:
+- Les CHIFFRES, POURCENTAGES, TAUX, MONTANTS, EFFECTIFS, INDICES doivent provenir EXCLUSIVEMENT des documents de référence fournis ci-dessous.
+- Si un chiffre précis n'apparaît PAS dans les documents de référence, écris "[A VÉRIFIER]" au lieu d'inventer un nombre.
+- NE JAMAIS inventer, arrondir, estimer ou déduire un chiffre. Seules les valeurs EXACTES trouvées dans les documents sont acceptables.
+- Quand tu trouves un chiffre dans les documents, utilise-le TEL QUEL (ex: 4.09%, pas 4%, pas 4.1%).
+
+## Règles de remplissage:
 1. Tu DOIS remplir TOUTES les cellules vides qui attendent une réponse du candidat
 2. Pour les colonnes "Réponse", "Conformité", "Conforme", réponds par "Oui", "Non", "Partiel" ou "N/A" selon le contexte
-3. Pour les colonnes "Commentaire", "Détail", "Description", "Mesures", fournis une réponse détaillée et pertinente
-4. Reprends les informations de l'ancienne réponse quand elles existent
-5. Si tu ne trouves pas l'information dans l'ancienne réponse, génère une réponse professionnelle basée sur le contexte de l'appel d'offres
+3. Pour les colonnes "Commentaire", "Détail", "Description", "Mesures", fournis une réponse détaillée basée UNIQUEMENT sur les documents de référence
+4. Reprends les informations de l'ancienne réponse quand elles existent — PRIORITÉ AUX DONNÉES CHIFFRÉES EXACTES
+5. Si tu ne trouves pas l'information dans les documents de référence: pour les textes descriptifs, rédige une réponse professionnelle ; pour les chiffres/pourcentages/taux, écris "[A VÉRIFIER]"
 6. Ne modifie PAS les cellules d'en-tête, de titre, de numérotation ou de structure
 7. Ne remplis QUE les cellules qui sont vides (marquées "(vide)") et qui attendent une valeur du candidat
 8. Pour les textes, utilise des chaînes de caractères claires et professionnelles"""
@@ -1447,13 +1453,21 @@ Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
 
 IMPORTANT: Tu DOIS générer une entrée pour CHAQUE cellule vide qui attend une réponse du candidat.
 Analyse bien la structure de l'Excel pour identifier les colonnes de réponse.
-Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie."""
+Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie.
+
+⚠️ RAPPEL CRITIQUE SUR LES DONNÉES CHIFFRÉES:
+Tous les chiffres (taux, pourcentages, effectifs, montants, indices) DOIVENT être extraits TELS QUELS des documents de référence.
+Si le document dit "16,47%", tu écris "16,47%". Si le document dit "3,97%", tu écris "3,97%".
+N'invente JAMAIS un chiffre. Si tu ne trouves pas la donnée exacte, écris "[A VÉRIFIER]"."""
 
         # Build user prompt with full context
         parts = []
         if old_response_content:
             parts.append(
-                f"⚠️ DOCUMENTS DE RÉFÉRENCE (CONTIENT LES INFORMATIONS À REPRENDRE EN PRIORITÉ):\n{old_response_content[:50000]}"
+                f"⚠️ DOCUMENTS DE RÉFÉRENCE — SOURCE UNIQUE DE VÉRITÉ POUR LES CHIFFRES:\n"
+                "Tous les chiffres, taux, pourcentages, effectifs ci-dessous sont les SEULS valides. "
+                "Ne modifie et n'invente AUCUN chiffre.\n\n"
+                f"{old_response_content[:50000]}"
             )
         parts.append(f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure[:40000]}")
         parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:20000]}")

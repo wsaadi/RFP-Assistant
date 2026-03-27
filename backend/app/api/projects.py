@@ -5346,6 +5346,80 @@ def _ensure_xlsx_path(file_path: str) -> str:
     return file_path
 
 
+def _extract_excel_search_queries(excel_structure: str, doc_title: str) -> list[str]:
+    """Extract targeted search queries from Excel structure for multi-query RAG.
+
+    Parses the Excel text representation to find question cells and groups them
+    into thematic search queries so that KPIs (turn over, taux de formation,
+    handicap, etc.) are individually searched for in the vector store.
+    """
+    import re as _re
+
+    # Always include a broad query with the document title
+    queries = [doc_title]
+
+    # Thematic groups: map keywords found in Excel questions → targeted search query
+    thematic_queries = {
+        "environnement": (
+            {"environnement", "carbone", "co2", "émission", "énergie", "déchet",
+             "recyclage", "iso 14001", "iso 50001", "bilan carbone", "empreinte"},
+            "bilan carbone émissions CO2 énergie déchets recyclage ISO 14001 ISO 50001 environnement"
+        ),
+        "social": (
+            {"formation", "turn over", "turnover", "absentéisme", "handicap",
+             "diversité", "égalité", "qvt", "qualité de vie", "salari",
+             "iso 45001", "effectif", "masse salariale"},
+            "taux formation professionnelle turn over absentéisme handicapés effectif masse salariale heures formation"
+        ),
+        "social_kpi": (
+            {"taux", "pourcentage", "index", "nombre"},
+            "taux turn over absentéisme formation handicap index égalité hommes femmes pourcentage salariés"
+        ),
+        "ethique": (
+            {"éthique", "corruption", "anti-corruption", "lanceur d'alerte",
+             "sapin", "devoir de vigilance", "droits humains"},
+            "éthique anti-corruption lanceur alerte Sapin II devoir vigilance droits humains"
+        ),
+        "rse_general": (
+            {"rse", "responsabilité sociétale", "développement durable",
+             "parties prenantes", "charte", "global compact", "pacte mondial"},
+            "RSE charte responsabilité sociétale Pacte Mondial Global Compact parties prenantes développement durable"
+        ),
+        "certifications": (
+            {"certif", "label", "norme", "iso"},
+            "certifications labels ISO 14001 ISO 50001 ISO 45001 ISO 27001 normes"
+        ),
+        "donnees_chiffrees": (
+            {"chiffre d'affaires", "ca ", "effectif", "collaborateur"},
+            "chiffre affaires effectif collaborateurs nombre salariés résultat"
+        ),
+    }
+
+    struct_lower = excel_structure.lower()
+    for _name, (keywords, query) in thematic_queries.items():
+        if any(kw in struct_lower for kw in keywords):
+            queries.append(query)
+
+    # Extract individual question sentences from Excel cells for precise search
+    # Pattern: cell contents that end with "?" or contain KPI-like terms
+    question_pattern = _re.compile(r'=([^|]+\?)', _re.IGNORECASE)
+    for match in question_pattern.finditer(excel_structure):
+        q = match.group(1).strip()
+        if len(q) > 20 and len(q) < 200:
+            queries.append(q)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    unique: list[str] = []
+    for q in queries:
+        if q not in seen:
+            seen.add(q)
+            unique.append(q)
+
+    logger.info("Excel fill: generated %d search queries from structure", len(unique))
+    return unique
+
+
 def _read_excel_structure(file_path: str) -> str:
     """Read an Excel file and return a textual representation of its structure with cell references.
     Skips fully empty rows and only marks empty cells adjacent to filled cells to reduce noise."""
@@ -5598,20 +5672,32 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                                    "environnement", "rse", "social", "qualité"]
             is_conformity_doc = any(kw in title_lower for kw in conformity_keywords)
 
+            from ..tasks.chapter_tasks import _hybrid_search
+
             if is_conformity_doc:
-                search_query = (
-                    f"{doc_title} conformité RGPD protection données personnelles "
-                    "politique sécurité mesures techniques organisationnelles DPO registre "
-                    "sous-traitant transfert consentement droits personnes concernées"
-                )
+                # ── Multi-query search: extract key topics from Excel questions ──
+                # A single generic query misses specific KPIs (turn over, taux formation, etc.)
+                # We run multiple targeted searches and merge results.
+                search_queries = _extract_excel_search_queries(excel_structure, doc_title)
+                seen_chunk_ids: set[str] = set()
+                all_chunks: list[dict] = []
+                for sq in search_queries:
+                    chunks = _hybrid_search(str(project_id), sq, top_k=10, category_filter="old_response")
+                    for c in chunks:
+                        cid = c.get("chunk_id", c.get("content", "")[:80])
+                        if cid not in seen_chunk_ids:
+                            seen_chunk_ids.add(cid)
+                            all_chunks.append(c)
+                # Sort by relevance score descending, keep top 40
+                all_chunks.sort(key=lambda c: c.get("score", 0), reverse=True)
+                relevant_chunks = all_chunks[:40]
             else:
                 search_query = (
                     f"prix unitaire tarif {doc_title} BPU bordereau montant "
                     "coût forfait taux journalier"
                 )
+                relevant_chunks = _hybrid_search(str(project_id), search_query, top_k=20, category_filter="old_response")
 
-            from ..tasks.chapter_tasks import _vector_search
-            relevant_chunks = _vector_search(str(project_id), search_query, top_k=20, category_filter="old_response")
             relevant_context = "\n\n".join([
                 f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
                 for c in relevant_chunks
