@@ -126,6 +126,7 @@ celery.conf.update(
         "tasks.reanonymize": {"queue": "documents"},
         "tasks.analyze_images": {"queue": "documents"},
         "tasks.vector_search": {"queue": "documents"},
+        "tasks.hybrid_search": {"queue": "documents"},
         # I/O-bound AI/LLM tasks → ai queue (high concurrency)
         "tasks.generate_chapter_content": {"queue": "ai"},
         "tasks.gap_analysis": {"queue": "ai"},
