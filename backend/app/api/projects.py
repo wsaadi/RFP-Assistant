@@ -5653,10 +5653,13 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                 )
                 anon_old_response = ""
             else:
-                anon_new_rfp, anon_old_response = await asyncio.gather(
-                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+                # Load ALL source content (old_response + inspiration) — not just old_response
+                anon_old_response_part, anon_inspiration_part, anon_new_rfp = await asyncio.gather(
                     _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.INSPIRATION),
+                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
                 )
+                anon_old_response = "\n\n".join(p for p in [anon_old_response_part, anon_inspiration_part] if p)
                 anon_context = None
 
         # Vector search (no DB needed) — skip if user selected specific source docs
@@ -5674,20 +5677,23 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
 
             from ..tasks.chapter_tasks import _hybrid_search
 
+            # Search across ALL source categories (old_response + inspiration)
+            # not just old_response — KPIs and reference data may be in any source doc
+            source_categories = ["old_response", "inspiration"]
+
             if is_conformity_doc:
                 # ── Multi-query search: extract key topics from Excel questions ──
-                # A single generic query misses specific KPIs (turn over, taux formation, etc.)
-                # We run multiple targeted searches and merge results.
                 search_queries = _extract_excel_search_queries(excel_structure, doc_title)
                 seen_chunk_ids: set[str] = set()
                 all_chunks: list[dict] = []
                 for sq in search_queries:
-                    chunks = _hybrid_search(str(project_id), sq, top_k=10, category_filter="old_response")
-                    for c in chunks:
-                        cid = c.get("chunk_id", c.get("content", "")[:80])
-                        if cid not in seen_chunk_ids:
-                            seen_chunk_ids.add(cid)
-                            all_chunks.append(c)
+                    for cat in source_categories:
+                        chunks = _hybrid_search(str(project_id), sq, top_k=10, category_filter=cat)
+                        for c in chunks:
+                            cid = c.get("chunk_id", c.get("content", "")[:80])
+                            if cid not in seen_chunk_ids:
+                                seen_chunk_ids.add(cid)
+                                all_chunks.append(c)
                 # Sort by relevance score descending, keep top 40
                 all_chunks.sort(key=lambda c: c.get("score", 0), reverse=True)
                 relevant_chunks = all_chunks[:40]
@@ -5696,7 +5702,10 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                     f"prix unitaire tarif {doc_title} BPU bordereau montant "
                     "coût forfait taux journalier"
                 )
-                relevant_chunks = _hybrid_search(str(project_id), search_query, top_k=20, category_filter="old_response")
+                all_chunks = []
+                for cat in source_categories:
+                    all_chunks.extend(_hybrid_search(str(project_id), search_query, top_k=15, category_filter=cat))
+                relevant_chunks = all_chunks[:30]
 
             relevant_context = "\n\n".join([
                 f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
@@ -5708,7 +5717,7 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                 label = "EXTRAITS PERTINENTS" if is_conformity_doc else "EXTRAITS PERTINENTS SUR LES PRIX"
                 old_response_with_context = (
                     f"=== {label} ===\n{relevant_context}\n\n"
-                    f"=== CONTENU COMPLET ANCIENNE RÉPONSE ===\n{anon_old_response}"
+                    f"=== CONTENU COMPLET DES DOCUMENTS SOURCE ===\n{anon_old_response}"
                 )
 
         # ── Phase 3: AI generation (NO DB held) ──
