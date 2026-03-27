@@ -1401,21 +1401,26 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
 
         if is_conformity and not is_pricing:
             doc_type_desc = "documents de conformité, questionnaires et grilles de réponse"
-            fill_rules = """## RÈGLE ABSOLUE — ZÉRO HALLUCINATION DE CHIFFRES:
-- Les CHIFFRES, POURCENTAGES, TAUX, MONTANTS, EFFECTIFS, INDICES doivent provenir EXCLUSIVEMENT des documents de référence fournis ci-dessous.
-- Si un chiffre précis n'apparaît PAS dans les documents de référence, écris "[A VÉRIFIER]" au lieu d'inventer un nombre.
-- NE JAMAIS inventer, arrondir, estimer ou déduire un chiffre. Seules les valeurs EXACTES trouvées dans les documents sont acceptables.
-- Quand tu trouves un chiffre dans les documents, utilise-le TEL QUEL (ex: 4.09%, pas 4%, pas 4.1%).
+            fill_rules = """## EXTRACTION DES DONNÉES CHIFFRÉES:
+- Les documents de référence CONTIENNENT des chiffres, taux, pourcentages et KPIs. Tu DOIS les chercher activement.
+- Les données structurées apparaissent souvent sous la forme "[TABLEAU]" suivies de lignes avec des séparateurs "|". Exemple:
+  [TABLEAU]
+  Turn over | % | 2022=19,04 | 2023=18,32 | 2024=16,47
+  → Ici le taux de turn-over est 16,47% (valeur la plus récente).
+- Quand tu trouves un chiffre dans les documents, utilise-le TEL QUEL (ex: 16,47%, pas 16%, pas 16.5%).
+- Cherche les données dans TOUS les extraits fournis, en particulier dans la section "EXTRAITS PERTINENTS".
+- NE JAMAIS inventer un chiffre. Si après recherche approfondie tu ne trouves vraiment PAS la donnée, écris "[A VÉRIFIER]".
 
 ## Règles de remplissage:
 1. Tu DOIS remplir TOUTES les cellules vides qui attendent une réponse du candidat
 2. Pour les colonnes "Réponse", "Conformité", "Conforme", réponds par "Oui", "Non", "Partiel" ou "N/A" selon le contexte
-3. Pour les colonnes "Commentaire", "Détail", "Description", "Mesures", fournis une réponse détaillée basée UNIQUEMENT sur les documents de référence
+3. Pour les colonnes "Commentaire", "Détail", "Description", "Mesures", fournis une réponse détaillée basée sur les documents de référence
 4. Reprends les informations de l'ancienne réponse quand elles existent — PRIORITÉ AUX DONNÉES CHIFFRÉES EXACTES
-5. Si tu ne trouves pas l'information dans les documents de référence: pour les textes descriptifs, rédige une réponse professionnelle ; pour les chiffres/pourcentages/taux, écris "[A VÉRIFIER]"
-6. Ne modifie PAS les cellules d'en-tête, de titre, de numérotation ou de structure
-7. Ne remplis QUE les cellules qui sont vides (marquées "(vide)") et qui attendent une valeur du candidat
-8. Pour les textes, utilise des chaînes de caractères claires et professionnelles"""
+5. Pour les KPIs demandés (turn over, taux de formation, handicap, index égalité, etc.), cherche ACTIVEMENT dans les tableaux et extraits. La donnée y est probablement.
+6. Si tu ne trouves pas l'information: pour les textes descriptifs, rédige une réponse professionnelle ; pour les chiffres introuvables après recherche, écris "[A VÉRIFIER]"
+7. Ne modifie PAS les cellules d'en-tête, de titre, de numérotation ou de structure
+8. Ne remplis QUE les cellules qui sont vides (marquées "(vide)") et qui attendent une valeur du candidat
+9. Pour les textes, utilise des chaînes de caractères claires et professionnelles"""
         else:
             doc_type_desc = "Bordereaux de Prix Unitaires (BPU), DQE et DPGF"
             fill_rules = """## Règles STRICTES:
@@ -1456,17 +1461,18 @@ Analyse bien la structure de l'Excel pour identifier les colonnes de réponse.
 Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie.
 
 ⚠️ RAPPEL CRITIQUE SUR LES DONNÉES CHIFFRÉES:
-Tous les chiffres (taux, pourcentages, effectifs, montants, indices) DOIVENT être extraits TELS QUELS des documents de référence.
-Si le document dit "16,47%", tu écris "16,47%". Si le document dit "3,97%", tu écris "3,97%".
-N'invente JAMAIS un chiffre. Si tu ne trouves pas la donnée exacte, écris "[A VÉRIFIER]"."""
+Les documents de référence ci-dessous CONTIENNENT des données chiffrées (taux, pourcentages, KPIs).
+Cherche-les activement, notamment dans les blocs marqués [TABLEAU] et dans les "EXTRAITS PERTINENTS".
+Quand tu trouves un chiffre, utilise-le TEL QUEL: "16,47%" → écris "16,47%", "3,97%" → écris "3,97%".
+N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée est vraiment introuvable."""
 
         # Build user prompt with full context
         parts = []
         if old_response_content:
             parts.append(
-                f"⚠️ DOCUMENTS DE RÉFÉRENCE — SOURCE UNIQUE DE VÉRITÉ POUR LES CHIFFRES:\n"
-                "Tous les chiffres, taux, pourcentages, effectifs ci-dessous sont les SEULS valides. "
-                "Ne modifie et n'invente AUCUN chiffre.\n\n"
+                f"⚠️ DOCUMENTS DE RÉFÉRENCE (contiennent les données chiffrées à utiliser):\n"
+                "Cherche activement les chiffres, taux, pourcentages et KPIs dans ces extraits. "
+                "Les blocs [TABLEAU] contiennent des données structurées avec des valeurs exactes.\n\n"
                 f"{old_response_content[:50000]}"
             )
         parts.append(f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure[:40000]}")
