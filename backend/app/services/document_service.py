@@ -53,6 +53,64 @@ _KPI_RE = re.compile(
 )
 
 
+def _format_table_as_text(table) -> str:
+    """Format a PyMuPDF Table object as structured, searchable text.
+
+    Produces row-by-row text where each cell value is associated with its
+    column header, e.g.:
+        [TABLEAU] Indicateurs Sociaux | Turn over (%): 2022=19,04 | 2023=18,32 | 2024=16,47
+
+    This preserves the KPI↔value association that get_text("text") loses.
+    """
+    try:
+        data = table.extract()
+    except Exception:
+        return ""
+    if not data or len(data) < 2:
+        return ""
+
+    # First non-empty row is the header
+    header_row = None
+    data_rows = []
+    for i, row in enumerate(data):
+        cells = [str(c).strip() if c else "" for c in row]
+        if not any(cells):
+            continue
+        if header_row is None:
+            header_row = cells
+        else:
+            data_rows.append(cells)
+
+    if not header_row or not data_rows:
+        return ""
+
+    lines = []
+    for row in data_rows:
+        parts = []
+        row_label = ""
+        for j, cell in enumerate(row):
+            if not cell or cell == "None":
+                continue
+            if j < len(header_row) and header_row[j]:
+                hdr = header_row[j]
+                if j == 0:
+                    row_label = cell
+                    parts.append(cell)
+                else:
+                    parts.append(f"{hdr}={cell}")
+            else:
+                if j == 0:
+                    row_label = cell
+                parts.append(cell)
+        if parts:
+            lines.append(" | ".join(parts))
+
+    if not lines:
+        return ""
+
+    return "[TABLEAU]\n" + "\n".join(lines)
+
+
 def _split_into_semantic_units(text: str) -> List[str]:
     """Split text into semantic units that should not be broken apart.
 
@@ -303,6 +361,11 @@ class DocumentProcessor:
     def extract_text_from_pdf(file_content: bytes) -> Tuple[str, int, List[Dict]]:
         """Extract text from PDF with page-level metadata.
 
+        Uses both get_text() for regular text AND find_tables() for structured
+        table extraction.  Tables in PDFs often lose their row/column
+        associations with plain text extraction; find_tables() preserves the
+        structure so that KPIs like "Turn over: 16,47%" stay meaningful.
+
         Returns:
             Tuple of (full_text, page_count, pages_data)
             where pages_data is list of {page_number, text, sections}
@@ -314,6 +377,24 @@ class DocumentProcessor:
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text("text")
+
+            # ── Structured table extraction ──
+            # PyMuPDF >= 1.23 provides find_tables() which preserves row/column
+            # structure.  We format each table as readable text and append it
+            # to the page text so it gets chunked and indexed properly.
+            try:
+                tables = page.find_tables()
+                if tables and tables.tables:
+                    table_texts = []
+                    for table in tables.tables:
+                        table_text = _format_table_as_text(table)
+                        if table_text:
+                            table_texts.append(table_text)
+                    if table_texts:
+                        text = text.rstrip() + "\n\n" + "\n\n".join(table_texts)
+            except Exception:
+                pass  # Graceful fallback — plain text extraction still works
+
             full_text_parts.append(text)
 
             # Try to detect section headers (lines that look like titles)
