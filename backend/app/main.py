@@ -143,7 +143,10 @@ async def lifespan(app: FastAPI):
         """))
         # Make mistral_api_key_encrypted nullable (not needed for Ollama provider)
         await conn.execute(text("""
-            ALTER TABLE ai_configs ALTER COLUMN mistral_api_key_encrypted DROP NOT NULL
+            DO $$ BEGIN
+                ALTER TABLE ai_configs ALTER COLUMN mistral_api_key_encrypted DROP NOT NULL;
+            EXCEPTION WHEN others THEN NULL;
+            END $$
         """))
 
         # Create branding_settings table if not exists

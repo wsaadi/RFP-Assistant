@@ -143,9 +143,11 @@ services:
       - "dgx-spark:192.168.10.170"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/api/health"]
-      interval: 30s
+      interval: 15s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 60s
+      start_interval: 5s
     deploy:
       resources:
         limits:
@@ -273,7 +275,8 @@ services:
     ports:
       - "80:80"
     depends_on:
-      - backend
+      backend:
+        condition: service_healthy
     networks:
       - rfp-network
     deploy:
