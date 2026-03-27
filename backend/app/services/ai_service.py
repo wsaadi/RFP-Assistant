@@ -1532,8 +1532,10 @@ N'invente JAMAIS un chiffre. Si tu ne trouves pas la donnée exacte, écris "[A 
                     pass_num + 1, len(new_entries), len(all_data), finish_reason,
                 )
 
-                # If LLM finished naturally (not truncated) or returned 0 new entries, stop
-                if finish_reason != 'length' or len(new_entries) == 0:
+                # Stop only when the LLM has nothing new to add.
+                # Do NOT stop just because finish_reason='stop' — the LLM may
+                # have completed one section cleanly but left others empty.
+                if len(new_entries) == 0:
                     break
             else:
                 # JSON parse failed completely
