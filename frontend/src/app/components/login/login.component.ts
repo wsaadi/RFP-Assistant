@@ -112,7 +112,11 @@ export class LoginComponent {
       },
       error: (err) => {
         this.loading = false;
-        this.error = err.error?.detail || 'Erreur de connexion';
+        if (err.status === 0 || err.status === 502 || err.status === 503 || err.status === 504) {
+          this.error = 'Le serveur est indisponible. Veuillez réessayer dans quelques secondes.';
+        } else {
+          this.error = err.error?.detail || 'Erreur de connexion';
+        }
       },
     });
   }

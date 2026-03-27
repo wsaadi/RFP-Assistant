@@ -1,7 +1,7 @@
 import { Injectable } from '@angular/core';
 import { HttpClient } from '@angular/common/http';
-import { BehaviorSubject, Observable } from 'rxjs';
-import { tap } from 'rxjs/operators';
+import { BehaviorSubject, Observable, timer } from 'rxjs';
+import { tap, retry } from 'rxjs/operators';
 
 export interface BrandingSettings {
   app_name: string;
@@ -36,7 +36,9 @@ export class BrandingService {
   }
 
   loadBranding(): void {
-    this.http.get<BrandingSettings>(`${this.baseUrl}/settings`).subscribe({
+    this.http.get<BrandingSettings>(`${this.baseUrl}/settings`).pipe(
+      retry({ count: 3, delay: (_error, retryCount) => timer(retryCount * 2000) })
+    ).subscribe({
       next: (b) => {
         this.brandingSubject.next(b);
         this.applyFavicon(b);
