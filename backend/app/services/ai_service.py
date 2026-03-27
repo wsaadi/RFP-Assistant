@@ -298,6 +298,37 @@ def _parse_json_object(raw: str) -> Optional[Dict]:
     return None
 
 
+def _split_excel_structure_by_sheet(excel_structure: str) -> List[Dict[str, str]]:
+    """Split an Excel structure string into per-sheet sections.
+
+    The Excel structure format uses "=== Feuille: <name> ===" or
+    "--- Sheet: <name> ---" as delimiters between sheets.
+    Returns a list of {"name": sheet_name, "content": sheet_text}.
+    """
+    # Match common sheet delimiters
+    pattern = re.compile(
+        r'^(?:===\s*(?:Feuille|Sheet|Onglet)\s*:\s*(.+?)\s*===|'
+        r'---\s*(?:Feuille|Sheet|Onglet)\s*:\s*(.+?)\s*---)',
+        re.MULTILINE | re.IGNORECASE,
+    )
+
+    matches = list(pattern.finditer(excel_structure))
+    if not matches:
+        # No sheet delimiters found — return as single section
+        return [{"name": "Sheet1", "content": excel_structure}]
+
+    sections = []
+    for i, match in enumerate(matches):
+        name = match.group(1) or match.group(2)
+        start = match.start()
+        end = matches[i + 1].start() if i + 1 < len(matches) else len(excel_structure)
+        content = excel_structure[start:end].strip()
+        if content:
+            sections.append({"name": name.strip(), "content": content})
+
+    return sections if sections else [{"name": "Sheet1", "content": excel_structure}]
+
+
 class MistralAIService:
     """Service for AI-powered operations using Mistral API."""
 
@@ -335,6 +366,21 @@ class MistralAIService:
         Args:
             timeout: Maximum seconds to wait for the API response (default 5 min).
         """
+        result, _ = await self._generate_with_finish_reason(
+            system_prompt, user_prompt, temperature, max_tokens, timeout,
+        )
+        return result
+
+    async def _generate_with_finish_reason(
+        self, system_prompt: str, user_prompt: str,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
+        timeout: float = 300,
+    ) -> tuple[str, str]:
+        """Generate text and return (content, finish_reason).
+
+        finish_reason is 'stop' for normal completion, 'length' when truncated.
+        """
         input_chars = len(system_prompt) + len(user_prompt)
         effective_max = max_tokens or self.max_tokens
         logger.info("Mistral call: ~%d input chars (~%d tokens), max_output=%d, model=%s",
@@ -356,6 +402,10 @@ class MistralAIService:
             raise TimeoutError(f"L'appel IA a expire apres {timeout:.0f}s. Essayez avec des documents plus courts.")
 
         result = response.choices[0].message.content or ""
+        finish_reason = getattr(response.choices[0], 'finish_reason', 'stop') or 'stop'
+        # Normalize: Mistral returns FinishReason enum or string
+        finish_reason = str(finish_reason).lower().replace('finishreason.', '')
+
         # Track token usage from the Mistral response
         usage = getattr(response, 'usage', None)
         if usage:
@@ -363,11 +413,12 @@ class MistralAIService:
             out_tok = getattr(usage, 'completion_tokens', 0) or 0
             self.total_input_tokens += in_tok
             self.total_output_tokens += out_tok
-            logger.info("Mistral response: %d chars, %d input tokens, %d output tokens",
-                        len(result), in_tok, out_tok)
+            logger.info("Mistral response: %d chars, %d input tokens, %d output tokens, finish=%s",
+                        len(result), in_tok, out_tok, finish_reason)
         else:
-            logger.info("Mistral response: %d chars (~%d tokens)", len(result), len(result) // 4)
-        return result
+            logger.info("Mistral response: %d chars (~%d tokens), finish=%s",
+                        len(result), len(result) // 4, finish_reason)
+        return result, finish_reason
 
     async def generate_streaming(
         self, system_prompt: str, user_prompt: str,
@@ -1358,6 +1409,10 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
     ) -> List[Dict]:
         """Generate structured JSON data to fill an Excel document from old response data.
 
+        For large documents (RSE questionnaires, etc.), processes the Excel in
+        batches by sheet to avoid max_tokens truncation. Uses automatic
+        continuation when the LLM's output is truncated mid-JSON.
+
         Returns a list of dicts: [{"sheet": str, "cell": str, "value": str|number}, ...]
         """
         # Detect document type to adapt the prompt
@@ -1416,7 +1471,38 @@ IMPORTANT: Tu DOIS générer une entrée pour CHAQUE cellule vide qui attend une
 Analyse bien la structure de l'Excel pour identifier les colonnes de réponse.
 Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie."""
 
-        # Put context FIRST so it's most prominent, then Excel structure, then RFP
+        # ── Try splitting structure into sheets for batch processing ──
+        # If the Excel has multiple sheets, process each independently to avoid
+        # truncation on large questionnaires (RSE, RGPD, etc.)
+        sheet_sections = _split_excel_structure_by_sheet(excel_structure)
+        use_batch = len(sheet_sections) > 1 and len(excel_structure) > 8000
+
+        if use_batch:
+            return await self._generate_excel_fill_batched(
+                system_prompt, document_title, sheet_sections,
+                new_rfp_content, old_response_content, custom_notes,
+                is_conformity, is_pricing,
+            )
+
+        # ── Single-shot approach (small documents or single sheet) ──
+        return await self._generate_excel_fill_single(
+            system_prompt, document_title, excel_structure,
+            new_rfp_content, old_response_content, custom_notes,
+            is_conformity, is_pricing,
+        )
+
+    async def _generate_excel_fill_single(
+        self,
+        system_prompt: str,
+        document_title: str,
+        excel_structure: str,
+        new_rfp_content: str,
+        old_response_content: str,
+        custom_notes: str,
+        is_conformity: bool,
+        is_pricing: bool,
+    ) -> List[Dict]:
+        """Single-shot Excel fill with continuation on truncation."""
         parts = []
         if old_response_content:
             parts.append(
@@ -1446,36 +1532,181 @@ Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la struct
                 "Retourne UNIQUEMENT le JSON."
             )
 
-        raw = await self.generate(system_prompt, user_prompt, temperature=0.1, max_tokens=32000)
+        # First call with finish_reason detection
+        raw, finish_reason = await self._generate_with_finish_reason(
+            system_prompt, user_prompt, temperature=0.1, max_tokens=32000,
+        )
 
-        # Parse the JSON response using the robust helper (handles truncated/malformed JSON)
+        # If truncated, try continuation to get the rest
+        if finish_reason == 'length':
+            logger.info("Excel fill truncated for '%s' — attempting continuation", document_title)
+            raw = await self._continue_truncated_json(system_prompt, user_prompt, raw)
+
         data = _parse_json_array(raw)
         if data is not None:
             return data
 
-        # First parse failed — log diagnostics and retry with explicit JSON instruction
-        logger.warning("Excel fill JSON parse failed for '%s'. Length: %d chars. First 500: %s",
-                       document_title, len(raw), raw[:500])
-        logger.warning("Excel fill last 300 chars: %s", raw[-300:])
-
+        # Parse failed — retry with explicit JSON instruction
+        logger.warning("Excel fill JSON parse failed for '%s'. Length: %d", document_title, len(raw))
         retry_prompt = (
             user_prompt
-            + "\n\n⚠️ CRITIQUE: Ta réponse précédente n'était PAS du JSON valide. "
-            "Réponds UNIQUEMENT avec le tableau JSON, sans AUCUN texte avant ni après, "
-            "sans balises markdown. Commence directement par [ et termine par ]. "
-            "Si le JSON est trop long, réduis le nombre d'entrées mais assure-toi que le JSON est COMPLET et VALIDE."
+            + "\n\n⚠️ CRITIQUE: Ta réponse précédente a été tronquée ou n'était pas du JSON valide. "
+            "Réponds UNIQUEMENT avec le tableau JSON. Commence directement par [ et termine par ]. "
+            "Tu DOIS remplir TOUTES les cellules sans exception. Ne saute aucune ligne."
         )
-        raw2 = await self.generate(system_prompt, retry_prompt, temperature=0.05, max_tokens=32000)
+        raw2, _ = await self._generate_with_finish_reason(
+            system_prompt, retry_prompt, temperature=0.05, max_tokens=32000,
+        )
         data2 = _parse_json_array(raw2)
         if data2 is not None:
-            logger.info("Excel fill JSON retry succeeded for '%s' (%d entries)", document_title, len(data2))
+            logger.info("Excel fill retry succeeded for '%s' (%d entries)", document_title, len(data2))
             return data2
 
-        logger.error("Excel fill JSON parse failed on retry for '%s'. Length: %d", document_title, len(raw2))
+        logger.error("Excel fill JSON parse failed on retry for '%s'", document_title)
         raise ValueError(
             f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
             "Veuillez réessayer."
         )
+
+    async def _generate_excel_fill_batched(
+        self,
+        system_prompt: str,
+        document_title: str,
+        sheet_sections: List[Dict[str, str]],
+        new_rfp_content: str,
+        old_response_content: str,
+        custom_notes: str,
+        is_conformity: bool,
+        is_pricing: bool,
+    ) -> List[Dict]:
+        """Process each Excel sheet independently to avoid truncation.
+
+        For large questionnaires (RSE, RGPD, etc.), each sheet is sent as a
+        separate LLM call, then all results are merged.
+        """
+        logger.info(
+            "Excel fill batched mode for '%s': %d sheets to process",
+            document_title, len(sheet_sections),
+        )
+        all_data: List[Dict] = []
+
+        for i, sheet_info in enumerate(sheet_sections):
+            sheet_name = sheet_info["name"]
+            sheet_content = sheet_info["content"]
+
+            logger.info("Processing sheet %d/%d: '%s' (%d chars)",
+                        i + 1, len(sheet_sections), sheet_name, len(sheet_content))
+
+            parts = []
+            if old_response_content:
+                parts.append(
+                    f"⚠️ DOCUMENTS DE RÉFÉRENCE:\n{old_response_content[:50000]}"
+                )
+            parts.append(
+                f"STRUCTURE DE L'ONGLET '{sheet_name}' À REMPLIR:\n{sheet_content}"
+            )
+            parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:15000]}")
+            if custom_notes:
+                parts.append(f"⚠️ NOTES DE L'UTILISATEUR:\n{custom_notes}")
+
+            user_prompt = "\n\n---\n\n".join(parts)
+            user_prompt += (
+                f"\n\n⚠️ RAPPEL: Génère le JSON pour l'onglet '{sheet_name}' UNIQUEMENT. "
+                "Tu DOIS remplir TOUTES les cellules vides de cet onglet sans exception. "
+                "Retourne UNIQUEMENT le tableau JSON."
+            )
+
+            raw, finish_reason = await self._generate_with_finish_reason(
+                system_prompt, user_prompt, temperature=0.1, max_tokens=32000,
+            )
+
+            if finish_reason == 'length':
+                logger.info("Sheet '%s' truncated — continuing", sheet_name)
+                raw = await self._continue_truncated_json(system_prompt, user_prompt, raw)
+
+            sheet_data = _parse_json_array(raw)
+            if sheet_data:
+                all_data.extend(sheet_data)
+                logger.info("Sheet '%s': %d entries", sheet_name, len(sheet_data))
+            else:
+                logger.warning("Sheet '%s': JSON parse failed, retrying...", sheet_name)
+                # Retry once for this sheet
+                retry_prompt = (
+                    user_prompt
+                    + "\n\n⚠️ CRITIQUE: Ta réponse n'était pas du JSON valide. "
+                    "Commence par [ et termine par ]. Remplis TOUTES les cellules."
+                )
+                raw2, _ = await self._generate_with_finish_reason(
+                    system_prompt, retry_prompt, temperature=0.05, max_tokens=32000,
+                )
+                sheet_data2 = _parse_json_array(raw2)
+                if sheet_data2:
+                    all_data.extend(sheet_data2)
+                    logger.info("Sheet '%s' retry: %d entries", sheet_name, len(sheet_data2))
+                else:
+                    logger.error("Sheet '%s': JSON parse failed on retry too", sheet_name)
+
+        if not all_data:
+            raise ValueError(
+                f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
+                "Veuillez réessayer."
+            )
+
+        logger.info("Excel fill batched completed for '%s': %d total entries from %d sheets",
+                     document_title, len(all_data), len(sheet_sections))
+        return all_data
+
+    async def _continue_truncated_json(
+        self,
+        system_prompt: str,
+        original_prompt: str,
+        truncated_response: str,
+        max_continuations: int = 3,
+    ) -> str:
+        """Continue a truncated JSON response by asking the LLM to resume.
+
+        Takes the last portion of the truncated response and asks the LLM to
+        continue from where it stopped. Merges all parts into one JSON string.
+        """
+        accumulated = truncated_response
+
+        for attempt in range(max_continuations):
+            # Take the last 2000 chars as context for continuation
+            tail = accumulated[-2000:]
+
+            continuation_prompt = (
+                f"Ta réponse JSON précédente a été tronquée. Voici la FIN de ta réponse :\n\n"
+                f"...{tail}\n\n"
+                f"CONTINUE EXACTEMENT là où tu t'es arrêté. "
+                f"Ne répète PAS le contenu déjà généré. "
+                f"Continue le tableau JSON et termine-le avec ] à la fin. "
+                f"NE commence PAS par [, continue directement avec la suite des entrées."
+            )
+
+            raw_cont, finish_reason = await self._generate_with_finish_reason(
+                system_prompt, continuation_prompt, temperature=0.1, max_tokens=32000,
+            )
+
+            if not raw_cont.strip():
+                break
+
+            # Append continuation (remove leading [ if the LLM starts fresh)
+            cont_clean = raw_cont.strip()
+            if cont_clean.startswith('['):
+                cont_clean = cont_clean[1:]
+            # Ensure comma separator
+            acc_stripped = accumulated.rstrip()
+            if acc_stripped.endswith(',') or cont_clean.startswith(','):
+                accumulated = acc_stripped + '\n' + cont_clean
+            else:
+                accumulated = acc_stripped + ',\n' + cont_clean
+
+            logger.info("Continuation %d: +%d chars (finish=%s)", attempt + 1, len(raw_cont), finish_reason)
+
+            if finish_reason != 'length':
+                break  # LLM finished naturally
+
+        return accumulated
 
     async def generate_pdf_fill_data(
         self,
@@ -1563,32 +1794,36 @@ en te basant sur l'ancienne réponse et les informations de l'entreprise.
             "représentant légal, etc.). Retourne UNIQUEMENT le JSON."
         )
 
-        raw = await self.generate(system_prompt, user_prompt, temperature=0.1, max_tokens=32000)
+        # First call with truncation detection
+        raw, finish_reason = await self._generate_with_finish_reason(
+            system_prompt, user_prompt, temperature=0.1, max_tokens=32000,
+        )
 
-        # Parse the JSON response using the robust helper (handles truncated/malformed JSON)
+        if finish_reason == 'length':
+            logger.info("PDF fill truncated for '%s' — attempting continuation", document_title)
+            raw = await self._continue_truncated_json(system_prompt, user_prompt, raw)
+
         data = _parse_json_array(raw)
         if data is not None:
             return data
 
-        # First parse failed — retry with explicit JSON instruction
-        logger.warning("PDF fill JSON parse failed for '%s'. Length: %d chars. First 500: %s",
-                       document_title, len(raw), raw[:500])
-        logger.warning("PDF fill last 300 chars: %s", raw[-300:])
-
+        # Parse failed — retry
+        logger.warning("PDF fill JSON parse failed for '%s'. Length: %d", document_title, len(raw))
         retry_prompt = (
             user_prompt
-            + "\n\n⚠️ CRITIQUE: Ta réponse précédente n'était PAS du JSON valide. "
-            "Réponds UNIQUEMENT avec le tableau JSON, sans AUCUN texte avant ni après, "
-            "sans balises markdown. Commence directement par [ et termine par ]. "
-            "Si le JSON est trop long, réduis le nombre d'entrées mais assure-toi que le JSON est COMPLET et VALIDE."
+            + "\n\n⚠️ CRITIQUE: Ta réponse a été tronquée ou n'était pas du JSON valide. "
+            "Réponds UNIQUEMENT avec le tableau JSON. Commence par [ et termine par ]. "
+            "Tu DOIS remplir TOUTES les zones/champs sans exception."
         )
-        raw2 = await self.generate(system_prompt, retry_prompt, temperature=0.05, max_tokens=32000)
+        raw2, _ = await self._generate_with_finish_reason(
+            system_prompt, retry_prompt, temperature=0.05, max_tokens=32000,
+        )
         data2 = _parse_json_array(raw2)
         if data2 is not None:
-            logger.info("PDF fill JSON retry succeeded for '%s' (%d entries)", document_title, len(data2))
+            logger.info("PDF fill retry succeeded for '%s' (%d entries)", document_title, len(data2))
             return data2
 
-        logger.error("PDF fill JSON parse failed on retry for '%s'. Length: %d", document_title, len(raw2))
+        logger.error("PDF fill JSON parse failed on retry for '%s'", document_title)
         raise ValueError(
             f"L'IA n'a pas retourné un JSON valide pour le document '{document_title}'. "
             "Veuillez réessayer."
