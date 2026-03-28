@@ -1457,7 +1457,10 @@ Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
   ...
 ]
 
-IMPORTANT: Tu DOIS générer une entrée pour CHAQUE cellule vide qui attend une réponse du candidat.
+⚠️ CRITIQUE — GÉNÈRE TOUT EN UNE SEULE FOIS:
+Tu DOIS générer une entrée pour CHAQUE cellule vide de TOUS les onglets en UN SEUL tableau JSON.
+Ne t'arrête PAS après un seul onglet ou une seule section. Parcours TOUS les onglets, TOUTES les lignes.
+Le JSON doit contenir TOUTES les cellules à remplir (typiquement 100-500 entrées).
 Analyse bien la structure de l'Excel pour identifier les colonnes de réponse.
 Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie.
 
@@ -1468,8 +1471,9 @@ Quand tu trouves un chiffre, utilise-le TEL QUEL: "16,47%" → écris "16,47%", 
 N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée est vraiment introuvable."""
 
         # Build user prompt with full context
-        # In full context mode, allow much more content (Mistral 128K tokens ≈ 400K chars).
-        # Reserve ~60K for Excel structure + new RFP + system prompt + output.
+        # Mistral Large context window = 128K tokens ≈ 512K chars.
+        # We must reserve space for: system prompt (~2K tokens), output (max 32K tokens).
+        # Safe input budget: ~90K tokens ≈ 360K chars total for user prompt.
         if context_mode == "full":
             source_limit = 300_000   # ~75K tokens — full documents
             excel_limit = 60_000
@@ -1505,11 +1509,10 @@ N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée es
         user_prompt = "\n\n---\n\n".join(parts)
         if is_conformity and not is_pricing:
             user_prompt += (
-                f"\n\n⚠️ RAPPEL IMPORTANT: Génère le JSON de remplissage pour le document '{document_title}'. "
-                "Ce document est un questionnaire/grille de conformité. "
-                "Tu DOIS remplir TOUTES les cellules vides qui attendent une réponse (colonnes Réponse, Commentaire, Détail, etc.). "
-                "Pour chaque question/exigence, fournis une réponse appropriée (Oui/Non/Partiel + commentaire si nécessaire). "
-                "Retourne UNIQUEMENT le JSON."
+                f"\n\n⚠️ RAPPEL IMPORTANT: Génère le JSON COMPLET pour '{document_title}'. "
+                "Parcours TOUS les onglets et TOUTES les sections du questionnaire. "
+                "Génère le JSON en un seul bloc contenant TOUTES les cellules (Réponse + Commentaire pour chaque question). "
+                "Ne t'arrête pas après une section — continue jusqu'à la fin du document."
             )
         else:
             user_prompt += (
@@ -1519,14 +1522,41 @@ N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée es
                 "Retourne UNIQUEMENT le JSON."
             )
 
+        # ── Safety: check total prompt size vs model context limit ──
+        total_prompt_chars = len(system_prompt) + len(user_prompt)
+        total_prompt_tokens_est = total_prompt_chars // 4
+        # Mistral Large: 128K context. Reserve 32K for output → 96K max input.
+        max_input_tokens = 96_000
+        if total_prompt_tokens_est > max_input_tokens:
+            # Truncate source content to fit within context window
+            overflow = total_prompt_tokens_est - max_input_tokens
+            overflow_chars = overflow * 4
+            safe_source_limit = max(10_000, source_limit - overflow_chars)
+            logger.warning(
+                "Excel fill: prompt too large (~%dK tokens), truncating source from %d to %d chars",
+                total_prompt_tokens_est // 1000, source_limit, safe_source_limit,
+            )
+            # Rebuild user prompt with reduced source
+            parts = []
+            if old_response_content:
+                header = (
+                    "⚠️ DOCUMENTS DE RÉFÉRENCE (tronqués pour respecter la limite de contexte):\n\n"
+                    if context_mode == "full" else
+                    "⚠️ DOCUMENTS DE RÉFÉRENCE:\n\n"
+                )
+                parts.append(header + old_response_content[:safe_source_limit])
+            parts.append(f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure[:excel_limit]}")
+            parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:rfp_limit]}")
+            if custom_notes:
+                parts.append(f"⚠️ NOTES ET INSTRUCTIONS SPÉCIFIQUES DE L'UTILISATEUR:\n{custom_notes}")
+            user_prompt = "\n\n---\n\n".join(parts)
+
         # ── Iterative fill-remaining ──
-        # Large questionnaires (RSE, RGPD) exceed max_tokens in a single call.
-        # Strategy: parse whatever the LLM produces (even truncated JSON is
-        # repairable), then ask again with "fill ONLY the remaining sections".
-        # No blind continuation — each pass gets full Excel context so the LLM
-        # knows exactly what's left to fill.
+        # The LLM should ideally fill everything in 1 pass, but may need
+        # a second pass for large questionnaires (truncated by max_tokens).
+        # Max 3 passes to avoid wasting tokens re-sending the full context.
         all_data: List[Dict] = []
-        max_passes = 5
+        max_passes = 3
 
         for pass_num in range(max_passes):
             if pass_num == 0:
