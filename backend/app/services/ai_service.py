@@ -233,6 +233,10 @@ def _parse_json_array(raw: str) -> Optional[List]:
     """Try to parse a JSON array from a raw LLM response, with repair."""
     cleaned = _clean_json_response(raw)
 
+    # Sanitize: remove control characters that break JSON parsing
+    # (LLMs sometimes emit \x00-\x1f chars inside string values)
+    cleaned = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f]', ' ', cleaned)
+
     # 1. Try direct parse of the full cleaned text
     if cleaned.startswith('['):
         try:
@@ -240,11 +244,12 @@ def _parse_json_array(raw: str) -> Optional[List]:
         except json.JSONDecodeError:
             pass
 
-    # 2. Try regex extraction
-    match = re.search(r'\[[\s\S]*\]', cleaned)
-    if match:
+    # 2. Try regex extraction (find the last ']' to avoid greedy mismatch)
+    start_idx = cleaned.find('[')
+    end_idx = cleaned.rfind(']')
+    if start_idx >= 0 and end_idx > start_idx:
         try:
-            return json.loads(match.group())
+            return json.loads(cleaned[start_idx:end_idx + 1])
         except json.JSONDecodeError:
             pass
 
@@ -258,8 +263,12 @@ def _parse_json_array(raw: str) -> Optional[List]:
             logger.warning("JSON was truncated — repaired by closing %d brackets/braces",
                           repaired.count(']') + repaired.count('}') - fragment.count(']') - fragment.count('}'))
             return result
-        except json.JSONDecodeError:
-            pass
+        except json.JSONDecodeError as e:
+            logger.warning("JSON repair failed: %s | first 200: %s | last 200: %s",
+                          str(e)[:100], repaired[:200], repaired[-200:])
+
+    # Log the raw response for debugging
+    logger.warning("_parse_json_array: all parse attempts failed. raw first 300: %s", raw[:300])
 
     return None
 
