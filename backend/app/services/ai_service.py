@@ -345,30 +345,54 @@ class MistralAIService:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
         timeout: float = 300,
+        max_retries: int = 3,
     ) -> tuple[str, str]:
         """Generate text and return (content, finish_reason).
 
         finish_reason is 'stop' for normal completion, 'length' when truncated.
+        Retries on transient errors (5xx, network) with exponential backoff.
         """
         input_chars = len(system_prompt) + len(user_prompt)
         effective_max = max_tokens or self.max_tokens
         logger.info("Mistral call: ~%d input chars (~%d tokens), max_output=%d, model=%s",
                      input_chars, input_chars // 4, effective_max, self.model)
 
-        coro = self._client.chat.complete_async(
-            model=self.model,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt},
-            ],
-            temperature=temperature or self.temperature,
-            max_tokens=effective_max,
-        )
-        try:
-            response = await asyncio.wait_for(coro, timeout=timeout)
-        except asyncio.TimeoutError:
-            logger.error("Mistral call timed out after %.0fs (input ~%d chars)", timeout, input_chars)
-            raise TimeoutError(f"L'appel IA a expire apres {timeout:.0f}s. Essayez avec des documents plus courts.")
+        last_error = None
+        for attempt in range(max_retries):
+            coro = self._client.chat.complete_async(
+                model=self.model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=temperature or self.temperature,
+                max_tokens=effective_max,
+            )
+            try:
+                response = await asyncio.wait_for(coro, timeout=timeout)
+                break  # Success
+            except asyncio.TimeoutError:
+                logger.error("Mistral call timed out after %.0fs (input ~%d chars)", timeout, input_chars)
+                raise TimeoutError(f"L'appel IA a expire apres {timeout:.0f}s. Essayez avec des documents plus courts.")
+            except Exception as e:
+                last_error = e
+                error_str = str(e)
+                # Retry on transient server errors (5xx, connection reset)
+                is_transient = any(kw in error_str.lower() for kw in [
+                    "503", "502", "500", "429", "service unavailable",
+                    "connection", "reset", "timeout", "overloaded",
+                ])
+                if is_transient and attempt < max_retries - 1:
+                    wait_time = 2 ** (attempt + 1)  # 2s, 4s
+                    logger.warning(
+                        "Mistral transient error (attempt %d/%d), retrying in %ds: %s",
+                        attempt + 1, max_retries, wait_time, error_str[:200],
+                    )
+                    await asyncio.sleep(wait_time)
+                    continue
+                raise  # Non-transient error or last retry — propagate
+        else:
+            raise last_error  # All retries exhausted
 
         result = response.choices[0].message.content or ""
         finish_reason = getattr(response.choices[0], 'finish_reason', 'stop') or 'stop'
