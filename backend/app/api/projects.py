@@ -5596,6 +5596,13 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
             has_custom_sources = bool(doc_source_ids or doc_source_cats or doc_include_generated)
             _update("loading", 5, f"Chargement: {doc_title}")
 
+            # Read project context_mode setting
+            proj_result = await db.execute(
+                select(RFPProject).where(RFPProject.id == project_id)
+            )
+            project = proj_result.scalar_one_or_none()
+            proj_context_mode = (project.context_mode or "rag") if project else "rag"
+
             docs_result = await db.execute(
                 select(Document)
                 .where(Document.project_id == project_id)
@@ -5625,106 +5632,153 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
         excel_structure = _read_excel_structure(excel_file_path)
 
         # ── Phase 2: Load context (short DB session) ──
-        _update("loading_context", 15, "Chargement du contexte AO + ancienne reponse...")
-        async with task_session() as db:
-            ai_service = await _get_ai_service(workspace_id, db)
+        if proj_context_mode == "full":
+            # ── FULL CONTEXT MODE ──
+            # Load complete anonymized documents + image descriptions.
+            # No RAG, no vector search — the LLM gets everything.
+            _update("loading_context", 15, "Chargement du contexte complet (tous les documents)...")
+            async with task_session() as db:
+                ai_service = await _get_ai_service(workspace_id, db)
 
-            # If user selected specific sources (categories, docs, or generated content), load only those
-            if has_custom_sources:
-                parts = []
-                if doc_source_cats:
-                    parts.append(await _get_chunks_anonymized_by_categories(
-                        db, project_id, doc_source_cats
-                    ))
-                if doc_source_ids:
-                    parts.append(await _get_chunks_anonymized_by_document_ids(
-                        db, project_id, doc_source_ids
-                    ))
-                if doc_include_generated:
-                    parts.append(await _get_generated_chapters_context(db, project_id))
-                anon_context = "\n\n".join(p for p in parts if p)
-                anon_new_rfp = await _get_all_chunks_anonymized_by_category(
+                if has_custom_sources:
+                    # Load full text of selected sources
+                    parts = []
+                    if doc_source_cats:
+                        for cat_str in doc_source_cats:
+                            try:
+                                cat = DocumentCategory(cat_str)
+                                cat_text = await _get_full_text_anonymized_by_category(db, project_id, cat)
+                                if cat_text:
+                                    parts.append(cat_text)
+                                # Also load image analyses for this category
+                                img_text = await _get_image_analyses_by_category(db, project_id, cat)
+                                if img_text:
+                                    parts.append(f"--- CONTENU EXTRAIT DES IMAGES ({cat_str}) ---\n{img_text}")
+                            except (ValueError, KeyError):
+                                pass
+                    if doc_source_ids:
+                        parts.append(await _get_chunks_anonymized_by_document_ids(
+                            db, project_id, doc_source_ids
+                        ))
+                    if doc_include_generated:
+                        parts.append(await _get_generated_chapters_context(db, project_id))
+                    source_content = "\n\n".join(p for p in parts if p)
+                else:
+                    # Load ALL source documents (old_response + inspiration) in full
+                    old_resp_text, inspiration_text, img_old, img_insp = await asyncio.gather(
+                        _get_full_text_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+                        _get_full_text_anonymized_by_category(db, project_id, DocumentCategory.INSPIRATION),
+                        _get_image_analyses_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+                        _get_image_analyses_by_category(db, project_id, DocumentCategory.INSPIRATION),
+                    )
+                    source_parts = [p for p in [old_resp_text, inspiration_text] if p]
+                    if img_old:
+                        source_parts.append(f"--- CONTENU EXTRAIT DES IMAGES (ancienne réponse) ---\n{img_old}")
+                    if img_insp:
+                        source_parts.append(f"--- CONTENU EXTRAIT DES IMAGES (inspiration) ---\n{img_insp}")
+                    source_content = "\n\n".join(source_parts)
+
+                # Also load new RFP content + its images
+                anon_new_rfp = await _get_full_text_anonymized_by_category(
                     db, project_id, DocumentCategory.NEW_RFP
                 )
-                anon_old_response = ""
-            else:
-                # Load ALL source content (old_response + inspiration) — not just old_response
-                anon_old_response_part, anon_inspiration_part, anon_new_rfp = await asyncio.gather(
-                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
-                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.INSPIRATION),
-                    _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+                img_rfp = await _get_image_analyses_by_category(
+                    db, project_id, DocumentCategory.NEW_RFP
                 )
-                anon_old_response = "\n\n".join(p for p in [anon_old_response_part, anon_inspiration_part] if p)
-                anon_context = None
+                if img_rfp:
+                    anon_new_rfp += f"\n\n--- CONTENU EXTRAIT DES IMAGES (appel d'offres) ---\n{img_rfp}"
 
-        # ── Vector search: ALWAYS run to find the most relevant chunks ──
-        # Even when user selected custom sources, we need vector search to
-        # prioritize KPI-containing chunks that would otherwise be truncated
-        # (e.g. table data on page 82 of a 90-page document gets cut at 50K chars).
-        _update("searching", 25, "Recherche de contenu pertinent...")
-        title_lower = doc_title.lower()
-        conformity_keywords = ["rgpd", "conformit", "gdpr", "protection des données",
-                               "questionnaire", "grille", "annexe", "déclaration",
-                               "engagement", "certification", "audit", "sécurité",
-                               "environnement", "rse", "social", "qualité"]
-        is_conformity_doc = any(kw in title_lower for kw in conformity_keywords)
-
-        from ..tasks.chapter_tasks import _hybrid_search
-
-        # No category filter — search ALL source documents (old_response + inspiration)
-        # This avoids the N queries × M categories explosion that was causing slowness.
-
-        if is_conformity_doc:
-            search_queries = _extract_excel_search_queries(excel_structure, doc_title)
-            # Limit to 6 most relevant queries to keep search fast
-            search_queries = search_queries[:8]
-            seen_chunk_ids: set[str] = set()
-            all_chunks: list[dict] = []
-            for sq in search_queries:
-                chunks = _hybrid_search(str(project_id), sq, top_k=10)
-                for c in chunks:
-                    cid = c.get("chunk_id", c.get("content", "")[:80])
-                    if cid not in seen_chunk_ids:
-                        seen_chunk_ids.add(cid)
-                        all_chunks.append(c)
-            all_chunks.sort(key=lambda c: c.get("score", 0), reverse=True)
-            relevant_chunks = all_chunks[:40]
-        else:
-            search_query = (
-                f"prix unitaire tarif {doc_title} BPU bordereau montant "
-                "coût forfait taux journalier"
-            )
-            relevant_chunks = _hybrid_search(str(project_id), search_query, top_k=25)
-
-        relevant_context = "\n\n".join([
-            f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
-            for c in relevant_chunks
-        ])
-
-        # Log what vector search found for debugging KPI retrieval
-        logger.info(
-            "Excel fill: vector search returned %d unique chunks, relevant_context=%d chars",
-            len(relevant_chunks), len(relevant_context),
-        )
-        for i, c in enumerate(relevant_chunks[:5]):
-            preview = c['content'][:150].replace('\n', ' ')
+            old_response_with_context = source_content
             logger.info(
-                "  chunk[%d] score=%.3f doc=%s p.%s: %s...",
-                i, c.get('score', 0), c['document_name'], c['page_number'], preview,
+                "fill-excel FULL CONTEXT %s: source=%d chars, new_rfp=%d chars",
+                doc_title, len(old_response_with_context), len(anon_new_rfp),
             )
 
-        # Build context: vector search results (most relevant) FIRST,
-        # then full document content (may be truncated but that's OK —
-        # the important data is already in the vector search results above).
-        base_content = anon_context if anon_context is not None else anon_old_response
-        if relevant_context:
-            label = "EXTRAITS PERTINENTS" if is_conformity_doc else "EXTRAITS PERTINENTS SUR LES PRIX"
-            old_response_with_context = (
-                f"=== {label} (PRIORITÉ — CONTIENT LES DONNÉES CHIFFRÉES) ===\n{relevant_context}\n\n"
-                f"=== CONTENU COMPLET DES DOCUMENTS SOURCE ===\n{base_content}"
-            )
         else:
-            old_response_with_context = base_content
+            # ── RAG MODE (existing behavior) ──
+            _update("loading_context", 15, "Chargement du contexte AO + ancienne reponse...")
+            async with task_session() as db:
+                ai_service = await _get_ai_service(workspace_id, db)
+
+                if has_custom_sources:
+                    parts = []
+                    if doc_source_cats:
+                        parts.append(await _get_chunks_anonymized_by_categories(
+                            db, project_id, doc_source_cats
+                        ))
+                    if doc_source_ids:
+                        parts.append(await _get_chunks_anonymized_by_document_ids(
+                            db, project_id, doc_source_ids
+                        ))
+                    if doc_include_generated:
+                        parts.append(await _get_generated_chapters_context(db, project_id))
+                    anon_context = "\n\n".join(p for p in parts if p)
+                    anon_new_rfp = await _get_all_chunks_anonymized_by_category(
+                        db, project_id, DocumentCategory.NEW_RFP
+                    )
+                    anon_old_response = ""
+                else:
+                    # Load ALL source content (old_response + inspiration) — not just old_response
+                    anon_old_response_part, anon_inspiration_part, anon_new_rfp = await asyncio.gather(
+                        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.OLD_RESPONSE),
+                        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.INSPIRATION),
+                        _get_all_chunks_anonymized_by_category(db, project_id, DocumentCategory.NEW_RFP),
+                    )
+                    anon_old_response = "\n\n".join(p for p in [anon_old_response_part, anon_inspiration_part] if p)
+                    anon_context = None
+
+            # Vector search to find the most relevant chunks
+            _update("searching", 25, "Recherche de contenu pertinent...")
+            title_lower = doc_title.lower()
+            conformity_keywords = ["rgpd", "conformit", "gdpr", "protection des données",
+                                   "questionnaire", "grille", "annexe", "déclaration",
+                                   "engagement", "certification", "audit", "sécurité",
+                                   "environnement", "rse", "social", "qualité"]
+            is_conformity_doc = any(kw in title_lower for kw in conformity_keywords)
+
+            from ..tasks.chapter_tasks import _hybrid_search
+
+            if is_conformity_doc:
+                search_queries = _extract_excel_search_queries(excel_structure, doc_title)
+                search_queries = search_queries[:8]
+                seen_chunk_ids: set[str] = set()
+                all_chunks: list[dict] = []
+                for sq in search_queries:
+                    chunks = _hybrid_search(str(project_id), sq, top_k=10)
+                    for c in chunks:
+                        cid = c.get("chunk_id", c.get("content", "")[:80])
+                        if cid not in seen_chunk_ids:
+                            seen_chunk_ids.add(cid)
+                            all_chunks.append(c)
+                all_chunks.sort(key=lambda c: c.get("score", 0), reverse=True)
+                relevant_chunks = all_chunks[:40]
+            else:
+                search_query = (
+                    f"prix unitaire tarif {doc_title} BPU bordereau montant "
+                    "coût forfait taux journalier"
+                )
+                relevant_chunks = _hybrid_search(str(project_id), search_query, top_k=25)
+
+            relevant_context = "\n\n".join([
+                f"[{c['document_name']} p.{c['page_number']}] {c['content']}"
+                for c in relevant_chunks
+            ])
+
+            logger.info(
+                "Excel fill RAG: vector search returned %d unique chunks, relevant_context=%d chars",
+                len(relevant_chunks), len(relevant_context),
+            )
+
+            # Build context: vector search results FIRST, then full document content
+            base_content = anon_context if anon_context is not None else anon_old_response
+            if relevant_context:
+                label = "EXTRAITS PERTINENTS" if is_conformity_doc else "EXTRAITS PERTINENTS SUR LES PRIX"
+                old_response_with_context = (
+                    f"=== {label} (PRIORITÉ — CONTIENT LES DONNÉES CHIFFRÉES) ===\n{relevant_context}\n\n"
+                    f"=== CONTENU COMPLET DES DOCUMENTS SOURCE ===\n{base_content}"
+                )
+            else:
+                old_response_with_context = base_content
 
         # ── Phase 3: AI generation (NO DB held) ──
         _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")
@@ -5738,6 +5792,7 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
             new_rfp_content=anon_new_rfp,
             old_response_content=old_response_with_context,
             custom_notes=doc_custom_notes,
+            context_mode=proj_context_mode,
         )
         logger.info("fill-excel %s: AI returned %d cell entries", doc_title, len(fill_data))
 
