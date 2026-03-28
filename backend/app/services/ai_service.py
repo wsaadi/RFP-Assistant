@@ -1471,8 +1471,9 @@ Quand tu trouves un chiffre, utilise-le TEL QUEL: "16,47%" → écris "16,47%", 
 N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée est vraiment introuvable."""
 
         # Build user prompt with full context
-        # In full context mode, allow much more content (Mistral 128K tokens ≈ 400K chars).
-        # Reserve ~60K for Excel structure + new RFP + system prompt + output.
+        # Mistral Large context window = 128K tokens ≈ 512K chars.
+        # We must reserve space for: system prompt (~2K tokens), output (max 32K tokens).
+        # Safe input budget: ~90K tokens ≈ 360K chars total for user prompt.
         if context_mode == "full":
             source_limit = 300_000   # ~75K tokens — full documents
             excel_limit = 60_000
@@ -1520,6 +1521,35 @@ N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée es
                 "Chaque cellule vide doit être remplie avec l'information correspondante de l'ancienne réponse. "
                 "Retourne UNIQUEMENT le JSON."
             )
+
+        # ── Safety: check total prompt size vs model context limit ──
+        total_prompt_chars = len(system_prompt) + len(user_prompt)
+        total_prompt_tokens_est = total_prompt_chars // 4
+        # Mistral Large: 128K context. Reserve 32K for output → 96K max input.
+        max_input_tokens = 96_000
+        if total_prompt_tokens_est > max_input_tokens:
+            # Truncate source content to fit within context window
+            overflow = total_prompt_tokens_est - max_input_tokens
+            overflow_chars = overflow * 4
+            safe_source_limit = max(10_000, source_limit - overflow_chars)
+            logger.warning(
+                "Excel fill: prompt too large (~%dK tokens), truncating source from %d to %d chars",
+                total_prompt_tokens_est // 1000, source_limit, safe_source_limit,
+            )
+            # Rebuild user prompt with reduced source
+            parts = []
+            if old_response_content:
+                header = (
+                    "⚠️ DOCUMENTS DE RÉFÉRENCE (tronqués pour respecter la limite de contexte):\n\n"
+                    if context_mode == "full" else
+                    "⚠️ DOCUMENTS DE RÉFÉRENCE:\n\n"
+                )
+                parts.append(header + old_response_content[:safe_source_limit])
+            parts.append(f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure[:excel_limit]}")
+            parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:rfp_limit]}")
+            if custom_notes:
+                parts.append(f"⚠️ NOTES ET INSTRUCTIONS SPÉCIFIQUES DE L'UTILISATEUR:\n{custom_notes}")
+            user_prompt = "\n\n---\n\n".join(parts)
 
         # ── Iterative fill-remaining ──
         # The LLM should ideally fill everything in 1 pass, but may need
