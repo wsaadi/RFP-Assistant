@@ -1457,7 +1457,10 @@ Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
   ...
 ]
 
-IMPORTANT: Tu DOIS générer une entrée pour CHAQUE cellule vide qui attend une réponse du candidat.
+⚠️ CRITIQUE — GÉNÈRE TOUT EN UNE SEULE FOIS:
+Tu DOIS générer une entrée pour CHAQUE cellule vide de TOUS les onglets en UN SEUL tableau JSON.
+Ne t'arrête PAS après un seul onglet ou une seule section. Parcours TOUS les onglets, TOUTES les lignes.
+Le JSON doit contenir TOUTES les cellules à remplir (typiquement 100-500 entrées).
 Analyse bien la structure de l'Excel pour identifier les colonnes de réponse.
 Utilise les coordonnées Excel exactes (A1, B2, etc.) correspondant à la structure fournie.
 
@@ -1505,11 +1508,10 @@ N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée es
         user_prompt = "\n\n---\n\n".join(parts)
         if is_conformity and not is_pricing:
             user_prompt += (
-                f"\n\n⚠️ RAPPEL IMPORTANT: Génère le JSON de remplissage pour le document '{document_title}'. "
-                "Ce document est un questionnaire/grille de conformité. "
-                "Tu DOIS remplir TOUTES les cellules vides qui attendent une réponse (colonnes Réponse, Commentaire, Détail, etc.). "
-                "Pour chaque question/exigence, fournis une réponse appropriée (Oui/Non/Partiel + commentaire si nécessaire). "
-                "Retourne UNIQUEMENT le JSON."
+                f"\n\n⚠️ RAPPEL IMPORTANT: Génère le JSON COMPLET pour '{document_title}'. "
+                "Parcours TOUS les onglets et TOUTES les sections du questionnaire. "
+                "Génère le JSON en un seul bloc contenant TOUTES les cellules (Réponse + Commentaire pour chaque question). "
+                "Ne t'arrête pas après une section — continue jusqu'à la fin du document."
             )
         else:
             user_prompt += (
@@ -1520,13 +1522,11 @@ N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée es
             )
 
         # ── Iterative fill-remaining ──
-        # Large questionnaires (RSE, RGPD) exceed max_tokens in a single call.
-        # Strategy: parse whatever the LLM produces (even truncated JSON is
-        # repairable), then ask again with "fill ONLY the remaining sections".
-        # No blind continuation — each pass gets full Excel context so the LLM
-        # knows exactly what's left to fill.
+        # The LLM should ideally fill everything in 1 pass, but may need
+        # a second pass for large questionnaires (truncated by max_tokens).
+        # Max 3 passes to avoid wasting tokens re-sending the full context.
         all_data: List[Dict] = []
-        max_passes = 5
+        max_passes = 3
 
         for pass_num in range(max_passes):
             if pass_num == 0:
