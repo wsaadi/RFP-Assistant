@@ -1661,6 +1661,183 @@ N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée es
                      document_title, len(all_data), pass_num + 1)
         return all_data
 
+    async def generate_excel_fill_data_parallel(
+        self,
+        document_title: str,
+        sheets: dict[str, str],
+        new_rfp_content: str,
+        old_response_content: str = "",
+        custom_notes: str = "",
+        context_mode: str = "rag",
+        progress_callback=None,
+    ) -> List[Dict]:
+        """Generate fill data for an Excel with parallel per-sheet LLM calls.
+
+        Instead of sending the entire Excel structure in one call (where the LLM
+        stops after one section), we send one call per sheet in parallel.
+        Each call gets the full document context + only that sheet's structure,
+        so the LLM can focus and complete it in a single pass.
+
+        This turns 3-5 sequential passes (~7min) into 1 parallel batch (~2min).
+        """
+        if not sheets:
+            raise ValueError("No Excel sheets to fill")
+
+        # Filter out sheets with very little content (likely empty/structural)
+        fillable_sheets = {
+            name: struct for name, struct in sheets.items()
+            if struct.count("(vide)") >= 2  # At least 2 empty cells to fill
+        }
+        if not fillable_sheets:
+            fillable_sheets = sheets  # Fallback: try all sheets
+
+        logger.info(
+            "Excel fill parallel: %d fillable sheets out of %d total for '%s'",
+            len(fillable_sheets), len(sheets), document_title,
+        )
+
+        # Determine limits based on context mode
+        if context_mode == "full":
+            source_limit = 300_000
+            rfp_limit = 40_000
+        else:
+            source_limit = 50_000
+            rfp_limit = 20_000
+
+        # Detect document type
+        title_lower = document_title.lower()
+        is_conformity = any(kw in title_lower for kw in [
+            "rgpd", "conformit", "gdpr", "protection des données",
+            "questionnaire", "grille", "annexe", "déclaration",
+            "engagement", "certification", "audit", "sécurité",
+            "environnement", "rse", "social", "qualité",
+        ])
+        is_pricing = any(kw in title_lower for kw in [
+            "bpu", "bordereau", "dqe", "dpgf", "prix", "tarif", "chiffrage",
+        ])
+
+        if is_conformity and not is_pricing:
+            fill_rules = """## EXTRACTION DES DONNÉES CHIFFRÉES:
+- Les documents de référence CONTIENNENT des chiffres, taux, pourcentages et KPIs. Tu DOIS les chercher activement.
+- Les données structurées apparaissent souvent sous la forme "[TABLEAU]" suivies de lignes avec des séparateurs "|".
+- Quand tu trouves un chiffre dans les documents, utilise-le TEL QUEL (ex: 16,47%, pas 16%, pas 16.5%).
+- NE JAMAIS inventer un chiffre. Si tu ne trouves vraiment PAS la donnée, écris "[A VÉRIFIER]".
+
+## Règles de remplissage:
+1. Tu DOIS remplir TOUTES les cellules vides de cet onglet
+2. Pour les colonnes "Réponse", "Conformité", "Conforme" → "Oui", "Non", "Partiel" ou "N/A"
+3. Pour les colonnes "Commentaire", "Détail", "Description" → réponse détaillée basée sur les documents
+4. Pour les KPIs (turn over, formation, handicap, index égalité, etc.) → cherche ACTIVEMENT dans les documents
+5. Si tu ne trouves pas l'info: textes → rédige professionnellement ; chiffres → "[A VÉRIFIER]"
+6. Ne modifie PAS les cellules d'en-tête ou de structure
+7. Ne remplis QUE les cellules marquées "(vide)" """
+        else:
+            fill_rules = """## Règles STRICTES:
+1. Reprends les informations de l'ancienne réponse quand elles existent
+2. Si une info n'existe pas, mets "[A COMPLÉTER]"
+3. Ne modifie PAS les cellules d'en-tête ou de structure
+4. Pour les prix, utilise des NOMBRES: 150.00, pas "150,00 €" """
+
+        # Build one coroutine per sheet
+        async def _fill_one_sheet(sheet_name: str, sheet_structure: str) -> List[Dict]:
+            system_prompt = f"""Tu es un expert en réponse aux appels d'offres.
+Tu remplis l'onglet **"{sheet_name}"** du document **"{document_title}"**.
+
+{fill_rules}
+
+## Format de sortie OBLIGATOIRE:
+Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
+[
+  {{"sheet": "{sheet_name}", "cell": "B5", "value": "Oui"}},
+  {{"sheet": "{sheet_name}", "cell": "C5", "value": "Description..."}},
+  ...
+]
+
+Tu DOIS remplir TOUTES les cellules vides de cet onglet en UN SEUL JSON.
+Utilise les coordonnées Excel exactes de la structure fournie."""
+
+            parts = []
+            if old_response_content:
+                if context_mode == "full":
+                    parts.append(
+                        f"DOCUMENTS DE RÉFÉRENCE COMPLETS:\n"
+                        f"{old_response_content[:source_limit]}"
+                    )
+                else:
+                    parts.append(
+                        f"DOCUMENTS DE RÉFÉRENCE:\n"
+                        f"{old_response_content[:source_limit]}"
+                    )
+            parts.append(f"STRUCTURE DE L'ONGLET À REMPLIR:\n{sheet_structure}")
+            parts.append(f"CONTENU DE L'APPEL D'OFFRES:\n{new_rfp_content[:rfp_limit]}")
+            if custom_notes:
+                parts.append(f"NOTES DE L'UTILISATEUR:\n{custom_notes}")
+
+            user_prompt = "\n\n---\n\n".join(parts)
+
+            # Safety: check context size
+            total_chars = len(system_prompt) + len(user_prompt)
+            if total_chars // 4 > 96_000:
+                # Truncate source to fit
+                excess = (total_chars // 4 - 96_000) * 4
+                safe_limit = max(10_000, source_limit - excess)
+                parts[0] = f"DOCUMENTS DE RÉFÉRENCE:\n{old_response_content[:safe_limit]}"
+                user_prompt = "\n\n---\n\n".join(parts)
+
+            raw, finish_reason = await self._generate_with_finish_reason(
+                system_prompt, user_prompt, temperature=0.1, max_tokens=16000,
+            )
+
+            data = _parse_json_array(raw)
+            if data:
+                # Ensure all entries have the correct sheet name
+                for entry in data:
+                    entry["sheet"] = sheet_name
+                logger.info(
+                    "Excel fill sheet '%s': %d entries (finish=%s)",
+                    sheet_name, len(data), finish_reason,
+                )
+                return data
+            else:
+                logger.warning(
+                    "Excel fill sheet '%s': JSON parse failed (raw length: %d)",
+                    sheet_name, len(raw),
+                )
+                return []
+
+        # Launch all sheet fills in parallel
+        sheet_names = list(fillable_sheets.keys())
+        tasks = [
+            _fill_one_sheet(name, fillable_sheets[name])
+            for name in sheet_names
+        ]
+
+        if progress_callback:
+            progress_callback("generating", 35, f"Génération IA en parallèle ({len(tasks)} onglets)...")
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Merge results
+        all_data: List[Dict] = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error("Excel fill sheet '%s' failed: %s", sheet_names[i], result)
+                continue
+            if result:
+                all_data.extend(result)
+
+        if not all_data:
+            raise ValueError(
+                f"L'IA n'a pas retourné de JSON valide pour '{document_title}'. "
+                "Veuillez réessayer."
+            )
+
+        logger.info(
+            "Excel fill parallel completed for '%s': %d total entries from %d sheets",
+            document_title, len(all_data), len(sheet_names),
+        )
+        return all_data
+
     @staticmethod
     def _summarize_filled_cells(entries: List[Dict]) -> str:
         """Summarize which cells have been filled, grouped by sheet."""
