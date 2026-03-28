@@ -1375,6 +1375,7 @@ Utilise les informations de l'AO et de l'ancienne réponse pour pré-remplir un 
         new_rfp_content: str,
         old_response_content: str = "",
         custom_notes: str = "",
+        context_mode: str = "rag",
     ) -> List[Dict]:
         """Generate structured JSON data to fill an Excel document from old response data.
 
@@ -1467,16 +1468,35 @@ Quand tu trouves un chiffre, utilise-le TEL QUEL: "16,47%" → écris "16,47%", 
 N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée est vraiment introuvable."""
 
         # Build user prompt with full context
+        # In full context mode, allow much more content (Mistral 128K tokens ≈ 400K chars).
+        # Reserve ~60K for Excel structure + new RFP + system prompt + output.
+        if context_mode == "full":
+            source_limit = 300_000   # ~75K tokens — full documents
+            excel_limit = 60_000
+            rfp_limit = 40_000
+        else:
+            source_limit = 50_000    # ~12K tokens — RAG extracts
+            excel_limit = 40_000
+            rfp_limit = 20_000
+
         parts = []
         if old_response_content:
-            parts.append(
-                f"⚠️ DOCUMENTS DE RÉFÉRENCE (contiennent les données chiffrées à utiliser):\n"
-                "Cherche activement les chiffres, taux, pourcentages et KPIs dans ces extraits. "
-                "Les blocs [TABLEAU] contiennent des données structurées avec des valeurs exactes.\n\n"
-                f"{old_response_content[:50000]}"
-            )
-        parts.append(f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure[:40000]}")
-        parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:20000]}")
+            if context_mode == "full":
+                parts.append(
+                    f"⚠️ DOCUMENTS DE RÉFÉRENCE COMPLETS (contenu intégral, non tronqué):\n"
+                    "Tu as accès à l'INTÉGRALITÉ des documents. Toutes les données chiffrées, "
+                    "tableaux, KPIs et informations s'y trouvent. Cherche activement.\n\n"
+                    f"{old_response_content[:source_limit]}"
+                )
+            else:
+                parts.append(
+                    f"⚠️ DOCUMENTS DE RÉFÉRENCE (contiennent les données chiffrées à utiliser):\n"
+                    "Cherche activement les chiffres, taux, pourcentages et KPIs dans ces extraits. "
+                    "Les blocs [TABLEAU] contiennent des données structurées avec des valeurs exactes.\n\n"
+                    f"{old_response_content[:source_limit]}"
+                )
+        parts.append(f"STRUCTURE DE L'EXCEL À REMPLIR:\n{excel_structure[:excel_limit]}")
+        parts.append(f"CONTENU DE L'APPEL D'OFFRES (pour contexte):\n{new_rfp_content[:rfp_limit]}")
         if custom_notes:
             parts.append(
                 f"⚠️ NOTES ET INSTRUCTIONS SPÉCIFIQUES DE L'UTILISATEUR (À PRENDRE EN COMPTE EN PRIORITÉ):\n{custom_notes}"
