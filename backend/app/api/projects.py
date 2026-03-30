@@ -960,6 +960,53 @@ async def _get_image_analyses_by_category(
     return "\n\n".join(parts)
 
 
+async def _get_image_analyses_by_document_ids(
+    db: AsyncSession, project_id: uuid.UUID, document_ids: list[str]
+) -> str:
+    """Get anonymized image analysis descriptions for specific documents."""
+    from ..models.document import DocumentImage, ImageAnalysisStatus
+
+    doc_uuids = [uuid.UUID(did) for did in document_ids if did]
+    if not doc_uuids:
+        return ""
+
+    result = await db.execute(
+        select(DocumentImage, Document.original_filename)
+        .join(Document, Document.id == DocumentImage.document_id)
+        .where(DocumentImage.document_id.in_(doc_uuids))
+        .where(DocumentImage.analysis_status == ImageAnalysisStatus.COMPLETED.value)
+        .where(DocumentImage.image_type.notin_(["logo", "icone"]))
+        .order_by(Document.original_filename, DocumentImage.page_number)
+    )
+    rows = result.all()
+    if not rows:
+        return ""
+
+    parts = []
+    current_doc = None
+    for img, doc_name in rows:
+        desc = (img.anonymized_description or "").strip()
+        ocr = (img.anonymized_ocr_text or img.ocr_text or "").strip()
+        key_info = img.key_information or []
+        if not desc and not ocr and not key_info:
+            continue
+        if doc_name != current_doc:
+            current_doc = doc_name
+            parts.append(f"\n=== IMAGES DU DOCUMENT: {doc_name} ===")
+        img_parts = []
+        img_type = img.image_type or img.image_category or "autre"
+        img_parts.append(f"[Image page {img.page_number} — type: {img_type}]")
+        if desc:
+            img_parts.append(f"  Description: {desc}")
+        if key_info:
+            img_parts.append(f"  Informations clés: {', '.join(str(k) for k in key_info)}")
+        if ocr:
+            img_parts.append(f"  Texte extrait: {ocr[:500]}")
+        parts.append("\n".join(img_parts))
+
+    return "\n\n".join(parts)
+
+
 async def _get_full_text_anonymized_by_category(
     db: AsyncSession, project_id: uuid.UUID, category: DocumentCategory,
 ) -> str:
@@ -5694,6 +5741,12 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                         parts.append(await _get_chunks_anonymized_by_document_ids(
                             db, project_id, doc_source_ids
                         ))
+                        # Also load image analyses for selected documents
+                        img_docs = await _get_image_analyses_by_document_ids(
+                            db, project_id, doc_source_ids
+                        )
+                        if img_docs:
+                            parts.append(f"--- CONTENU EXTRAIT DES IMAGES (documents sélectionnés) ---\n{img_docs}")
                     if doc_include_generated:
                         parts.append(await _get_generated_chapters_context(db, project_id))
                     source_content = "\n\n".join(p for p in parts if p)
