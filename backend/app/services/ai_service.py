@@ -135,11 +135,13 @@ def _build_identity_block(company_name: str = "", client_name: str = "") -> str:
 
     lines.append("")
     lines.append("## INTERDICTIONS ABSOLUES — ANTI-HALLUCINATION")
+    lines.append("- ⚠️ RÈGLE FONDAMENTALE : tu dois te baser EXCLUSIVEMENT sur les documents fournis ci-dessous. N'utilise JAMAIS tes connaissances générales, ton entraînement, ou des informations issues du web. Si une info n'est pas dans les documents fournis, elle n'existe pas pour toi.")
     lines.append("- Tu ne dois JAMAIS inventer, fabriquer ou supposer des informations factuelles qui ne figurent pas dans les documents fournis.")
     lines.append("- N'invente JAMAIS de filiales, entités juridiques, numéros SIREN, capitaux sociaux, dates de création, formes juridiques ou tout autre détail administratif.")
     lines.append("- N'invente JAMAIS de chiffres, statistiques, pourcentages de performance, montants financiers ou résultats de projets.")
     lines.append("- N'invente JAMAIS de noms de produits, solutions, plateformes ou outils sauf s'ils sont explicitement mentionnés dans les documents fournis.")
     lines.append("- N'attribue JAMAIS les produits ou compétences du soumissionnaire au client, ni inversement.")
+    lines.append("- N'affirme JAMAIS de faits sur l'entreprise (certifications, partenariats, implantations, clients, projets) sauf s'ils sont EXPLICITEMENT mentionnés dans les documents. Les connaissances issues de ton entraînement sur l'entreprise sont potentiellement OBSOLÈTES ou INCORRECTES.")
     lines.append("- Si une information factuelle te manque (nom de filiale, chiffre, référence), utilise un marqueur explicite comme « [À COMPLÉTER] » ou « [INFORMATION À FOURNIR PAR L'ÉQUIPE] » plutôt que d'inventer.")
     lines.append("- Quand tu mentionnes des capacités ou références, base-toi UNIQUEMENT sur les documents fournis (ancienne réponse, documents d'inspiration, contexte). Si aucun document ne mentionne un fait, ne l'affirme pas.")
     lines.append("- POUR LES CHIFFRES ET POURCENTAGES : ne cite JAMAIS un chiffre qui ne figure pas mot pour mot dans les documents. Un chiffre « vraisemblable » ou « typique du secteur » est une hallucination. Utilise [À COMPLÉTER : chiffre non trouvé dans les documents] si le chiffre exact n'est pas disponible.")
@@ -1683,13 +1685,68 @@ N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée es
         if not sheets:
             raise ValueError("No Excel sheets to fill")
 
-        # Filter out sheets with very little content (likely empty/structural)
-        fillable_sheets = {
-            name: struct for name, struct in sheets.items()
-            if struct.count("(vide)") >= 2  # At least 2 empty cells to fill
-        }
+        # ── Triage: ask LLM which sheets to fill ──
+        # The Excel may have instruction sheets, sheets for different company
+        # sizes, or structural-only tabs. A quick LLM call analyzes the full
+        # structure and determines which sheets are relevant.
+        if progress_callback:
+            progress_callback("analyzing", 25, "Analyse de la structure Excel...")
+
+        all_structure = "\n\n".join(
+            struct[:3000] for struct in sheets.values()  # Cap each sheet preview
+        )
+        # Include a summary of source docs to help the LLM determine company profile
+        company_context = old_response_content[:5000] if old_response_content else ""
+
+        triage_prompt = f"""Analyse la structure de ce fichier Excel : **{document_title}**
+
+STRUCTURE DE TOUS LES ONGLETS:
+{all_structure[:15000]}
+
+PROFIL DE L'ENTREPRISE (extrait des documents source):
+{company_context}
+
+QUESTION: Parmi les onglets ci-dessus, lesquels doivent être remplis par le candidat ?
+- Exclus les onglets d'instructions, de mode d'emploi, ou de présentation
+- Exclus les onglets qui ne correspondent pas au profil de l'entreprise (taille, secteur)
+- Si un onglet indique des critères de taille (ex: "PME", "ETI", ">500 salariés"), sélectionne celui qui correspond au profil
+
+Réponds UNIQUEMENT avec un JSON: {{"sheets": ["Nom onglet 1", "Nom onglet 2", ...], "reason": "explication courte"}}"""
+
+        try:
+            triage_raw = await self.generate(
+                "Tu es un analyste de documents Excel. Réponds uniquement en JSON.",
+                triage_prompt,
+                temperature=0.0,
+                max_tokens=1000,
+            )
+            triage_data = _parse_json_object(triage_raw)
+            if triage_data and "sheets" in triage_data:
+                selected_names = set(triage_data["sheets"])
+                reason = triage_data.get("reason", "")
+                fillable_sheets = {
+                    name: struct for name, struct in sheets.items()
+                    if name in selected_names
+                }
+                logger.info(
+                    "Excel fill triage: selected %d/%d sheets: %s (reason: %s)",
+                    len(fillable_sheets), len(sheets), list(fillable_sheets.keys()), reason,
+                )
+            else:
+                fillable_sheets = {
+                    name: struct for name, struct in sheets.items()
+                    if struct.count("(vide)") >= 2
+                } or sheets
+                logger.warning("Excel fill triage: JSON parse failed, using heuristic filter")
+        except Exception as e:
+            logger.warning("Excel fill triage failed (%s), using all sheets", e)
+            fillable_sheets = {
+                name: struct for name, struct in sheets.items()
+                if struct.count("(vide)") >= 2
+            } or sheets
+
         if not fillable_sheets:
-            fillable_sheets = sheets  # Fallback: try all sheets
+            fillable_sheets = sheets  # Safety fallback
 
         logger.info(
             "Excel fill parallel: %d fillable sheets out of %d total for '%s'",
@@ -1739,11 +1796,26 @@ N'invente JAMAIS un chiffre. Utilise "[A VÉRIFIER]" UNIQUEMENT si la donnée es
 4. Pour les prix, utilise des NOMBRES: 150.00, pas "150,00 €" """
 
         # Build one coroutine per sheet
+        # Build a brief overview of other sheets (for context — e.g. instruction sheets)
+        # Each per-sheet call should know about the overall document structure
+        other_sheets_overview = ""
+        for name, struct in sheets.items():
+            if name not in fillable_sheets:
+                # Include non-fillable sheets (instructions, etc.) as brief context
+                other_sheets_overview += f"\n--- Onglet '{name}' (NON à remplir — pour contexte) ---\n"
+                other_sheets_overview += struct[:2000] + "\n"
+
         async def _fill_one_sheet(sheet_name: str, sheet_structure: str) -> List[Dict]:
             system_prompt = f"""Tu es un expert en réponse aux appels d'offres.
 Tu remplis l'onglet **"{sheet_name}"** du document **"{document_title}"**.
 
 {fill_rules}
+
+## Consignes importantes:
+- Remplis UNIQUEMENT les cellules qui attendent une réponse du candidat.
+- Respecte les instructions du document (si un onglet d'instructions existe, il est fourni en contexte).
+- Adapte tes réponses au profil de l'entreprise tel qu'il ressort des documents de référence.
+- Base-toi EXCLUSIVEMENT sur les documents de référence fournis. N'utilise PAS tes connaissances générales.
 
 ## Format de sortie OBLIGATOIRE:
 Retourne UNIQUEMENT un tableau JSON, sans texte avant ni après:
@@ -1760,7 +1832,7 @@ Utilise les coordonnées Excel exactes de la structure fournie."""
             if old_response_content:
                 if context_mode == "full":
                     parts.append(
-                        f"DOCUMENTS DE RÉFÉRENCE COMPLETS:\n"
+                        f"DOCUMENTS DE RÉFÉRENCE COMPLETS (base-toi UNIQUEMENT sur ces documents):\n"
                         f"{old_response_content[:source_limit]}"
                     )
                 else:
@@ -1769,6 +1841,8 @@ Utilise les coordonnées Excel exactes de la structure fournie."""
                         f"{old_response_content[:source_limit]}"
                     )
             parts.append(f"STRUCTURE DE L'ONGLET À REMPLIR:\n{sheet_structure}")
+            if other_sheets_overview:
+                parts.append(f"CONTEXTE — AUTRES ONGLETS DU DOCUMENT (instructions, etc.):\n{other_sheets_overview[:5000]}")
             parts.append(f"CONTENU DE L'APPEL D'OFFRES:\n{new_rfp_content[:rfp_limit]}")
             if custom_notes:
                 parts.append(f"NOTES DE L'UTILISATEUR:\n{custom_notes}")
