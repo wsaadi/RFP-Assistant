@@ -5443,6 +5443,38 @@ def _read_excel_structure(file_path: str) -> str:
     return "\n".join(parts)
 
 
+def _read_excel_structure_by_sheet(file_path: str) -> dict[str, str]:
+    """Read an Excel file and return per-sheet textual representations.
+
+    Returns a dict: { sheet_name: structure_text }.
+    Skips sheets that have no data rows (empty sheets).
+    """
+    from openpyxl import load_workbook
+    file_path = _ensure_xlsx_path(file_path)
+    wb = load_workbook(file_path, data_only=True)
+    sheets: dict[str, str] = {}
+    for sheet_name in wb.sheetnames:
+        ws = wb[sheet_name]
+        rows_text = []
+        for row in ws.iter_rows(min_row=1, max_row=ws.max_row, max_col=ws.max_column):
+            row_cells = []
+            has_value = False
+            for cell in row:
+                coord = cell.coordinate
+                val = cell.value
+                if val is not None:
+                    has_value = True
+                    row_cells.append(f"{coord}={val}")
+                else:
+                    row_cells.append(f"{coord}=(vide)")
+            if has_value:
+                rows_text.append(" | ".join(row_cells))
+        if rows_text:
+            sheets[sheet_name] = f"=== Onglet: {sheet_name} ===\n" + "\n".join(rows_text)
+    wb.close()
+    return sheets
+
+
 def _fill_excel_with_data(file_path: str, fill_data: list) -> bytes:
     """Open an Excel file, fill cells from AI-generated data, return modified bytes."""
     from openpyxl import load_workbook
@@ -5630,6 +5662,8 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
 
         _update("reading", 10, "Lecture de la structure Excel...")
         excel_structure = _read_excel_structure(excel_file_path)
+        # Per-sheet structures for parallel fill (full context mode)
+        excel_sheets = _read_excel_structure_by_sheet(excel_file_path) if proj_context_mode == "full" else {}
 
         # ── Phase 2: Load context (short DB session) ──
         if proj_context_mode == "full":
@@ -5781,19 +5815,36 @@ async def _run_fill_excel(project_id: uuid.UUID, doc_id: uuid.UUID, workspace_id
                 old_response_with_context = base_content
 
         # ── Phase 3: AI generation (NO DB held) ──
-        _update("generating", 30, f"Generation IA du contenu pour {doc_title}...")
         logger.info(
             "fill-excel %s: excel_structure=%d chars, old_response=%d chars, new_rfp=%d chars",
             doc_title, len(excel_structure), len(old_response_with_context), len(anon_new_rfp),
         )
-        fill_data = await ai_service.generate_excel_fill_data(
-            document_title=doc_title,
-            excel_structure=excel_structure,
-            new_rfp_content=anon_new_rfp,
-            old_response_content=old_response_with_context,
-            custom_notes=doc_custom_notes,
-            context_mode=proj_context_mode,
-        )
+
+        if proj_context_mode == "full" and len(excel_sheets) > 1:
+            # PARALLEL MODE: one LLM call per sheet, all in parallel
+            _update("generating", 30,
+                    f"Génération IA parallèle ({len(excel_sheets)} onglets) pour {doc_title}...")
+            fill_data = await ai_service.generate_excel_fill_data_parallel(
+                document_title=doc_title,
+                sheets=excel_sheets,
+                new_rfp_content=anon_new_rfp,
+                old_response_content=old_response_with_context,
+                custom_notes=doc_custom_notes,
+                context_mode=proj_context_mode,
+                progress_callback=_update,
+            )
+        else:
+            # SEQUENTIAL MODE: single call with full structure (RAG or single-sheet)
+            _update("generating", 30, f"Génération IA du contenu pour {doc_title}...")
+            fill_data = await ai_service.generate_excel_fill_data(
+                document_title=doc_title,
+                excel_structure=excel_structure,
+                new_rfp_content=anon_new_rfp,
+                old_response_content=old_response_with_context,
+                custom_notes=doc_custom_notes,
+                context_mode=proj_context_mode,
+            )
+
         logger.info("fill-excel %s: AI returned %d cell entries", doc_title, len(fill_data))
 
         # Log AI usage
